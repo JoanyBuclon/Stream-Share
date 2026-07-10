@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Stream-Share · signaling test</title>
+    <style>
+      body { font: 14px/1.5 system-ui, sans-serif; margin: 0; background: #0e0e10; color: #eee; }
+      main { max-width: 900px; margin: 0 auto; padding: 24px; }
+      h1 { font-size: 18px; }
+      .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
+      button { background: #2a2a30; color: #eee; border: 1px solid #444; border-radius: 6px; padding: 8px 12px; cursor: pointer; }
+      button:disabled { opacity: 0.4; cursor: default; }
+      input { background: #1a1a1e; color: #eee; border: 1px solid #444; border-radius: 6px; padding: 8px; }
+      video { width: 100%; background: #000; border-radius: 8px; margin-top: 8px; }
+      code#code { font-size: 22px; letter-spacing: 2px; color: #7fd6a0; }
+      #log { white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 12px; color: #9aa; background: #141418; border-radius: 8px; padding: 12px; height: 160px; overflow: auto; }
+      .card { border: 1px solid #333; border-radius: 10px; padding: 16px; margin: 12px 0; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Stream-Share — test signaling 1↔1</h1>
+
+      <div class="card">
+        <strong>Host</strong>
+        <div class="row">
+          <button id="btnCreate">Créer un salon</button>
+          <span>code : <code id="code">—</code></span>
+        </div>
+        <div class="row">
+          <button id="btnShare" disabled>Partager l'écran</button>
+        </div>
+        <video id="local" autoplay muted playsinline></video>
+      </div>
+
+      <div class="card">
+        <strong>Viewer</strong>
+        <div class="row">
+          <input id="joinCode" placeholder="ex. 7K2-QP9" />
+          <input id="pseudo" placeholder="pseudo" value="tester" />
+          <button id="btnJoin">Rejoindre</button>
+        </div>
+        <video id="remote" autoplay playsinline></video>
+      </div>
+
+      <div id="log"></div>
+    </main>
+
+    <script type="module">
+      const $ = (id) => document.getElementById(id);
+      const logEl = $('log');
+      const log = (...a) => {
+        logEl.textContent += a.join(' ') + '\n';
+        logEl.scrollTop = logEl.scrollHeight;
+      };
+
+      const token = localStorage.getItem('ss-token') || (Math.random().toString(36).slice(2) + Date.now().toString(36));
+      localStorage.setItem('ss-token', token);
+
+      let iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
+      let localStream = null;
+      const peers = new Map(); // peerId -> { pc, remoteSet, pending: [] }
+
+      const ws = new WebSocket(`ws://${location.host}`);
+      const sendMsg = (m) => ws.readyState === 1 && ws.send(JSON.stringify(m));
+      ws.onopen = () => log('ws connecté');
+      ws.onclose = () => log('ws fermé');
+
+      function makePeer(peerId, { onTrack } = {}) {
+        const pc = new RTCPeerConnection({ iceServers });
+        const entry = { pc, remoteSet: false, pending: [] };
+        peers.set(peerId, entry);
+        pc.onicecandidate = (e) => e.candidate && sendMsg({ type: 'signal', to: peerId, data: { ice: e.candidate } });
+        pc.onconnectionstatechange = () => log(`[${peerId}] ${pc.connectionState}`);
+        if (onTrack) pc.ontrack = onTrack;
+        return entry;
+      }
+
+      async function makeOffer(peerId) {
+        if (!localStream) return log('partage l\'écran avant qu\'un viewer arrive');
+        const { pc } = makePeer(peerId);
+        localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
+        await pc.setLocalDescription(await pc.createOffer());
+        sendMsg({ type: 'signal', to: peerId, data: { sdp: pc.localDescription } });
+        log(`offre envoyée à ${peerId}`);
+      }
+
+      async function onSignal(from, data) {
+        let entry = peers.get(from);
+        if (data.sdp) {
+          if (!entry) {
+            entry = makePeer(from, { onTrack: (e) => ($('remote').srcObject = e.streams[0]) });
+          }
+          await entry.pc.setRemoteDescription(data.sdp);
+          entry.remoteSet = true;
+          for (const c of entry.pending.splice(0)) await entry.pc.addIceCandidate(c);
+          if (data.sdp.type === 'offer') {
+            await entry.pc.setLocalDescription(await entry.pc.createAnswer());
+            sendMsg({ type: 'signal', to: from, data: { sdp: entry.pc.localDescription } });
+            log(`réponse envoyée à ${from}`);
+          }
+        } else if (data.ice) {
+          if (entry && entry.remoteSet) await entry.pc.addIceCandidate(data.ice);
+          else if (entry) entry.pending.push(data.ice);
+        }
+      }
+
+      ws.onmessage = async (e) => {
+        const m = JSON.parse(e.data);
+        switch (m.type) {
+          case 'hello': log('peerId =', m.peerId); break;
+          case 'created':
+            iceServers = m.iceServers || iceServers;
+            $('code').textContent = m.display;
+            $('btnShare').disabled = false;
+            log('salon créé :', m.display);
+            break;
+          case 'joined':
+            iceServers = m.iceServers || iceServers;
+            log('rejoint, host =', m.hostId, '(en attente de l\'offre…)');
+            break;
+          case 'join-error': log('join refusé :', m.reason); break;
+          case 'peer-joined':
+            log(`viewer arrivé : ${m.pseudo} (${m.peerId})`);
+            makeOffer(m.peerId);
+            break;
+          case 'signal': onSignal(m.from, m.data); break;
+          case 'peer-left':
+            log('pair parti :', m.peerId, m.reason || '');
+            peers.get(m.peerId)?.pc.close();
+            peers.delete(m.peerId);
+            break;
+          case 'kicked': log('éjecté', m.banned ? '(banni)' : ''); break;
+        }
+      };
+
+      $('btnCreate').onclick = () => sendMsg({ type: 'create' });
+      $('btnShare').onclick = async () => {
+        try {
+          localStream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: 60 } }, audio: true });
+          $('local').srcObject = localStream;
+          log('capture démarrée');
+          // si des viewers sont déjà là, on (re)fait l'offre
+          for (const [peerId] of peers) makeOffer(peerId);
+        } catch (err) {
+          log('getDisplayMedia:', err.message);
+        }
+      };
+      $('btnJoin').onclick = () => {
+        const code = $('joinCode').value;
+        if (!code) return;
+        sendMsg({ type: 'join', code, pseudo: $('pseudo').value, token });
+        log('join envoyé :', code);
+      };
+    </script>
+  </body>
+</html>

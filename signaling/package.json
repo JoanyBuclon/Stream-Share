@@ -1,0 +1,17 @@
+{
+  "name": "stream-share-signaling",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node src/rooms.test.js && node src/smoke.js && node src/grace.test.js && node src/ban.test.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
