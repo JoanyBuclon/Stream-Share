@@ -1,0 +1,4 @@
+node_modules
+public
+src/*.test.js
+src/smoke.js

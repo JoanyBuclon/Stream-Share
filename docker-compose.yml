@@ -1,0 +1,38 @@
+services:
+  web:
+    image: ghcr.io/joanybuclon/stream-share-web:latest
+    container_name: stream-share-web
+    networks:
+      - web
+    labels:
+      - 'traefik.enable=true'
+      - 'traefik.http.routers.streamshare.rule=Host(`stream.joanybuclon.com`)'
+      - 'traefik.http.routers.streamshare.entrypoints=websecure'
+      - 'traefik.http.middlewares.streamshareheader.headers.framedeny=true'
+      - 'traefik.http.middlewares.streamshareheader.headers.stsSeconds=31536000'
+      - 'traefik.http.middlewares.streamshareheader.headers.stsIncludeSubdomains=true'
+      - 'traefik.http.middlewares.streamshareheader.headers.contentTypeNosniff=true'
+      - 'traefik.http.middlewares.streamshareheader.headers.referrerPolicy=strict-origin-when-cross-origin'
+      - 'traefik.http.middlewares.streamsharecompress.compress=true'
+      - 'traefik.http.routers.streamshare.middlewares=streamshareheader,streamsharecompress'
+    restart: unless-stopped
+
+  signaling:
+    image: ghcr.io/joanybuclon/stream-share-signaling:latest
+    container_name: stream-share-signaling
+    networks:
+      - web
+    environment:
+      - ICE_SERVERS=stun:stun.l.google.com:19302 # STUN only, by architecture decision (no TURN)
+    labels:
+      - 'traefik.enable=true'
+      # Same host, PathPrefix(/ws) → this service. The rule is longer than the web router's,
+      # so Traefik gives it higher priority automatically. WebSocket upgrade is handled natively.
+      - 'traefik.http.routers.streamshare-ws.rule=Host(`stream.joanybuclon.com`) && PathPrefix(`/ws`)'
+      - 'traefik.http.routers.streamshare-ws.entrypoints=websecure'
+      - 'traefik.http.services.streamshare-ws.loadbalancer.server.port=8080'
+    restart: unless-stopped
+
+networks:
+  web:
+    external: true
