@@ -23,30 +23,34 @@ qu'on n'a pas. `ws` fait le travail en quelques dizaines de lignes.
 ## Protocole de messages
 
 Format : JSON `{ type, ...payload }`. Le serveur attribue un `peerId` par
-connexion et ne route que par salon.
+connexion (envoyé dans `hello`) et ne route que par salon.
 
 ### Client → serveur
 
-| `type`   | Payload                  | Effet                                                                                                        |
-| -------- | ------------------------ | ------------------------------------------------------------------------------------------------------------ |
-| `create` | —                        | Crée un salon, renvoie `created { code }`. L'émetteur devient host.                                          |
-| `join`   | `{ code, pseudo, token }`| Valide code **+ ban** (IP/token). OK → `joined` à l'émetteur + `peer-joined { peerId, pseudo }` à l'host. KO/banni → `join-error`. |
-| `signal` | `{ to, data }`           | Relaie `data` (SDP offer/answer ou ICE candidate) au pair `to`. Sert aussi à l'ICE restart.                 |
-| `kick`   | `{ peerId }`             | **(host)** éjecte un viewer → `kicked` au viewer + fermeture de sa connexion.                                |
-| `ban`    | `{ peerId }`             | **(host)** éjecte **et** bannit (IP + token) pour la durée du salon.                                         |
-| `leave`  | —                        | Quitte le salon proprement (équivalent à une déconnexion).                                                   |
+| `type`    | Payload                   | Effet                                                                                                                     |
+| --------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `create`  | —                         | Crée un salon, renvoie `created` (code + `hostToken`). L'émetteur devient host.                                           |
+| `join`    | `{ code, pseudo, token }` | Valide le code **et le ban** (IP ou token). OK → `joined` à l'émetteur + `peer-joined` à l'host. KO/banni → `join-error`. |
+| `reclaim` | `{ code, hostToken }`     | **(host)** reprend son salon après une coupure, dans la fenêtre de grâce. OK → `reclaimed`. KO → `reclaim-error`.         |
+| `signal`  | `{ to, data }`            | Relaie `data` (SDP offer/answer ou ICE candidate) au pair `to`. Sert aussi à l'ICE restart.                               |
+| `kick`    | `{ peerId }`              | **(host)** éjecte un viewer → `kicked` au viewer + fermeture de sa connexion.                                             |
+| `ban`     | `{ peerId }`              | **(host)** éjecte **et** bannit (IP + token, cf. [`rooms-and-codes.md`](./rooms-and-codes.md)) pour la durée du salon.    |
+| `leave`   | —                         | Quitte le salon proprement (équivalent à une déconnexion).                                                                |
 
 ### Serveur → client
 
-| `type`        | Payload              | Sens                                                                  |
-| ------------- | -------------------- | --------------------------------------------------------------------- |
-| `created`     | `{ code }`           | Confirme la création, donne le code à partager.                       |
-| `joined`      | `{ hostId }`         | Le viewer est entré ; voici l'id de l'host à contacter.               |
-| `join-error`  | `{ reason }`         | Code inconnu / salon fermé / banni (message opaque).                  |
-| `peer-joined` | `{ peerId, pseudo }` | Notifie l'host qu'un viewer est arrivé → l'host initie l'offre.       |
-| `signal`      | `{ from, data }`     | Transporte le SDP/ICE d'un pair vers l'autre.                         |
-| `kicked`      | `{ banned }`         | Le viewer est éjecté (`banned:true` s'il est aussi banni) → écran de fin. |
-| `peer-left`   | `{ peerId }`         | Un pair a quitté → fermer la `RTCPeerConnection` associée.            |
+| `type`          | Payload                                    | Sens                                                                                                         |
+| --------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| `hello`         | `{ peerId }`                               | Id de connexion attribué à ce client.                                                                        |
+| `created`       | `{ code, display, hostToken, iceServers }` | Salon créé. `display` = code formaté `XXX-XXX`, `hostToken` = secret de reclaim, `iceServers` = config STUN. |
+| `joined`        | `{ hostId, iceServers }`                   | Le viewer est entré ; id de l'host à contacter + config STUN.                                                |
+| `join-error`    | `{ reason }`                               | Code inconnu / salon fermé / banni (message opaque).                                                         |
+| `peer-joined`   | `{ peerId, pseudo }`                       | Notifie l'host qu'un viewer est arrivé → l'host initie l'offre.                                              |
+| `reclaimed`     | `{ viewers, iceServers }`                  | Reclaim réussi. `viewers` = `[{ peerId, pseudo }]` du salon repris.                                          |
+| `reclaim-error` | `{ reason }`                               | Reclaim refusé (salon absent, hors grâce, ou mauvais token).                                                 |
+| `signal`        | `{ from, data }`                           | Transporte le SDP/ICE d'un pair vers l'autre.                                                                |
+| `kicked`        | `{ banned }`                               | Le viewer est éjecté (`banned:true` s'il est aussi banni) → écran de fin.                                    |
+| `peer-left`     | `{ peerId, reason? }`                      | Un pair a quitté → fermer la `RTCPeerConnection` associée.                                                   |
 
 Le serveur **ne comprend pas** le contenu de `data` : il le recopie tel quel du
 pair source vers le pair cible. C'est ce qui garantit qu'il reste hors du média.
@@ -56,7 +60,7 @@ pair source vers le pair cible. C'est ce qui garantit qu'il reste hors du média
 ```
 Host                     Serveur (ws)                 Viewer
  │── create ─────────────▶│
- │◀──────── created{code} │
+ │◀── created{code,token} │
  │   (partage le code)    │
  │                        │◀──────── join{code} ───────│
  │                        │───────── joined{hostId} ──▶│
@@ -72,33 +76,36 @@ Host                     Serveur (ws)                 Viewer
 n'attend pas de les avoir toutes) — connexion plus rapide à s'établir.
 
 Nettoyage : à la fermeture d'une socket, on applique les règles de cycle de vie
-des salons — viewer retiré, ou, si c'était l'host, **délai de grâce de 30 s** avant
-destruction (cf. [`rooms-and-codes.md`](./rooms-and-codes.md)).
+des salons — viewer retiré (host notifié `peer-left`), ou, si c'était l'host,
+**délai de grâce de 30 s** avant destruction (cf. [`rooms-and-codes.md`](./rooms-and-codes.md)).
 
 ## Reconnexion (blip réseau)
 
-Deux niveaux, tous deux **minimaux** (on ne vise pas une reprise de session
-complexe) :
+Trois niveaux, tous **minimaux** (on ne vise pas une reprise de session complexe) :
 
-- **Socket signaling** : si le WebSocket tombe, le client le **rouvre** et re-`join`
-  le même salon (avec le même `token`, donc l'host le retrouve). C'est ce qui permet
-  d'échanger les candidats d'un ICE restart.
-- **Média** : sur coupure ICE courte (`iceConnectionState` → `disconnected`/`failed`),
-  le pair appelle `restartIce()` et les nouveaux candidats repassent par `signal` —
-  la `RTCPeerConnection` n'est **pas** détruite. Si ça ne repart pas, on tombe sur le
-  message d'échec (pas de TURN).
+- **Socket signaling** : si le WebSocket tombe, le client le **rouvre**
+  automatiquement (statut `reconnecting` → `open`, plafonné à quelques tentatives).
+- **Re-entrée dans le salon** : sur reconnexion, un **viewer** re-`join` (nouveau
+  `peerId`, nouvelle `RTCPeerConnection`) ; un **host** reprend son salon via
+  **`reclaim { code, hostToken }`** dans la fenêtre de grâce — il **récupère son
+  ancien `peerId`** pour que les `signal { to: hostId }` des viewers continuent de
+  router (continuité). Le serveur lui renvoie la liste des viewers dans `reclaimed`.
+- **Média** : côté host/offerer, sur `iceConnectionState → failed`, `pc.restartIce()`
+  renégocie le transport **sans détruire la connexion** ; les nouveaux candidats
+  repassent par `signal`. `disconnected` est juste remonté (il se rétablit souvent
+  seul). Si l'ICE ne repart pas, on tombe sur le message d'échec (pas de TURN).
 
 ```
-// ponytail: reconnexion = rouvrir le socket + restartIce. Pas de file d'attente
-// de messages, pas de resync d'état — le join est idempotent côté serveur.
+// ponytail: reconnexion = rouvrir le socket + (reclaim host | re-join viewer) +
+// restartIce. Pas de file d'attente de messages, pas de resync d'état complexe.
 ```
 
 ## STUN (et pourquoi pas de TURN)
 
 - **STUN, obligatoire.** Les clients reçoivent une liste `iceServers` (ex.
-  `stun:stun.l.google.com:19302`) dans leur `RTCPeerConnection`. Le STUN sert
-  uniquement à **découvrir l'adresse publique** de chaque pair ; il ne voit jamais
-  de média. C'est ce qui permet la connexion directe à travers la plupart des NAT.
+  `stun:stun.l.google.com:19302`) dans `created` / `joined` / `reclaimed`. Le STUN
+  sert uniquement à **découvrir l'adresse publique** de chaque pair ; il ne voit
+  jamais de média. C'est ce qui permet la connexion directe à travers la plupart des NAT.
 - **Pas de TURN — décision d'architecture.** Un TURN relaierait tout le flux média
   par un serveur → ça détruirait le principe « zéro média serveur » et l'objectif
   de légèreté (un serveur de plus, qui porte toute la bande passante vidéo). On

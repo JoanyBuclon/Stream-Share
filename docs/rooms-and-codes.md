@@ -1,7 +1,8 @@
 # Salons & codes
 
 Le serveur de signaling tient l'unique source de vérité sur les salons actifs :
-une `Map` en mémoire. Un salon existe tant que son host est connecté.
+une `Map` en mémoire. Un salon existe tant que son host est connecté (avec un
+**délai de grâce** s'il se déconnecte, cf. cycle de vie).
 
 ## Modèle
 
@@ -10,11 +11,13 @@ type Viewer = { id: string; pseudo: string }; // pseudo saisi au join, jamais pe
 
 type Room = {
   code: string; // forme canonique, 6 caractères sans tiret
-  hostId: string; // id de connexion de l'host
+  hostId: string; // id de connexion (peerId) de l'host
+  hostToken: string; // secret (UUID) pour reprendre la main (reclaim) après une coupure
   viewers: Map<string, Viewer>; // peerId → viewer
-  banned: Set<string>; // clés de ban (IP + token client), vérifiées au join
-  createdAt: number; // epoch ms — pour un TTL de sécurité
-  graceUntil?: number; // si l'host s'est déconnecté : deadline de destruction (30 s)
+  bannedIps: Set<string>; // IPs bannies (cf. ban plus bas)
+  bannedTokens: Set<string>; // tokens localStorage bannis
+  createdAt: number; // epoch ms
+  graceTimer: Timeout | null; // armé à la déconnexion de l'host ; null tant qu'il est présent
 };
 
 const rooms = new Map<string, Room>(); // clé = code canonique (sans tiret)
@@ -38,11 +41,11 @@ Pas de base de données, pas de Redis.
 const ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'; // Crockford, sans I L O U
 
 // Génération : clé canonique 6 caractères, sans tiret.
-function newCode(): string {
+function newCode(existing): string {
   let code: string;
   do {
     code = Array.from({ length: 6 }, () => ALPHABET[Math.floor(Math.random() * ALPHABET.length)]).join('');
-  } while (rooms.has(code));
+  } while (existing.has(code));
   return code;
 }
 
@@ -58,17 +61,21 @@ const normalize = (input: string) => input.toUpperCase().replace(/[^0-9A-Z]/g, '
 
 ## Cycle de vie
 
-| Événement                    | Effet sur le store                                                                                                  |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| Host crée un salon           | `newCode()` → `rooms.set(code, { hostId, viewers: ∅, banned: ∅, createdAt })`.                                      |
-| Viewer envoie code + pseudo  | Lookup `rooms.get(code)`. Absent → `join-error`. **Banni** (IP/token ∈ `banned`) → `join-error`. Sinon on ajoute `{ id, pseudo }` et on notifie l'host. |
-| Host kicke un viewer         | Sa `RTCPeerConnection` se ferme, il sort de `viewers`. Si **ban** : sa clé (IP + token) entre dans `banned`.        |
-| Viewer se déconnecte         | Retiré de `room.viewers` ; l'host est notifié (`peer-left`).                                                        |
-| Host se déconnecte           | **Délai de grâce 30 s** : on pose `graceUntil`, le salon reste. S'il revient avant → salon intact. Sinon → destruction (viewers notifiés, code libéré). |
-| TTL de sécurité              | Un balayage périodique supprime les salons trop vieux / orphelins et ceux dont le `graceUntil` est dépassé.         |
+| Événement                    | Effet sur le store                                                                                                                                                                                  |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Host crée un salon           | `newCode()` + `hostToken` (UUID) → `rooms.set(code, { hostId, hostToken, viewers: ∅, bannedIps: ∅, bannedTokens: ∅, graceTimer: null })`.                                                           |
+| Viewer envoie code + pseudo  | Lookup `rooms.get(code)`. Absent → `join-error`. **Banni** (`isBanned`) → `join-error`. Sinon on ajoute `{ id, pseudo }` et on notifie l'host.                                                      |
+| Host kicke un viewer         | Sa `RTCPeerConnection` se ferme, il sort de `viewers`. Si **ban** : son IP → `bannedIps`, son token → `bannedTokens`.                                                                               |
+| Viewer se déconnecte         | Retiré de `room.viewers` ; l'host est notifié (`peer-left`).                                                                                                                                        |
+| Host se déconnecte           | **Délai de grâce 30 s** : on arme `graceTimer`, le salon reste, les viewers **ne sont pas** notifiés. Expiration → destruction (viewers notifiés `peer-left { reason: 'host-left' }`, code libéré). |
+| Host se reconnecte (reclaim) | Dans la fenêtre de grâce, `reclaim { code, hostToken }` : on annule `graceTimer`, le host **reprend son ancien `hostId`** (continuité du routage `signal`) et récupère la liste des viewers.        |
 
 Le détail du protocole réseau qui déclenche ces transitions est dans
 [`signaling-server.md`](./signaling-server.md).
+
+> **Pas de balayage TTL périodique.** La destruction d'un salon passe uniquement
+> par le `graceTimer` (host absent) ou une fermeture explicite. Un salon dont
+> l'host reste connecté vit tant qu'il est là — voulu.
 
 ## Sécurité & abus
 
@@ -83,8 +90,20 @@ Le détail du protocole réseau qui déclenche ces transitions est dans
   ```
 - **Codes éphémères** : ils meurent avec l'host (après le délai de grâce), donc la
   surface d'attaque reste minuscule.
-- **Kick + ban (scoped salon)** : l'host peut éjecter un viewer, et le bannir. Comme
-  le kické garde le code, le ban le tient à l'écart : la clé de ban combine son **IP**
-  (vue par le serveur) et un **token localStorage** (envoyé au join). Le `Set banned`
-  vit **sur la `Room`** → il meurt avec le salon. Dissuasif, pas un mur : un VPN ou un
-  reset du storage contourne — acceptable pour des salons éphémères entre amis.
+- **Reclaim protégé** : `hostToken` est un UUID (122 bits), non devinable — inutile
+  d'ajouter un rate-limit sur `reclaim`. Le reclaim n'est possible que sur un salon
+  **en grâce** (host absent), jamais pour voler un salon actif.
+- **Kick + ban (scoped salon)** : l'host peut éjecter un viewer, et le bannir.
+  ```ts
+  // Banni si l'IP OU le token correspond.
+  function isBanned(room, ip, token) {
+    return room.bannedIps.has(ip) || (!!token && room.bannedTokens.has(token));
+  }
+  ```
+  Le ban combine deux signaux, en **OU** : l'**IP** (vue par le serveur) attrape
+  celui qui change de token ; le **token localStorage** (envoyé au join) attrape
+  celui qui change d'IP sans vider son storage — utile en mobile/CGNAT où le ban IP
+  est faible. Le token seul n'est **pas** une condition fiable (il est contrôlé par
+  le client), d'où le OU et non un AND. Les deux `Set` vivent **sur la `Room`** → ils
+  meurent avec le salon. Dissuasif, pas un mur : changer **à la fois** d'IP et de
+  storage contourne — acceptable pour des salons éphémères entre amis.

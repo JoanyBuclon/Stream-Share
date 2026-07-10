@@ -56,6 +56,18 @@ câblage (met à jour le DOM sur les événements : viewer qui rejoint/part, sta
 changements d'état). La réactivité ici est **modérée** → un objet d'état + une
 petite fonction de rendu suffisent.
 
+**Callbacks à brancher pour les états transverses (voir plus bas) :**
+
+- `signaling.onMessage(msg)` — messages serveur (peer-joined, signal, peer-left,
+  reclaimed…). `signaling.onStatus(s)` — `open | reconnecting | closed` → alimente
+  l'overlay « reconnexion… » / l'état « déconnecté ».
+- `peer.onTrack(stream)` (flux reçu) · `peer.onState(s)` (état connexion) ·
+  `peer.onIceState(s)` — `disconnected` → « reconnexion… », `failed` → « connexion
+  impossible ».
+- Au reconnect du socket : un **viewer** re-`join`, un **host** appelle
+  `reclaim(code, hostToken)` (le `hostToken` reçu dans `created` est conservé en
+  mémoire/localStorage).
+
 ```
 // ponytail: vanilla + modules TS, zéro dépendance framework. Introduire Svelte
 // seulement si jongler l'état à la main devient réellement pénible.

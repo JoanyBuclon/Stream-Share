@@ -133,7 +133,7 @@ zéro média serveur, aucun SFU.
 - **Plafonné au flux host** : les paliers au-dessus de ce que l'host envoie
   **n'apparaissent pas** (on ne peut pas upscaler au-delà de la source). Plancher 720p.
 - **Rappel du coût** : la capture est payée **une fois**. Baisser un viewer allège
-  **son** encode + upload, pas la capture ; si *personne* ne veut la 4K, c'est la
+  **son** encode + upload, pas la capture ; si _personne_ ne veut la 4K, c'est la
   **capture** de l'host qu'il faut baisser.
 
 ## Audio
@@ -150,21 +150,21 @@ Toggle dans le menu source. Upload négligeable (~40-64 kbps).
 
 ## Contrôles
 
-| Côté   | Contrôle                 | Implémentation                                                                       |
-| ------ | ------------------------ | ------------------------------------------------------------------------------------ |
-| Host   | Source (écran/app)       | `getDisplayMedia` (picker natif) → `replaceTrack` sur chaque sender (pas de renégo). |
-| Host   | Presets / res / FPS / bitrate | Presets = raccourci ; sinon `sender.setParameters` (plafond) + contrainte capture. |
-| Host   | Mode contenu             | Bascule `contentHint` `'motion'` / `'detail'` sur la piste vidéo.                    |
-| Host   | Curseur                  | Contrainte `cursor` sur `getDisplayMedia`.                                            |
-| Host   | Micro                    | `getUserMedia` + mix WebAudio (cf. § Audio).                                          |
-| Host   | Pause                    | `replaceTrack(null)` (ou piste noire) sur chaque sender — session maintenue.         |
-| Host   | Kick / ban viewer        | Ferme la `RTCPeerConnection` du viewer + message `kick`/`ban` (cf. signaling).       |
-| Host   | Fin du partage           | Ferme les `RTCPeerConnection` + `leave`.                                             |
-| Viewer | Volume / mute            | `<video>.volume` / `.muted` — **purement local**, aucun aller-retour réseau.         |
-| Viewer | Qualité                  | Demande un palier → l'host applique sur **son** sender (cf. § Qualité par-viewer).    |
-| Viewer | Picture-in-picture       | `video.requestPictureInPicture()` (API native).                                      |
-| Viewer | Plein écran              | Fullscreen API sur l'élément `<video>`.                                              |
-| Viewer | Stats                    | `RTCPeerConnection.getStats()` en lecture (latency/fps/bitrate/loss).               |
+| Côté   | Contrôle                      | Implémentation                                                                       |
+| ------ | ----------------------------- | ------------------------------------------------------------------------------------ |
+| Host   | Source (écran/app)            | `getDisplayMedia` (picker natif) → `replaceTrack` sur chaque sender (pas de renégo). |
+| Host   | Presets / res / FPS / bitrate | Presets = raccourci ; sinon `sender.setParameters` (plafond) + contrainte capture.   |
+| Host   | Mode contenu                  | Bascule `contentHint` `'motion'` / `'detail'` sur la piste vidéo.                    |
+| Host   | Curseur                       | Contrainte `cursor` sur `getDisplayMedia`.                                           |
+| Host   | Micro                         | `getUserMedia` + mix WebAudio (cf. § Audio).                                         |
+| Host   | Pause                         | `replaceTrack(null)` (ou piste noire) sur chaque sender — session maintenue.         |
+| Host   | Kick / ban viewer             | Ferme la `RTCPeerConnection` du viewer + message `kick`/`ban` (cf. signaling).       |
+| Host   | Fin du partage                | Ferme les `RTCPeerConnection` + `leave`.                                             |
+| Viewer | Volume / mute                 | `<video>.volume` / `.muted` — **purement local**, aucun aller-retour réseau.         |
+| Viewer | Qualité                       | Demande un palier → l'host applique sur **son** sender (cf. § Qualité par-viewer).   |
+| Viewer | Picture-in-picture            | `video.requestPictureInPicture()` (API native).                                      |
+| Viewer | Plein écran                   | Fullscreen API sur l'élément `<video>`.                                              |
+| Viewer | Stats                         | `RTCPeerConnection.getStats()` en lecture (latency/fps/bitrate/loss).                |
 
 `replaceTrack` (changement de source **et** pause) sans renégocier est le détail qui
 rend ces transitions instantanées côté viewer.
@@ -178,8 +178,17 @@ renégociation**.
 
 ## Reconnexion
 
-Sur coupure ICE courte (`iceConnectionState` → `disconnected`/`failed`),
-`pc.restartIce()` renégocie le transport **sans détruire la connexion** ; les
-nouveaux candidats repassent par `signal`. Suppose le socket signaling vivant →
-reconnexion WS légère (cf. [`signaling-server.md`](./signaling-server.md)). Si l'ICE
-ne repart pas, on tombe sur le message d'échec (pas de TURN).
+Le wrapper `Peer` remonte l'état ICE via `onIceState` et, **côté host/offerer
+uniquement**, tente un ICE restart :
+
+- Sur `iceConnectionState` → **`failed`**, `pc.restartIce()` réémet une offre
+  `iceRestart` (renégociation) **sans détruire la connexion** ; le viewer y répond
+  via `accept()`, les nouveaux candidats repassent par `signal`. Une garde empêche
+  deux restarts de se chevaucher.
+- **`disconnected`** est seulement remonté (`onIceState`) — il se rétablit souvent
+  seul, on ne relance pas dessus. L'UI peut afficher « reconnexion… ».
+
+Suppose le socket signaling vivant → reconnexion WS légère du client (cf.
+[`signaling-server.md`](./signaling-server.md)). Le viewer, lui, n'est pas offerer :
+il ne relance pas l'ICE, il répond à l'offre `iceRestart` du host. Si l'ICE ne
+repart pas, on tombe sur le message d'échec (pas de TURN).
