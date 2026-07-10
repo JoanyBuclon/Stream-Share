@@ -25,14 +25,16 @@ jobs:
       - name: Install dependencies (web)
         run: pnpm install --frozen-lockfile
 
+      # --ignore-workspace: signaling is a standalone package with its own lockfile;
+      # without it the root pnpm-workspace.yaml captures the dir and skips its install.
       - name: Install dependencies (signaling)
-        run: pnpm install --frozen-lockfile --dir signaling
+        run: pnpm install --frozen-lockfile --ignore-workspace --dir signaling
 
       - name: Security audit (web)
         run: pnpm audit --audit-level=high
 
       - name: Security audit (signaling)
-        run: pnpm audit --audit-level=high --dir signaling
+        run: pnpm audit --audit-level=high --ignore-workspace --dir signaling
 
       - name: Type check
         run: pnpm run typecheck
