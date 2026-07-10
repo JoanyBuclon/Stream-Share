@@ -27,23 +27,26 @@ connexion et ne route que par salon.
 
 ### Client → serveur
 
-| `type`   | Payload        | Effet                                                                                   |
-| -------- | -------------- | --------------------------------------------------------------------------------------- |
-| `create` | —              | Crée un salon, renvoie `created { code }`. L'émetteur devient host.                     |
-| `join`   | `{ code }`     | Valide le code. OK → `joined` à l'émetteur + `peer-joined` à l'host. KO → `join-error`. |
-| `signal` | `{ to, data }` | Relaie `data` (SDP offer/answer ou ICE candidate) au pair `to`.                         |
-| `leave`  | —              | Quitte le salon proprement (équivalent à une déconnexion).                              |
+| `type`   | Payload                  | Effet                                                                                                        |
+| -------- | ------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| `create` | —                        | Crée un salon, renvoie `created { code }`. L'émetteur devient host.                                          |
+| `join`   | `{ code, pseudo, token }`| Valide code **+ ban** (IP/token). OK → `joined` à l'émetteur + `peer-joined { peerId, pseudo }` à l'host. KO/banni → `join-error`. |
+| `signal` | `{ to, data }`           | Relaie `data` (SDP offer/answer ou ICE candidate) au pair `to`. Sert aussi à l'ICE restart.                 |
+| `kick`   | `{ peerId }`             | **(host)** éjecte un viewer → `kicked` au viewer + fermeture de sa connexion.                                |
+| `ban`    | `{ peerId }`             | **(host)** éjecte **et** bannit (IP + token) pour la durée du salon.                                         |
+| `leave`  | —                        | Quitte le salon proprement (équivalent à une déconnexion).                                                   |
 
 ### Serveur → client
 
-| `type`        | Payload          | Sens                                                            |
-| ------------- | ---------------- | --------------------------------------------------------------- |
-| `created`     | `{ code }`       | Confirme la création, donne le code à partager.                 |
-| `joined`      | `{ hostId }`     | Le viewer est entré ; voici l'id de l'host à contacter.         |
-| `join-error`  | `{ reason }`     | Code inconnu / salon fermé (message opaque).                    |
-| `peer-joined` | `{ peerId }`     | Notifie l'host qu'un viewer est arrivé → l'host initie l'offre. |
-| `signal`      | `{ from, data }` | Transporte le SDP/ICE d'un pair vers l'autre.                   |
-| `peer-left`   | `{ peerId }`     | Un pair a quitté → fermer la `RTCPeerConnection` associée.      |
+| `type`        | Payload              | Sens                                                                  |
+| ------------- | -------------------- | --------------------------------------------------------------------- |
+| `created`     | `{ code }`           | Confirme la création, donne le code à partager.                       |
+| `joined`      | `{ hostId }`         | Le viewer est entré ; voici l'id de l'host à contacter.               |
+| `join-error`  | `{ reason }`         | Code inconnu / salon fermé / banni (message opaque).                  |
+| `peer-joined` | `{ peerId, pseudo }` | Notifie l'host qu'un viewer est arrivé → l'host initie l'offre.       |
+| `signal`      | `{ from, data }`     | Transporte le SDP/ICE d'un pair vers l'autre.                         |
+| `kicked`      | `{ banned }`         | Le viewer est éjecté (`banned:true` s'il est aussi banni) → écran de fin. |
+| `peer-left`   | `{ peerId }`         | Un pair a quitté → fermer la `RTCPeerConnection` associée.            |
 
 Le serveur **ne comprend pas** le contenu de `data` : il le recopie tel quel du
 pair source vers le pair cible. C'est ce qui garantit qu'il reste hors du média.
@@ -69,7 +72,26 @@ Host                     Serveur (ws)                 Viewer
 n'attend pas de les avoir toutes) — connexion plus rapide à s'établir.
 
 Nettoyage : à la fermeture d'une socket, on applique les règles de cycle de vie
-des salons (viewer retiré, ou salon détruit si c'était l'host).
+des salons — viewer retiré, ou, si c'était l'host, **délai de grâce de 30 s** avant
+destruction (cf. [`rooms-and-codes.md`](./rooms-and-codes.md)).
+
+## Reconnexion (blip réseau)
+
+Deux niveaux, tous deux **minimaux** (on ne vise pas une reprise de session
+complexe) :
+
+- **Socket signaling** : si le WebSocket tombe, le client le **rouvre** et re-`join`
+  le même salon (avec le même `token`, donc l'host le retrouve). C'est ce qui permet
+  d'échanger les candidats d'un ICE restart.
+- **Média** : sur coupure ICE courte (`iceConnectionState` → `disconnected`/`failed`),
+  le pair appelle `restartIce()` et les nouveaux candidats repassent par `signal` —
+  la `RTCPeerConnection` n'est **pas** détruite. Si ça ne repart pas, on tombe sur le
+  message d'échec (pas de TURN).
+
+```
+// ponytail: reconnexion = rouvrir le socket + restartIce. Pas de file d'attente
+// de messages, pas de resync d'état — le join est idempotent côté serveur.
+```
 
 ## STUN (et pourquoi pas de TURN)
 

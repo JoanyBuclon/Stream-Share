@@ -14,13 +14,18 @@ statique le plus léger possible.
 
 ## Pages & routage
 
-Approche la plus lazy : **une seule page + le code dans le hash d'URL**.
+Approche la plus lazy : **une seule page + le code dans le hash d'URL**. Deux
+chemins d'entrée distincts :
 
-- `/` — page d'accueil : boutons **« Lancer un partage »** et **« Rejoindre »**.
-- L'host qui lance obtient un code → l'URL devient `/#7K2-QP9`, partageable telle
-  quelle.
-- Un ami ouvre `/#7K2-QP9` → le script lit le hash et tente le `join`
-  automatiquement (le code est normalisé avant envoi, cf. [`rooms-and-codes.md`](./rooms-and-codes.md)).
+- **`/` sans hash** → **landing** : boutons **« Lancer un partage »** et
+  **« Rejoindre »**. Le champ de join accepte **un code** seul (tolérant
+  tirets/espaces/casse, normalisé avant envoi — cf. [`rooms-and-codes.md`](./rooms-and-codes.md)).
+  Pas de collage d'URL : un lien reçu se **clique**.
+- L'host qui lance obtient un code → l'URL devient `/#7K2-QP9`. Il partage le
+  **lien** (bouton « copier le lien »), pas juste le code.
+- **`/#7K2-QP9`** (lien ouvert) → on **saute la landing** → **écran de join minimal** :
+  champ **pseudo** + « Rejoindre », puis connexion. Ce geste utilisateur débloque
+  aussi l'audio (contrainte autoplay du navigateur).
 
 **Pourquoi le hash** (`#7K2-QP9`) plutôt qu'un query param : le fragment n'est
 **jamais envoyé au serveur** (ni dans les logs nginx, ni dans le `Referer`) — le
@@ -41,7 +46,7 @@ src/
 ├── pages/
 │   └── index.astro       # markup statique + <script> qui monte l'app
 └── lib/
-    ├── app.ts            # état de l'UI (idle | hosting | viewing) + rendu DOM
+    ├── app.ts            # état de l'UI (idle | joining | hosting | viewing) + rendu DOM
     ├── signaling.ts      # client ws + protocole (cf. signaling-server.md)
     └── peer.ts           # wrapper RTCPeerConnection (offer/answer/ICE, senders)
 ```
@@ -58,15 +63,37 @@ petite fonction de rendu suffisent.
 
 ## UI de la page de stream
 
-| Zone            | Host                                                    | Viewer                           |
-| --------------- | ------------------------------------------------------- | -------------------------------- |
-| Vidéo           | Aperçu local du partage                                 | `<video>` du flux reçu           |
-| Contrôles média | Source (écran/app), qualité/bitrate, mode contenu, stop | Volume (local), plein écran      |
-| Infos salon     | Code + lien à copier, liste des viewers                 | Statut de connexion              |
-| Stats (option)  | Bitrate/fps par viewer via `getStats`                   | Latence / bitrate via `getStats` |
+**Host**
+
+- Vidéo : aperçu local (ou placeholder « en pause »).
+- Source : bouton natif « choisir la source » → nom réel (`track.label`) + aperçu.
+- Qualité : **presets** (Gaming / Bureautique / Ciné) au-dessus des réglages
+  résolution / FPS (`10/30/60/120`) / bitrate ; toggle **curseur**.
+- Audio : toggles **son système** + **micro**.
+- Session : **copier le lien**, **liste des viewers** (pseudo + ping + état) avec
+  **kick / ban** par ligne, **pause**, **stop**, estimation d'upload, chrono.
+- Stats : bitrate / fps par viewer (`getStats`).
+
+**Viewer**
+
+- Vidéo : `<video>` du flux (placeholder « en pause » / écran « host a arrêté »).
+- Qualité : paliers **`Source · Auto · 1440p · 1080p · 720p`** (dynamiques,
+  plafonnés au flux host — les paliers au-dessus n'apparaissent pas).
+- Audio : **volume** + **mute**.
+- Vue : **picture-in-picture**, **plein écran**, **quitter**.
+- Stats : latency / fps / bitrate / packet loss + état de connexion (`getStats`).
 
 Le détail des contrôles (quels réglages, comment ils agissent) est dans
 [`webrtc-media.md`](./webrtc-media.md#contrôles).
+
+## États transverses
+
+- **Reconnexion…** : overlay court pendant un blip réseau (ICE restart + réouverture
+  du socket, cf. [`signaling-server.md`](./signaling-server.md)).
+- **Connexion impossible** : message clair quand la connexion directe échoue (NAT
+  symétriques, pas de TURN).
+- **Wake lock** : `navigator.wakeLock` côté host **et** viewer pour empêcher la mise
+  en veille pendant une session (aucune UI, comportement de fond).
 
 ## Gotcha CSP
 

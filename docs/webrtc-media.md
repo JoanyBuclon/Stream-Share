@@ -46,17 +46,28 @@ du navigateur (pas de code à écrire pour ça).
 
 ```ts
 const stream = await navigator.mediaDevices.getDisplayMedia({
-  video: { frameRate: { ideal: 60, max: 60 } }, // la résolution suit la source
-  audio: true, // audio d'onglet/système si dispo
+  video: {
+    frameRate: { ideal: 60 }, // FPS choisi par l'host (voir ci-dessous)
+    cursor: 'motion', // curseur : toggle host 'always' | 'never' | 'motion'
+  },
+  audio: true, // son système/onglet si dispo (cf. § Audio)
+  systemAudio: 'include',
+  surfaceSwitching: 'include', // Chrome/Edge : changer de source sans re-prompt
+  selfBrowserSurface: 'exclude',
 });
-stream.getVideoTracks()[0].contentHint = 'motion'; // jeux : priorité fluidité > détail
+stream.getVideoTracks()[0].contentHint = 'motion'; // jeux : fluidité > détail
 ```
 
-- **Résolution** : dictée par la source capturée. On ne la bride pas → 4K native
-  si l'host partage un écran 4K.
-- **`contentHint`** : bascule exposée à l'host, **défaut `'motion'`** (jeu :
-  privilégie le framerate). `'detail'` pour du contenu statique (présentation,
-  code) où la netteté image par image prime.
+- **Sélecteur natif uniquement.** Pas de grille de sources maison (impossible en
+  navigateur). Après sélection, on affiche `track.label` (nom réel) + un aperçu du
+  vrai flux. `surfaceSwitching` permet de changer de source sans redemander.
+- **Résolution** : dictée par la source. On ne la bride pas → 4K native si l'host
+  partage un écran 4K (il peut downscaler, cf. § Qualité).
+- **FPS** : choix host `10 / 30 / 60 / 120`. `10` sert au contenu bureautique ; `120`
+  est **best-effort** (dépend de la source et du navigateur, souvent non honoré).
+- **Curseur** : toggle host via la contrainte `cursor`.
+- **`contentHint`** : **défaut `'motion'`** (jeu : privilégie le framerate),
+  `'detail'` pour du statique. Posé aussi par les presets (cf. § Qualité).
 
 ## Négociation (host-initiated)
 
@@ -107,28 +118,68 @@ await sender.setParameters(params);
 - **Aucune limite produit** sur `maxBitrate` : c'est un curseur exposé à l'host.
 - **`degradationPreference`** : `maintain-framerate` pour du jeu (on préfère
   baisser la résolution que lâcher des frames).
-- **Réglages globaux** : les contrôles de l'host s'appliquent **uniformément à
-  tous les viewers** (un seul jeu de paramètres, répliqué sur chaque `sender`).
-  Chaque `sender` est techniquement indépendant, mais on n'expose **pas** de
-  réglage par-viewer — inutile pour le cas d'usage.
+- **Presets host** : « Gaming / Bureautique / Ciné » = un raccourci qui pose d'un
+  coup résolution + FPS + bitrate + `contentHint`.
+
+### Qualité par-viewer
+
+L'host fixe le **plafond** (capture + res/bitrate max) ; chaque viewer peut demander
+**plus bas, jamais plus haut**. Le mesh ayant déjà **un `sender` par viewer**, on
+applique `scaleResolutionDownBy` + `maxBitrate` **sur le sender de ce viewer-là** —
+zéro média serveur, aucun SFU.
+
+- Paliers exposés au viewer : **`Source`** (pas de downscale) · **`Auto`** (WebRTC
+  adapte seul via bandwidth estimation — gratuit, défaut) · **`1440p / 1080p / 720p`**.
+- **Plafonné au flux host** : les paliers au-dessus de ce que l'host envoie
+  **n'apparaissent pas** (on ne peut pas upscaler au-delà de la source). Plancher 720p.
+- **Rappel du coût** : la capture est payée **une fois**. Baisser un viewer allège
+  **son** encode + upload, pas la capture ; si *personne* ne veut la 4K, c'est la
+  **capture** de l'host qu'il faut baisser.
 
 ## Audio
 
 `getDisplayMedia({ audio: true })` capture l'audio de l'onglet/système quand le
-navigateur et l'OS le permettent (dispo variable selon plateforme — à tester).
+navigateur et l'OS le permettent (dispo variable selon plateforme — à tester ;
+généralement OK pour un onglet ou l'écran entier, pas pour une fenêtre isolée).
 L'audio voyage dans la même `RTCPeerConnection` que la vidéo.
+
+**Micro host (optionnel)** : l'host peut ajouter sa voix. Son système + micro
+(`getUserMedia`) sont **mixés en une seule piste** via WebAudio (`AudioContext`)
+avant l'envoi → une seule piste audio, synchronisée avec la vidéo par la stack.
+Toggle dans le menu source. Upload négligeable (~40-64 kbps).
 
 ## Contrôles
 
 | Côté   | Contrôle                 | Implémentation                                                                       |
 | ------ | ------------------------ | ------------------------------------------------------------------------------------ |
-| Host   | Source (écran/app)       | Relance `getDisplayMedia` → `replaceTrack` sur chaque sender (pas de renégociation). |
-| Host   | Qualité / bitrate        | `sender.setParameters` (appliqué à tous les senders).                                |
-| Host   | Mode contenu             | Bascule `contentHint` `'motion'` (jeu) / `'detail'` (statique) sur la piste vidéo.   |
+| Host   | Source (écran/app)       | `getDisplayMedia` (picker natif) → `replaceTrack` sur chaque sender (pas de renégo). |
+| Host   | Presets / res / FPS / bitrate | Presets = raccourci ; sinon `sender.setParameters` (plafond) + contrainte capture. |
+| Host   | Mode contenu             | Bascule `contentHint` `'motion'` / `'detail'` sur la piste vidéo.                    |
+| Host   | Curseur                  | Contrainte `cursor` sur `getDisplayMedia`.                                            |
+| Host   | Micro                    | `getUserMedia` + mix WebAudio (cf. § Audio).                                          |
+| Host   | Pause                    | `replaceTrack(null)` (ou piste noire) sur chaque sender — session maintenue.         |
+| Host   | Kick / ban viewer        | Ferme la `RTCPeerConnection` du viewer + message `kick`/`ban` (cf. signaling).       |
 | Host   | Fin du partage           | Ferme les `RTCPeerConnection` + `leave`.                                             |
-| Viewer | Volume                   | `<video>.volume` — **purement local**, aucun aller-retour réseau.                    |
+| Viewer | Volume / mute            | `<video>.volume` / `.muted` — **purement local**, aucun aller-retour réseau.         |
+| Viewer | Qualité                  | Demande un palier → l'host applique sur **son** sender (cf. § Qualité par-viewer).    |
+| Viewer | Picture-in-picture       | `video.requestPictureInPicture()` (API native).                                      |
 | Viewer | Plein écran              | Fullscreen API sur l'élément `<video>`.                                              |
-| Viewer | Stats (latence, bitrate) | `RTCPeerConnection.getStats()` en lecture.                                           |
+| Viewer | Stats                    | `RTCPeerConnection.getStats()` en lecture (latency/fps/bitrate/loss).               |
 
-`replaceTrack` pour changer de source sans renégocier est le détail qui rend le
-changement d'écran instantané côté viewer.
+`replaceTrack` (changement de source **et** pause) sans renégocier est le détail qui
+rend ces transitions instantanées côté viewer.
+
+## Pause du partage
+
+L'host coupe le flux **sans quitter la session** : `replaceTrack(null)` (ou une
+piste noire) sur chaque sender. Les `RTCPeerConnection` restent ouvertes, les viewers
+affichent un placeholder « en pause ». Reprise = `replaceTrack(track)`, **sans
+renégociation**.
+
+## Reconnexion
+
+Sur coupure ICE courte (`iceConnectionState` → `disconnected`/`failed`),
+`pc.restartIce()` renégocie le transport **sans détruire la connexion** ; les
+nouveaux candidats repassent par `signal`. Suppose le socket signaling vivant →
+reconnexion WS légère (cf. [`signaling-server.md`](./signaling-server.md)). Si l'ICE
+ne repart pas, on tombe sur le message d'échec (pas de TURN).

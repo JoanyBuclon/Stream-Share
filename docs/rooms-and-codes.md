@@ -6,11 +6,15 @@ une `Map` en mémoire. Un salon existe tant que son host est connecté.
 ## Modèle
 
 ```ts
+type Viewer = { id: string; pseudo: string }; // pseudo saisi au join, jamais persisté
+
 type Room = {
   code: string; // forme canonique, 6 caractères sans tiret
   hostId: string; // id de connexion de l'host
-  viewers: Set<string>; // ids de connexion des viewers
+  viewers: Map<string, Viewer>; // peerId → viewer
+  banned: Set<string>; // clés de ban (IP + token client), vérifiées au join
   createdAt: number; // epoch ms — pour un TTL de sécurité
+  graceUntil?: number; // si l'host s'est déconnecté : deadline de destruction (30 s)
 };
 
 const rooms = new Map<string, Room>(); // clé = code canonique (sans tiret)
@@ -54,13 +58,14 @@ const normalize = (input: string) => input.toUpperCase().replace(/[^0-9A-Z]/g, '
 
 ## Cycle de vie
 
-| Événement             | Effet sur le store                                                                                                  |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| Host crée un salon    | `newCode()` → `rooms.set(code, { hostId, viewers: ∅, createdAt })`.                                                 |
-| Viewer envoie un code | Lookup `rooms.get(code)`. Absent → `join-error`. Présent → on ajoute le viewer et on notifie l'host.                |
-| Viewer se déconnecte  | Retiré de `room.viewers` ; l'host est notifié (`peer-left`).                                                        |
-| Host se déconnecte    | **Le salon est détruit** : tous les viewers sont notifiés puis le code est libéré (`rooms.delete`).                 |
-| TTL de sécurité       | Un balayage périodique supprime les salons trop vieux / orphelins (filet contre les fuites, pas le chemin nominal). |
+| Événement                    | Effet sur le store                                                                                                  |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| Host crée un salon           | `newCode()` → `rooms.set(code, { hostId, viewers: ∅, banned: ∅, createdAt })`.                                      |
+| Viewer envoie code + pseudo  | Lookup `rooms.get(code)`. Absent → `join-error`. **Banni** (IP/token ∈ `banned`) → `join-error`. Sinon on ajoute `{ id, pseudo }` et on notifie l'host. |
+| Host kicke un viewer         | Sa `RTCPeerConnection` se ferme, il sort de `viewers`. Si **ban** : sa clé (IP + token) entre dans `banned`.        |
+| Viewer se déconnecte         | Retiré de `room.viewers` ; l'host est notifié (`peer-left`).                                                        |
+| Host se déconnecte           | **Délai de grâce 30 s** : on pose `graceUntil`, le salon reste. S'il revient avant → salon intact. Sinon → destruction (viewers notifiés, code libéré). |
+| TTL de sécurité              | Un balayage périodique supprime les salons trop vieux / orphelins et ceux dont le `graceUntil` est dépassé.         |
 
 Le détail du protocole réseau qui déclenche ces transitions est dans
 [`signaling-server.md`](./signaling-server.md).
@@ -76,5 +81,10 @@ Le détail du protocole réseau qui déclenche ces transitions est dans
   ```
   // ponytail: compteur en mémoire par IP + fenêtre glissante. Pas de lib.
   ```
-- **Codes éphémères** : ils meurent avec l'host, donc la surface d'attaque
-  reste minuscule.
+- **Codes éphémères** : ils meurent avec l'host (après le délai de grâce), donc la
+  surface d'attaque reste minuscule.
+- **Kick + ban (scoped salon)** : l'host peut éjecter un viewer, et le bannir. Comme
+  le kické garde le code, le ban le tient à l'écart : la clé de ban combine son **IP**
+  (vue par le serveur) et un **token localStorage** (envoyé au join). Le `Set banned`
+  vit **sur la `Room`** → il meurt avec le salon. Dissuasif, pas un mur : un VPN ou un
+  reset du storage contourne — acceptable pour des salons éphémères entre amis.
