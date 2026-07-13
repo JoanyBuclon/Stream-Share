@@ -55,6 +55,7 @@ export class HostController {
   private readonly offMessage: () => void;
   private readonly offStatus: () => void;
   private wasReconnecting = false;
+  private copyTimer: ReturnType<typeof setTimeout> | null = null; // reverts the "copied ✓" flash
   // Removes every DOM listener at once on destroy() — the host screen is shared across
   // sessions, so listeners would otherwise pile up (one getDisplayMedia prompt per stale session).
   private readonly ac = new AbortController();
@@ -84,6 +85,9 @@ export class HostController {
     hide(el('host-quality-bar'));
     hide(el('settings-modal'));
     setText('copy-label', 'copy link');
+    const waitingCopy = el('btn-copy-link-waiting'); // clear a stale "copied ✓" flash from a prior session
+    waitingCopy.textContent = 'Copy room link';
+    waitingCopy.dataset.copied = 'false';
     el('viewers-list').replaceChildren();
     this.refreshSidebar(); // 0 viewers → shows "waiting for friends"
 
@@ -480,12 +484,26 @@ export class HostController {
     const link = `${location.origin}/#${this.code}`;
     try {
       await navigator.clipboard.writeText(link);
-      setText('copy-label', 'copied ✓');
-      setTimeout(() => setText('copy-label', 'copy link'), 1600);
     } catch {
-      // clipboard blocked (insecure context) — the code is still visible on screen
+      return; // clipboard blocked (insecure context) — the code is still visible on screen
     }
+    this.flashCopied();
   };
+
+  // Confirm the copy on both entry points: the top-bar chip label and the sidebar button
+  // (data-copied drives its green flash). Single timer so rapid re-clicks don't revert early.
+  private flashCopied(): void {
+    setText('copy-label', 'copied ✓');
+    const waiting = el('btn-copy-link-waiting');
+    waiting.textContent = 'Copied ✓';
+    waiting.dataset.copied = 'true';
+    if (this.copyTimer !== null) clearTimeout(this.copyTimer);
+    this.copyTimer = setTimeout(() => {
+      setText('copy-label', 'copy link');
+      waiting.textContent = 'Copy room link';
+      waiting.dataset.copied = 'false';
+    }, 1600);
+  }
 
   private stop = (): void => {
     this.destroy();
@@ -495,6 +513,7 @@ export class HostController {
   /** Tear down media, peers and subscriptions without navigating. */
   destroy(): void {
     this.ac.abort(); // remove all DOM listeners
+    if (this.copyTimer !== null) clearTimeout(this.copyTimer);
     this.wakeLock.release();
     this.offMessage();
     this.offStatus();
