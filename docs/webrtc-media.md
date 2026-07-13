@@ -48,7 +48,6 @@ du navigateur (pas de code à écrire pour ça).
 const stream = await navigator.mediaDevices.getDisplayMedia({
   video: {
     frameRate: { ideal: 60 }, // FPS choisi par l'host (voir ci-dessous)
-    cursor: 'motion', // curseur : toggle host 'always' | 'never' | 'motion'
   },
   audio: true, // son système/onglet si dispo (cf. § Audio)
   systemAudio: 'include',
@@ -65,7 +64,8 @@ stream.getVideoTracks()[0].contentHint = 'motion'; // jeux : fluidité > détail
   partage un écran 4K (il peut downscaler, cf. § Qualité).
 - **FPS** : choix host `10 / 30 / 60 / 120`. `10` sert au contenu bureautique ; `120`
   est **best-effort** (dépend de la source et du navigateur, souvent non honoré).
-- **Curseur** : toggle host via la contrainte `cursor`.
+- **Curseur** : **pas de contrôle** — la contrainte `cursor` est ignorée par les
+  navigateurs (Chrome capture toujours le curseur), donc pas de toggle exposé.
 - **`contentHint`** : **défaut `'motion'`** (jeu : privilégie le framerate),
   `'detail'` pour du statique. Posé aussi par les presets (cf. § Qualité).
 
@@ -85,22 +85,22 @@ Déclenchée par `peer-joined` (cf. [`signaling-server.md`](./signaling-server.m
 Le navigateur négocie le codec ; on **oriente la préférence** côté host via
 `transceiver.setCodecPreferences(...)`.
 
-| Codec     | Encodage temps réel                                      | Verdict                                                                                                                                                      |
-| --------- | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **H.264** | Hardware partout (NVENC, QuickSync, AMF)                 | **Repli par défaut.** Latence mini, compat totale, coût CPU/GPU faible.                                                                                      |
-| VP9       | Souvent software, plus lourd                             | Meilleure compression que H.264 mais coûteux en temps réel — pas prioritaire.                                                                                |
-| **AV1**   | Hardware seulement sur GPU récents (RTX 40+, Arc, RDNA3) | **Préféré quand dispo.** Superbe qualité/bitrate ; l'encode software écroulerait un jeu 4K, donc on ne l'utilise que s'il est présent dans les capabilities. |
+| Codec     | Encodage temps réel                                      | Verdict                                                                                                                                      |
+| --------- | -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| **VP9**   | Software, mais mature et raisonnable                     | **Préféré.** Screen-content coding + bien meilleure qualité/bit que VP8 ; compromis fiable, même en 4K.                                       |
+| **AV1**   | Hardware seulement sur GPU récents (RTX 40+, Arc, RDNA3) | Superbe qualité/bit, mais l'encode software temps réel peine en 4K60 → **derrière VP9** (utilisé si présent et que VP9 n'est pas retenu).      |
+| VP8       | Hardware/software partout                                | **Repli universel.** Compat totale, coût faible ; qualité/bit inférieure.                                                                     |
 
 **Stratégie (automatique, aucun réglage manuel)** : à la négociation, on **préfère
-AV1 s'il est présent dans les capabilities** (host capable de l'encoder + viewer
-de le décoder), **sinon on retombe sur H.264**. La décision se prend une fois par
-`RTCPeerConnection`, sans intervention de l'host.
+VP9, puis AV1, puis VP8** en réordonnant les capabilities. La décision se prend une
+fois par `RTCPeerConnection`, sans intervention de l'host. Via l'API
+`setCodecPreferences` (pas de munging SDP → non rejeté par le navigateur).
 
 ```ts
-// AV1 en tête s'il est disponible, sinon H.264. Décidé une fois à la négociation.
+// VP9 > AV1 > VP8, le reste (rtx/red…) conservé après. Décidé une fois à la négociation.
 const caps = RTCRtpSender.getCapabilities('video');
-transceiver.setCodecPreferences(orderCodecs(caps.codecs)); // AV1 > H.264 > reste
-// ponytail: "disponible" = présence du codec dans getCapabilities. Pas de toggle.
+transceiver.setCodecPreferences(orderCodecs(caps.codecs)); // cf. preferVideoCodecs() dans peer.ts
+// ponytail: réordonner CODEC_PREFERENCE pour changer. Pas de toggle exposé.
 ```
 
 ## Qualité & bitrate
@@ -120,6 +120,18 @@ await sender.setParameters(params);
   baisser la résolution que lâcher des frames).
 - **Presets host** : « Gaming / Bureautique / Ciné » = un raccourci qui pose d'un
   coup résolution + FPS + bitrate + `contentHint`.
+
+**`maxBitrate` est un plafond, pas une cible.** Le débit réel émis = `min(plafond,
+estimation de bande passante, besoin du contenu, CPU)` — un écran statique produit
+peu de bits *par design*, et la congestion control (BWE) commande souvent. On ne
+peut **pas forcer un plancher** via l'API standard. Pour éviter le démarrage lent
+(ramp depuis ~300 kbps), on **relève le start/min-bitrate dans le SDP de l'offre** :
+
+```ts
+// À l'offre : a=fmtp des codecs vidéo += x-google-start-bitrate / x-google-min-bitrate.
+// cf. tuneStartBitrate() dans peer.ts. ponytail: honoré par Chrome (VP8/VP9), no-op ailleurs
+// (Firefox/AV1 l'ignorent) — le plafond passe toujours par setParameters/maxBitrate.
+```
 
 ### Qualité par-viewer
 
@@ -155,7 +167,6 @@ Toggle dans le menu source. Upload négligeable (~40-64 kbps).
 | Host   | Source (écran/app)            | `getDisplayMedia` (picker natif) → `replaceTrack` sur chaque sender (pas de renégo). |
 | Host   | Presets / res / FPS / bitrate | Presets = raccourci ; sinon `sender.setParameters` (plafond) + contrainte capture.   |
 | Host   | Mode contenu                  | Bascule `contentHint` `'motion'` / `'detail'` sur la piste vidéo.                    |
-| Host   | Curseur                       | Contrainte `cursor` sur `getDisplayMedia`.                                           |
 | Host   | Micro                         | `getUserMedia` + mix WebAudio (cf. § Audio).                                         |
 | Host   | Pause                         | `replaceTrack(null)` (ou piste noire) sur chaque sender — session maintenue.         |
 | Host   | Kick / ban viewer             | Ferme la `RTCPeerConnection` du viewer + message `kick`/`ban` (cf. signaling).       |
@@ -171,10 +182,17 @@ rend ces transitions instantanées côté viewer.
 
 ## Pause du partage
 
-L'host coupe le flux **sans quitter la session** : `replaceTrack(null)` (ou une
-piste noire) sur chaque sender. Les `RTCPeerConnection` restent ouvertes, les viewers
-affichent un placeholder « en pause ». Reprise = `replaceTrack(track)`, **sans
-renégociation**.
+L'host coupe la **vidéo sans quitter la session** : un flag `paused` retire la piste
+vidéo du flux sortant, appliqué par `replaceTrack(null)` sur chaque sender (via le
+pipeline `replaceTracks` existant). Les `RTCPeerConnection` restent ouvertes,
+**l'audio continue**. Reprise = `replaceTrack(track)`, **sans renégociation**.
+
+En plus du média, l'host **notifie** chaque viewer d'un message de contrôle
+`{ control: 'pause' | 'resume' }` **relayé via `signal`** (payload opaque, distinct
+du SDP/ICE — le viewer le filtre par un type guard). C'est ce message, pas la
+détection de piste muette (peu fiable selon les navigateurs), qui pilote l'écran
+« en pause » côté viewer. Un viewer qui rejoint/reconnecte pendant une pause est
+notifié **avant** l'offre (pas de flash « live »).
 
 ## Reconnexion
 
@@ -184,11 +202,14 @@ uniquement**, tente un ICE restart :
 - Sur `iceConnectionState` → **`failed`**, `pc.restartIce()` réémet une offre
   `iceRestart` (renégociation) **sans détruire la connexion** ; le viewer y répond
   via `accept()`, les nouveaux candidats repassent par `signal`. Une garde empêche
-  deux restarts de se chevaucher.
+  deux restarts de se chevaucher, et le nombre de restarts est **plafonné (5)** :
+  sur un lien définitivement mort, on cesse au lieu de re-offrir en boucle (le
+  compteur se réinitialise dès qu'on repasse `connected`).
 - **`disconnected`** est seulement remonté (`onIceState`) — il se rétablit souvent
   seul, on ne relance pas dessus. L'UI peut afficher « reconnexion… ».
 
 Suppose le socket signaling vivant → reconnexion WS légère du client (cf.
 [`signaling-server.md`](./signaling-server.md)). Le viewer, lui, n'est pas offerer :
-il ne relance pas l'ICE, il répond à l'offre `iceRestart` du host. Si l'ICE ne
-repart pas, on tombe sur le message d'échec (pas de TURN).
+il ne relance pas l'ICE, il répond à l'offre `iceRestart` du host. Si le transport
+ne repart pas, le viewer sort de « reconnexion… » vers **« connexion impossible »**
+après un délai (~20 s) — pas de TURN, échec assumé.

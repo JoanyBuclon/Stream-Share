@@ -1,0 +1,36 @@
+---
+// Reached when opening a share link (#CODE): pick a nickname, then join.
+---
+
+<section id="screen-join" class="flex flex-1 items-center justify-center p-10 animate-fade" hidden>
+  <div class="w-full max-w-[420px]">
+    <div class="mb-[30px] flex items-center justify-center gap-2.5">
+      <img src="/favicon.svg" alt="" class="size-[18px]" />
+      <span class="font-semibold">stream share</span>
+    </div>
+    <div class="rounded-[18px] border border-white/[0.09] bg-panel p-[30px]">
+      <div class="mb-2.5 font-mono text-[11px] uppercase tracking-[0.12em] text-muted-3">you're joining a share</div>
+      <div id="join-code" class="mb-[26px] font-mono text-[30px] font-medium tracking-[0.16em]">—</div>
+
+      <label for="pseudo-input" class="mb-2 block text-[13px] text-muted">Your nickname</label>
+      <input
+        id="pseudo-input"
+        class="mb-4 w-full rounded-[11px] border border-white/[0.14] bg-ink px-[15px] py-[13px] text-base text-fg focus:border-white/[0.34] focus:outline-none"
+        placeholder="e.g. joany"
+        maxlength="20"
+        autocomplete="off"
+      />
+
+      <button
+        id="btn-do-join"
+        class="w-full cursor-pointer rounded-[10px] bg-cream px-6 py-3 text-sm font-semibold text-ink hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
+        >Join the stream</button
+      >
+      <div id="join-fail" class="mt-3 text-center font-mono text-[11px] leading-[1.5] text-live" hidden></div>
+      <div class="mt-3.5 text-center font-mono text-[11px] leading-[1.5] text-muted-3">audio starts after you join</div>
+    </div>
+    <div class="mt-[18px] text-center">
+      <a id="btn-back-home" href="#" class="font-mono text-xs text-muted-2">← back to home</a>
+    </div>
+  </div>
+</section>

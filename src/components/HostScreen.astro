@@ -1,0 +1,348 @@
+---
+// Host view: pick a source, preview it locally, share the code, manage viewers.
+// MVP scope — no settings modal / pause / stats yet (see docs/frontend.md).
+---
+
+<section id="screen-host" class="flex min-h-0 flex-1 flex-col animate-fade" hidden>
+  <!-- top bar -->
+  <header class="flex flex-shrink-0 items-center justify-between border-b border-white/[0.07] px-[22px] py-3.5">
+    <div class="flex items-center gap-[18px]">
+      <a id="brand-host" href="/" class="flex items-center gap-[9px]">
+        <img src="/favicon.svg" alt="" class="size-[18px]" />
+        <span class="text-sm font-semibold">stream share</span>
+      </a>
+      <div
+        id="host-live-badge"
+        class="flex items-center gap-[7px] rounded-full border border-live/30 bg-live/[0.12] px-[11px] py-[5px]"
+        hidden
+      >
+        <span class="size-[7px] animate-pulse-dot rounded-full bg-live"></span>
+        <span class="font-mono text-[11px] tracking-[0.06em] text-live-fg">LIVE</span>
+      </div>
+      <div
+        id="host-paused-badge"
+        class="flex items-center gap-[7px] rounded-full border border-gold/[0.28] bg-gold/[0.12] px-[11px] py-[5px]"
+        hidden
+      >
+        <span class="block h-2.5 w-[7px] border-x-2 border-gold"></span>
+        <span class="font-mono text-[11px] tracking-[0.06em] text-gold">PAUSED</span>
+      </div>
+    </div>
+
+    <!-- room code = copy link (whole chip) -->
+    <button
+      id="btn-copy-link"
+      class="flex cursor-pointer items-center gap-3.5 rounded-[10px] border border-white/10 bg-[#161616] px-3.5 py-2 font-mono text-fg hover:border-white/20 hover:bg-[#1d1d1d]"
+    >
+      <span id="host-code" class="text-[15px] font-medium tracking-[0.18em]">—</span>
+      <span class="h-4 w-px bg-white/[0.12]"></span>
+      <span id="copy-label" class="text-xs text-muted-2">copy link</span>
+    </button>
+  </header>
+
+  <!-- body: stage + sidebar -->
+  <div class="flex min-h-0 flex-1">
+    <!-- stage -->
+    <div class="flex min-w-0 flex-1 flex-col gap-3.5 p-[22px]">
+      <div
+        class="relative flex flex-1 items-center justify-center overflow-hidden rounded-[14px] border border-white/[0.08] bg-black"
+      >
+        <!-- live preview -->
+        <video
+          id="host-video"
+          class="absolute inset-0 size-full object-contain"
+          autoplay
+          muted
+          playsinline
+          hidden></video>
+        <div id="host-stage-meta" class="pointer-events-none absolute left-3.5 top-3.5 flex gap-2" hidden>
+          <span
+            id="host-source-name"
+            class="rounded-[7px] bg-ink/70 px-2.5 py-[5px] font-mono text-[11px] text-fg-dim backdrop-blur-[6px]"
+            >source</span
+          >
+        </div>
+
+        <!-- empty state -->
+        <div id="host-empty" class="max-w-[400px] p-[30px] text-center">
+          <div
+            class="mx-auto mb-5 flex size-14 items-center justify-center rounded-[14px] border border-white/10 bg-[#161616]"
+          >
+            <span class="block h-4 w-[22px] rounded border-2 border-muted-2"></span>
+          </div>
+          <div class="mb-2 text-[19px] font-semibold">No source selected</div>
+          <div class="mb-[22px] text-sm leading-[1.55] text-muted-2">
+            Pick a screen, window or tab to start sharing with your friends.
+          </div>
+          <button
+            id="btn-choose-source"
+            class="cursor-pointer rounded-[10px] bg-cream px-[22px] py-3 text-sm font-semibold text-ink hover:bg-white"
+            >Choose source</button
+          >
+        </div>
+
+        <!-- paused state -->
+        <div id="host-paused" class="max-w-[380px] p-[30px] text-center" hidden>
+          <div
+            class="mx-auto mb-5 flex size-14 items-center justify-center gap-1 rounded-[14px] border border-gold/[0.24] bg-[#161616]"
+          >
+            <span class="block h-[18px] w-[5px] rounded-[2px] bg-gold"></span>
+            <span class="block h-[18px] w-[5px] rounded-[2px] bg-gold"></span>
+          </div>
+          <div class="mb-2 text-[19px] font-semibold">Sharing paused</div>
+          <div class="mb-[22px] text-sm leading-[1.55] text-muted-2">
+            Your friends stay in the room — they see a waiting screen. Resume whenever you want.
+          </div>
+          <button
+            id="btn-resume"
+            class="cursor-pointer rounded-[10px] bg-cream px-[22px] py-3 text-sm font-semibold text-ink hover:bg-white"
+            >Resume sharing</button
+          >
+        </div>
+      </div>
+
+      <!-- control bar -->
+      <div
+        class="flex flex-wrap items-center gap-2.5 rounded-[14px] border border-white/[0.08] bg-panel px-3.5 py-3"
+      >
+        <button
+          id="btn-change-source"
+          class="flex max-w-[230px] cursor-pointer items-center gap-2 rounded-[9px] border border-white/10 bg-elev px-3.5 py-[9px] text-[13px] font-medium text-fg hover:bg-[#262626]"
+          hidden
+        >
+          <span class="block h-2.5 w-[13px] flex-shrink-0 rounded-[2px] border-[1.5px] border-fg-dim"></span>
+          <span id="source-btn-label" class="overflow-hidden text-ellipsis whitespace-nowrap">Change source</span>
+        </button>
+
+        <!-- quality quick-view + settings (shown once sharing) -->
+        <div id="host-quality-bar" class="flex flex-wrap items-center gap-2.5" hidden>
+          <div class="h-[26px] w-px bg-white/[0.09]"></div>
+          <div class="flex items-center gap-1.5 font-mono">
+            <button
+              id="chip-resolution"
+              class="cursor-pointer rounded-lg border border-white/[0.08] bg-[#181818] px-[11px] py-2 text-xs text-fg-dim"
+              >—</button
+            >
+            <button
+              id="chip-fps"
+              class="cursor-pointer rounded-lg border border-white/[0.08] bg-[#181818] px-[11px] py-2 text-xs text-fg-dim"
+              >— fps</button
+            >
+            <button
+              id="chip-bitrate"
+              class="cursor-pointer rounded-lg border border-white/[0.08] bg-[#181818] px-[11px] py-2 text-xs text-fg-dim"
+              >— mbps</button
+            >
+          </div>
+          <button
+            id="btn-settings"
+            class="flex cursor-pointer items-center gap-[7px] rounded-[9px] border border-white/10 bg-elev px-3.5 py-[9px] text-[13px] text-fg hover:bg-[#262626]"
+          >
+            <span class="block size-3 rounded-full border-[1.5px] border-fg-dim"></span>
+            Settings
+          </button>
+        </div>
+
+        <div class="flex-1"></div>
+
+        <button
+          id="btn-pause"
+          class="flex cursor-pointer items-center gap-2 rounded-[9px] border border-white/10 bg-elev px-[15px] py-[9px] text-[13px] font-medium text-fg hover:bg-[#262626]"
+          hidden
+        >
+          <span id="pause-icon" class="flex gap-[3px]">
+            <span class="block h-3 w-[3px] rounded-[1px] bg-fg-dim"></span>
+            <span class="block h-3 w-[3px] rounded-[1px] bg-fg-dim"></span>
+          </span>
+          <span id="play-icon" class="block size-0 border-y-[6px] border-l-[9px] border-y-transparent border-l-fg-dim" hidden></span>
+          <span id="pause-label">Pause</span>
+        </button>
+        <button
+          id="btn-stop"
+          class="flex cursor-pointer items-center gap-2 rounded-[9px] border border-live/[0.32] bg-live/[0.14] px-[15px] py-[9px] text-[13px] font-semibold text-live-fg hover:bg-live/[0.22]"
+          hidden
+        >
+          <span class="block size-2.5 rounded-[2px] bg-live"></span>
+          Stop
+        </button>
+      </div>
+    </div>
+
+    <!-- sidebar: viewers -->
+    <aside class="flex w-[300px] flex-shrink-0 flex-col gap-3.5 border-l border-white/[0.07] p-5">
+      <div class="flex items-center justify-between">
+        <div class="text-sm font-semibold">Viewers</div>
+        <span class="font-mono text-xs text-muted-2"><span id="viewer-count">0</span> connected</span>
+      </div>
+
+      <div class="flex gap-[9px] rounded-[10px] border border-gold/[0.16] bg-gold/[0.06] px-3 py-[11px]">
+        <span class="flex-shrink-0 text-xs leading-[1.3] text-gold">◈</span>
+        <div class="font-mono text-[10.5px] leading-[1.5] text-[#b8a878]">
+          In P2P, each viewer is an extra outgoing stream from your machine — more viewers can reduce performance.
+        </div>
+      </div>
+
+      <!-- populated list -->
+      <div id="viewers-list" class="flex flex-col gap-1.5" hidden></div>
+
+      <!-- empty / waiting -->
+      <div
+        id="host-waiting"
+        class="flex flex-1 flex-col items-center justify-center rounded-[12px] border border-dashed border-white/10 px-5 py-[26px] text-center"
+      >
+        <div class="mb-4 flex size-11 items-center justify-center rounded-full border border-white/[0.12]">
+          <span class="size-2 animate-pulse-dot rounded-full bg-muted-4"></span>
+        </div>
+        <div class="mb-1.5 text-sm font-medium">Waiting for friends</div>
+        <div class="mb-4 text-[12.5px] leading-[1.55] text-muted-2">Send them the room link so they can join.</div>
+        <div id="host-waiting-code" class="mb-3.5 font-mono text-[18px] tracking-[0.2em] text-fg">—</div>
+        <button
+          id="btn-copy-link-waiting"
+          class="w-full cursor-pointer rounded-[9px] border border-white/[0.12] bg-elev px-3 py-2.5 text-[13px] font-medium text-fg hover:bg-[#262626]"
+          >Copy room link</button
+        >
+      </div>
+    </aside>
+  </div>
+
+  <!-- template: one viewer row (cloned by src/lib/host.ts) -->
+  <template id="tpl-viewer-row">
+    <div class="flex items-center gap-[11px] rounded-[10px] border border-white/[0.06] bg-panel px-2.5 py-[9px]">
+      <span
+        data-hook="initials"
+        class="flex size-[30px] flex-shrink-0 items-center justify-center rounded-lg bg-[#222] font-mono text-[11px] text-fg-dim"
+      ></span>
+      <div class="min-w-0 flex-1">
+        <div data-hook="name" class="text-[13px] font-medium"></div>
+        <div class="font-mono text-[10px] text-muted-3">connected</div>
+      </div>
+      <div class="flex gap-1">
+        <button
+          data-hook="kick"
+          title="kick"
+          class="cursor-pointer rounded-md border border-white/[0.08] bg-elev-2 px-2 py-[5px] font-mono text-[10px] text-muted hover:bg-[#2c2c2c] hover:text-fg"
+          >kick</button
+        >
+        <button
+          data-hook="ban"
+          title="ban"
+          class="cursor-pointer rounded-md border border-live/[0.24] bg-live/10 px-2 py-[5px] font-mono text-[10px] text-live-fg hover:bg-live/20"
+          >ban</button
+        >
+      </div>
+    </div>
+  </template>
+
+  <!-- settings modal (source + quality + audio); live-applies, "Done" just closes -->
+  <div
+    id="settings-modal"
+    class="fixed inset-0 z-[150] flex items-center justify-center bg-[#060606]/[0.72] p-[30px] backdrop-blur-[6px] animate-fade"
+    hidden
+  >
+    <div
+      id="settings-card"
+      class="max-h-[88vh] w-full max-w-[620px] overflow-auto rounded-[18px] border border-white/[0.11] bg-[#121212]"
+    >
+      <div class="flex items-center justify-between border-b border-white/[0.07] px-6 pb-[18px] pt-[22px]">
+        <div>
+          <div class="text-[18px] font-semibold">Sharing settings</div>
+          <div class="mt-[3px] font-mono text-xs text-muted-2">source, quality and audio</div>
+        </div>
+        <button
+          id="btn-settings-close"
+          class="flex size-8 cursor-pointer items-center justify-center rounded-lg border border-white/10 bg-elev text-base text-fg-dim hover:bg-[#262626]"
+          >✕</button
+        >
+      </div>
+
+      <div class="flex flex-col gap-5 px-6 pb-2 pt-5">
+        <!-- source -->
+        <div class="flex items-center justify-between gap-4">
+          <div>
+            <div class="text-[13px] text-fg-dim">Source</div>
+            <div id="settings-source-hint" class="mt-0.5 font-mono text-xs text-muted-3">no source selected</div>
+          </div>
+          <button
+            id="btn-modal-source"
+            class="cursor-pointer rounded-[9px] border border-white/[0.12] bg-elev px-[15px] py-[9px] text-[13px] font-medium text-fg hover:bg-[#262626]"
+            >Choose source</button
+          >
+        </div>
+
+        <div class="h-px bg-white/[0.07]"></div>
+        <div class="font-mono text-[10px] uppercase tracking-[0.12em] text-muted-3">Quality</div>
+
+        <!-- preset -->
+        <div class="flex items-center justify-between gap-4">
+          <span class="text-[13px] text-fg-dim">Preset</span>
+          <div class="inline-flex gap-1.5 font-mono">
+            <button class="ss-seg" data-preset="gaming">Gaming</button>
+            <button class="ss-seg" data-preset="office">Office</button>
+            <button class="ss-seg" data-preset="cinema">Cinema</button>
+          </div>
+        </div>
+
+        <!-- resolution -->
+        <div class="flex items-center justify-between gap-4">
+          <span class="text-[13px] text-fg-dim">Resolution</span>
+          <div class="inline-flex gap-[3px] rounded-[9px] border border-white/[0.08] bg-[#0d0d0d] p-[3px] font-mono">
+            <button class="ss-seg" data-res="2160">4K</button>
+            <button class="ss-seg" data-res="1440">2K</button>
+            <button class="ss-seg" data-res="1080">1080p</button>
+            <button class="ss-seg" data-res="720">720p</button>
+            <button class="ss-seg" data-res="480">480p</button>
+          </div>
+        </div>
+
+        <!-- framerate -->
+        <div class="flex items-center justify-between gap-4">
+          <span class="text-[13px] text-fg-dim">Framerate</span>
+          <div class="inline-flex gap-[3px] rounded-[9px] border border-white/[0.08] bg-[#0d0d0d] p-[3px] font-mono">
+            <button class="ss-seg" data-fps="10">10</button>
+            <button class="ss-seg" data-fps="30">30</button>
+            <button class="ss-seg" data-fps="60">60</button>
+            <button class="ss-seg" data-fps="120">120</button>
+          </div>
+        </div>
+
+        <!-- bitrate -->
+        <div class="flex items-center justify-between gap-4">
+          <span class="text-[13px] text-fg-dim">Bitrate</span>
+          <div class="flex max-w-[320px] flex-1 items-center gap-3">
+            <input id="bitrate-range" type="range" min="2" max="60" value="20" class="flex-1 cursor-pointer accent-fg" />
+            <span id="bitrate-value" class="w-16 text-right font-mono text-xs text-fg-dim">20 mbps</span>
+          </div>
+        </div>
+
+        <div class="h-px bg-white/[0.07]"></div>
+
+        <!-- audio -->
+        <div class="flex items-center justify-between gap-4">
+          <span class="text-[13px] text-fg-dim">Audio</span>
+          <div class="flex gap-2">
+            <button id="toggle-sysaudio" class="ss-audio" data-active="true">
+              <span class="size-2 rounded-full bg-current opacity-90"></span>system
+            </button>
+            <button id="toggle-mic" class="ss-audio" data-active="false">
+              <span class="h-[11px] w-1.5 rounded-[3px] bg-current opacity-90"></span>mic
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div
+        class="mt-1.5 flex items-center justify-between gap-4 border-t border-white/[0.07] px-6 pb-[22px] pt-[18px]"
+      >
+        <div class="font-mono text-[11px] text-muted-3">
+          ≈ <span id="est-upload">20</span> mbps upload · <span id="est-res">Source</span> ·
+          <span id="est-fps">60</span>fps
+        </div>
+        <button
+          id="btn-settings-done"
+          class="cursor-pointer rounded-[10px] bg-cream px-6 py-2.5 text-[13px] font-semibold text-ink hover:bg-white"
+          >Done</button
+        >
+      </div>
+    </div>
+  </div>
+</section>

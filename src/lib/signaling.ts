@@ -1,12 +1,16 @@
 // WebSocket client for the signaling protocol (cf. docs/signaling-server.md).
 // Transport-agnostic: inject a socket factory (and a scheduler) in tests.
 
+export type RoomViewer = { peerId: string; pseudo: string };
+
 export type ServerMessage =
   | { type: 'hello'; peerId: string }
-  | { type: 'created'; code: string; display: string; iceServers: RTCIceServer[] }
+  | { type: 'created'; code: string; display: string; hostToken: string; iceServers: RTCIceServer[] }
   | { type: 'joined'; hostId: string; iceServers: RTCIceServer[] }
   | { type: 'join-error'; reason: string }
   | { type: 'peer-joined'; peerId: string; pseudo: string }
+  | { type: 'reclaimed'; viewers: RoomViewer[]; iceServers: RTCIceServer[] }
+  | { type: 'reclaim-error'; reason: string }
   | { type: 'signal'; from: string; data: unknown }
   | { type: 'peer-left'; peerId: string; reason?: string }
   | { type: 'kicked'; banned: boolean }
@@ -108,6 +112,10 @@ export class Signaling {
   }
   join(code: string, pseudo: string, token: string): void {
     this.send({ type: 'join', code, pseudo, token });
+  }
+  /** (host) Reprend son salon après une coupure, dans la fenêtre de grâce. */
+  reclaim(code: string, hostToken: string): void {
+    this.send({ type: 'reclaim', code, hostToken });
   }
   signal(to: string, data: unknown): void {
     this.send({ type: 'signal', to, data });

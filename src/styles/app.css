@@ -1,0 +1,92 @@
+@import 'tailwindcss';
+
+/* Design tokens extracted from the final mockup (dark theme). Opacity variants of
+   white/black are expressed inline with Tailwind's `/` syntax (e.g. border-white/10). */
+@theme {
+  --color-ink: #0a0a0a; /* page background, text on the cream primary button */
+  --color-panel: #131313; /* cards / sidebars */
+  --color-elev: #1d1d1d; /* raised buttons */
+  --color-elev-2: #232323; /* raised buttons (alt) */
+  --color-fg: #ededed; /* primary text */
+  --color-fg-dim: #cfcfcf; /* secondary text / icons */
+  --color-muted: #9a9a9a;
+  --color-muted-2: #8a8a8a;
+  --color-muted-3: #6a6a6a;
+  --color-muted-4: #5a5a5a;
+  --color-cream: #f2f2f0; /* primary button, logo dot */
+  --color-live: #f45b5b; /* LIVE / stop / error accent */
+  --color-live-fg: #f4a0a0;
+  --color-gold: #e8c56a; /* paused / reconnecting accent */
+  --color-good: #78dc96; /* healthy connection */
+
+  /* Hanken Grotesk is self-hosted via Astro's Fonts API (--font-hanken, cf. astro.config.mjs);
+     falls back to the system stack before the font loads or if it fails. */
+  --font-sans: var(--font-hanken, system-ui, -apple-system, BlinkMacSystemFont, sans-serif);
+  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+
+  --animate-fade: ssFade 0.4s ease both;
+  --animate-pulse-dot: ssPulse 1.6s ease-in-out infinite;
+  --animate-spin-ring: ssSpin 0.8s linear infinite;
+}
+
+@keyframes ssFade {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes ssPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+@keyframes ssSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Settings modal controls — active state driven by data-active (toggled from host.ts). */
+@layer components {
+  .ss-seg {
+    @apply cursor-pointer rounded-lg px-3 py-1.5 text-xs text-muted transition-colors;
+  }
+  .ss-seg[data-active='true'] {
+    @apply bg-cream font-medium text-ink;
+  }
+
+  .ss-audio {
+    @apply flex cursor-pointer items-center gap-[7px] rounded-[9px] border border-white/[0.12] bg-elev px-3 py-2 text-[13px] text-muted transition-colors;
+  }
+  .ss-audio[data-active='true'] {
+    @apply border-good/40 bg-good/[0.12] text-good;
+  }
+
+  /* Viewer quality-tier buttons (control bar) — lighter than the modal's ss-seg, centered with the label. */
+  .ss-tier {
+    @apply cursor-pointer rounded-md px-2 py-1 text-[11px] leading-none text-muted-2 transition-colors;
+  }
+  .ss-tier[data-active='true'] {
+    @apply bg-cream font-medium text-ink;
+  }
+}
+
+@layer base {
+  html,
+  body {
+    height: 100%;
+  }
+  body {
+    background: var(--color-ink);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+  }
+}

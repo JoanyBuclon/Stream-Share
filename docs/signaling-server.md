@@ -35,7 +35,7 @@ connexion (envoyé dans `hello`) et ne route que par salon.
 | `signal`  | `{ to, data }`            | Relaie `data` (SDP offer/answer ou ICE candidate) au pair `to`. Sert aussi à l'ICE restart.                               |
 | `kick`    | `{ peerId }`              | **(host)** éjecte un viewer → `kicked` au viewer + fermeture de sa connexion.                                             |
 | `ban`     | `{ peerId }`              | **(host)** éjecte **et** bannit (IP + token, cf. [`rooms-and-codes.md`](./rooms-and-codes.md)) pour la durée du salon.    |
-| `leave`   | —                         | Quitte le salon proprement (équivalent à une déconnexion).                                                                |
+| `leave`   | —                         | **Départ volontaire** (Stop/Quitter) : fin **immédiate**. Host → salon détruit + viewers notifiés (`peer-left`) sur-le-champ ; viewer → retiré, host notifié. **Pas de grâce** (contrairement à une coupure de socket, qui elle laisse la fenêtre de reclaim). |
 
 ### Serveur → client
 
@@ -75,9 +75,11 @@ Host                     Serveur (ws)                 Viewer
 **Trickle ICE** : les candidates sont envoyées au fil de l'eau via `signal` (on
 n'attend pas de les avoir toutes) — connexion plus rapide à s'établir.
 
-Nettoyage : à la fermeture d'une socket, on applique les règles de cycle de vie
-des salons — viewer retiré (host notifié `peer-left`), ou, si c'était l'host,
-**délai de grâce de 30 s** avant destruction (cf. [`rooms-and-codes.md`](./rooms-and-codes.md)).
+Nettoyage : à la fermeture **inattendue** d'une socket, on applique les règles de
+cycle de vie des salons — viewer retiré (host notifié `peer-left`), ou, si c'était
+l'host, **délai de grâce de 30 s** avant destruction (fenêtre de reclaim, cf.
+[`rooms-and-codes.md`](./rooms-and-codes.md)). Un **`leave` explicite** (Stop/Quitter)
+court-circuite la grâce : fin immédiate.
 
 ## Reconnexion (blip réseau)
 
@@ -93,7 +95,9 @@ Trois niveaux, tous **minimaux** (on ne vise pas une reprise de session complexe
 - **Média** : côté host/offerer, sur `iceConnectionState → failed`, `pc.restartIce()`
   renégocie le transport **sans détruire la connexion** ; les nouveaux candidats
   repassent par `signal`. `disconnected` est juste remonté (il se rétablit souvent
-  seul). Si l'ICE ne repart pas, on tombe sur le message d'échec (pas de TURN).
+  seul). Les restarts sont **plafonnés (5)** pour ne pas boucler sur un lien mort ;
+  côté viewer, un « reconnexion… » qui ne repart pas bascule sur **« connexion
+  impossible »** après ~20 s. Si l'ICE ne repart pas, pas de TURN → échec assumé.
 
 ```
 // ponytail: reconnexion = rouvrir le socket + (reclaim host | re-join viewer) +

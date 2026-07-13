@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Peer, type PeerCallbacks, type PeerSignal } from './peer.ts';
+import { Peer, tuneStartBitrate, type PeerCallbacks, type PeerSignal } from './peer.ts';
 
 // Fake RTCPeerConnection : enregistre les appels, laisse le test déclencher les évènements.
 // `failOnIce` permet de simuler un candidat ICE que addIceCandidate rejette (comme le vrai).
@@ -14,14 +14,44 @@ class FakePC {
   oniceconnectionstatechange: (() => void) | null = null;
   ontrack: ((e: { streams: unknown[] }) => void) | null = null;
   addedTracks: Array<{ track: unknown; stream: unknown }> = [];
+  transceivers: Array<{
+    kind: string;
+    sender: {
+      track: { kind: string } | null;
+      params: { encodings: Record<string, number>[]; degradationPreference?: string };
+      replaceTrack: (t: { kind: string } | null) => Promise<void>;
+      getParameters: () => { encodings: Record<string, number>[]; degradationPreference?: string };
+      setParameters: (p: { encodings: Record<string, number>[]; degradationPreference?: string }) => Promise<void>;
+    };
+  }> = [];
   addedIce: RTCIceCandidateInit[] = [];
   offerOptions: RTCOfferOptions[] = [];
   failOnIce: ((c: RTCIceCandidateInit) => boolean) | null = null;
   gate: Promise<void> | null = null; // si posé, setRemoteDescription attend (simule un await en vol)
   offerGate: Promise<void> | null = null; // si posé, createOffer attend (simule un restart en vol)
 
-  addTrack(track: unknown, stream: unknown) {
-    this.addedTracks.push({ track, stream });
+  addTransceiver(trackOrKind: unknown, init?: { direction?: string; streams?: unknown[] }) {
+    const track = typeof trackOrKind === 'object' && trackOrKind !== null ? (trackOrKind as { kind: string }) : null;
+    const kind = track ? track.kind : (trackOrKind as string);
+    if (track) this.addedTracks.push({ track, stream: init?.streams?.[0] });
+    const sender = {
+      track,
+      params: { encodings: [{}] } as { encodings: Record<string, number>[]; degradationPreference?: string },
+      replaceTrack: async (t: { kind: string } | null) => {
+        sender.track = t;
+      },
+      getParameters() {
+        return sender.params;
+      },
+      async setParameters(p: { encodings: Record<string, number>[]; degradationPreference?: string }) {
+        sender.params = p;
+      },
+    };
+    this.transceivers.push({ kind, sender });
+    return { sender };
+  }
+  getSenders() {
+    return this.transceivers.map((t) => t.sender);
   }
   async createOffer(options?: RTCOfferOptions) {
     this.offerOptions.push(options ?? {});
@@ -42,6 +72,9 @@ class FakePC {
   async addIceCandidate(c: RTCIceCandidateInit) {
     if (this.failOnIce?.(c)) throw new Error('candidat ICE invalide');
     this.addedIce.push(c);
+  }
+  async getStats() {
+    return new Map([['id', { type: 'inbound-rtp', kind: 'video', bytesReceived: 1 }]]) as unknown as RTCStatsReport;
   }
   close() {
     this.connectionState = 'closed';
@@ -74,6 +107,58 @@ test('offer(): ajoute les pistes, pose l offre locale, émet le SDP', async () =
   assert.deepEqual(pc.addedTracks, [{ track, stream }]);
   assert.deepEqual(pc.localDescription, { type: 'offer', sdp: 'OFFER' });
   assert.deepEqual(signals, [{ sdp: { type: 'offer', sdp: 'OFFER' } }]);
+});
+
+test('offer: pré-négocie un m-line send-only par kind (video + audio)', async () => {
+  const pc = new FakePC();
+  const peer = makePeer(pc, { onSignal: () => {} });
+  await peer.offer({ getTracks: () => [{ kind: 'video' }] } as unknown as MediaStream); // source vidéo seule
+  assert.deepEqual(
+    pc.transceivers.map((t) => t.kind),
+    ['video', 'audio'],
+    'un transceiver par kind même sans piste audio',
+  );
+});
+
+test('replaceTracks: échange la piste sur le sender du même kind (changement de source)', async () => {
+  const pc = new FakePC();
+  const peer = makePeer(pc, { onSignal: () => {} });
+  const v1 = { kind: 'video' };
+  await peer.offer({ getTracks: () => [v1] } as unknown as MediaStream);
+  assert.equal(pc.getSenders()[0].track, v1);
+  const v2 = { kind: 'video' };
+  await peer.replaceTracks({ getTracks: () => [v2] } as unknown as MediaStream);
+  assert.equal(pc.getSenders()[0].track, v2, 'la piste vidéo est remplacée, sans renégociation');
+});
+
+test('replaceTracks: ajoute l audio via le m-line pré-négocié quand la source initiale n en avait pas', async () => {
+  const pc = new FakePC();
+  const peer = makePeer(pc, { onSignal: () => {} });
+  await peer.offer({ getTracks: () => [{ kind: 'video' }] } as unknown as MediaStream); // vidéo seule
+  const audio = { kind: 'audio' };
+  await peer.replaceTracks({ getTracks: () => [{ kind: 'video' }, audio] } as unknown as MediaStream);
+  const audioSender = pc.transceivers.find((t) => t.kind === 'audio');
+  assert.equal(audioSender?.sender.track, audio, 'audio posé sur le sender pré-négocié (pas de perte silencieuse)');
+});
+
+test('replaceTracks: retire l audio absent de la nouvelle source (replaceTrack(null))', async () => {
+  const pc = new FakePC();
+  const peer = makePeer(pc, { onSignal: () => {} });
+  const audio = { kind: 'audio' };
+  await peer.offer({ getTracks: () => [{ kind: 'video' }, audio] } as unknown as MediaStream);
+  await peer.replaceTracks({ getTracks: () => [{ kind: 'video' }] } as unknown as MediaStream); // plus d'audio
+  const audioSender = pc.transceivers.find((t) => t.kind === 'audio');
+  assert.equal(audioSender?.sender.track, null, 'le sender audio est vidé, pas laissé sur une piste morte');
+});
+
+test('replaceTracks après close() est un no-op', async () => {
+  const pc = new FakePC();
+  const peer = makePeer(pc, { onSignal: () => {} });
+  const v1 = { kind: 'video' };
+  await peer.offer({ getTracks: () => [v1] } as unknown as MediaStream);
+  peer.close();
+  await peer.replaceTracks({ getTracks: () => [{ kind: 'video' }] } as unknown as MediaStream);
+  assert.equal(pc.getSenders()[0].track, v1, 'inchangé après close');
 });
 
 test('accept(offre): pose la description distante, répond, émet la réponse', async () => {
@@ -224,6 +309,49 @@ test('onIceState est remonté; failed déclenche un ICE restart côté host', as
   assert.equal(signals.length, 1);
 });
 
+test('setVideoParameters applique bitrate + scale + degradation sur le sender vidéo', async () => {
+  const pc = new FakePC();
+  const peer = makePeer(pc, { onSignal: () => {} });
+  await peer.offer({ getTracks: () => [{ kind: 'video' }] } as unknown as MediaStream);
+  await peer.setVideoParameters({ maxBitrate: 5_000_000, scaleResolutionDownBy: 1.5, degradationPreference: 'maintain-framerate' });
+  const video = pc.transceivers.find((t) => t.kind === 'video')!;
+  assert.equal(video.sender.params.encodings[0].maxBitrate, 5_000_000);
+  assert.equal(video.sender.params.encodings[0].scaleResolutionDownBy, 1.5);
+  assert.equal(video.sender.params.degradationPreference, 'maintain-framerate');
+});
+
+test('setVideoParameters après close() est un no-op', async () => {
+  const pc = new FakePC();
+  const peer = makePeer(pc, { onSignal: () => {} });
+  await peer.offer({ getTracks: () => [{ kind: 'video' }] } as unknown as MediaStream);
+  peer.close();
+  await peer.setVideoParameters({ maxBitrate: 9_000_000 });
+  const video = pc.transceivers.find((t) => t.kind === 'video')!;
+  assert.equal(video.sender.params.encodings[0].maxBitrate, undefined, 'inchangé après close');
+});
+
+test('les ICE restarts sont plafonnés (pas de boucle infinie sur échec permanent)', async () => {
+  const pc = new FakePC();
+  const peer = makePeer(pc, { onSignal: () => {} });
+  await peer.offer({ getTracks: () => [] } as unknown as MediaStream); // devient offerer
+  pc.offerOptions.length = 0;
+  for (let i = 0; i < 8; i++) {
+    pc.fireIceState('failed');
+    await new Promise((r) => setTimeout(r, 0)); // laisse le restart (fire-and-forget) se terminer
+  }
+  const restarts = pc.offerOptions.filter((o) => o.iceRestart).length;
+  assert.equal(restarts, 5, 'plafonné à 5 restarts malgré 8 échecs');
+});
+
+test('stats() renvoie le rapport, null après close()', async () => {
+  const pc = new FakePC();
+  const peer = makePeer(pc, { onSignal: () => {} });
+  const report = await peer.stats();
+  assert.equal(report && [...report.values()].length, 1);
+  peer.close();
+  assert.equal(await peer.stats(), null);
+});
+
 test('restartIce après close() est un no-op', async () => {
   const pc = new FakePC();
   const signals: PeerSignal[] = [];
@@ -249,6 +377,31 @@ test('restartIce ne se chevauche pas (un restart en vol bloque le second)', asyn
   release();
   await Promise.all([p1, p2]);
   assert.equal(pc.offerOptions.length, 1, 'un seul createOffer malgré deux appels');
+});
+
+test('tuneStartBitrate ajoute start/min aux fmtp vidéo (VP9/AV1), épargne audio et rtx', () => {
+  const sdp = [
+    'v=0',
+    'm=audio 9 UDP/TLS/RTP/SAVPF 111',
+    'a=rtpmap:111 opus/48000/2',
+    'a=fmtp:111 minptime=10',
+    'm=video 9 UDP/TLS/RTP/SAVPF 98 45 99',
+    'a=rtpmap:98 VP9/90000',
+    'a=fmtp:98 profile-id=0',
+    'a=rtpmap:45 AV1/90000',
+    'a=fmtp:45 level-idx=5;profile=0',
+    'a=rtpmap:99 rtx/90000', // pas de fmtp → intouché
+  ].join('\r\n');
+  const out = tuneStartBitrate(sdp, 10_000); // min=4000, start=8000
+  assert.match(out, /a=fmtp:98 profile-id=0;x-google-start-bitrate=8000;x-google-min-bitrate=4000/);
+  assert.match(out, /a=fmtp:45 level-idx=5;profile=0;x-google-start-bitrate=8000;x-google-min-bitrate=4000/);
+  assert.match(out, /a=fmtp:111 minptime=10\r\n/); // audio inchangé
+  assert.doesNotMatch(out, /rtx.*x-google/s); // rtx sans fmtp non touché
+});
+
+test('tuneStartBitrate est un no-op sans section vidéo ou sans bitrate', () => {
+  assert.equal(tuneStartBitrate('m=audio 9 RTP\r\na=rtpmap:111 opus/48000/2', 10_000), 'm=audio 9 RTP\r\na=rtpmap:111 opus/48000/2');
+  assert.equal(tuneStartBitrate('m=video 9 RTP\r\na=rtpmap:98 VP9/90000', 0), 'm=video 9 RTP\r\na=rtpmap:98 VP9/90000');
 });
 
 test('accept() gère une seconde offre (renégociation ICE restart côté viewer)', async () => {

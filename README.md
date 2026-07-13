@@ -1,43 +1,29 @@
-# Astro Starter Kit: Minimal
+# Stream Share
 
-```sh
-pnpm create astro@latest -- --template minimal
-```
+A no install, no account, no server in the middle screen sharing and streaming straight to your friends web app.
 
-> 🧑‍🚀 **Seasoned astronaut?** Delete this file. Have fun!
+Create a stream share in 2 clicks, choose whatever resolution and framerate your machine can run at.
 
-## 🚀 Project Structure
+Send a link to your friend and voilà!
 
-Inside of your Astro project, you'll see the following folders and files:
+Available [here](https://stream.joanybuclon.com).
 
-```text
-/
-├── public/
-├── src/
-│   └── pages/
-│       └── index.astro
-└── package.json
-```
+## Built With
 
-Astro looks for `.astro` or `.md` files in the `src/pages/` directory. Each page is exposed as a route based on its file name.
+This project uses the following stack:
 
-There's nothing special about `src/components/`, but that's where we like to put any Astro/React/Vue/Svelte/Preact components.
+- [Astro](https://astro.build)
+- [ws](https://github.com/websockets/ws)
+- [Tailwind](https://tailwindcss.com/)
+- [Node](https://nodejs.org/)
+- [Docker](https://www.docker.com)
 
-Any static assets, like images, can be placed in the `public/` directory.
+## Usage
 
-## 🧞 Commands
+Clone the repository and run `pnpm i`
 
-All commands are run from the root of the project, from a terminal:
+You can then launch it using `pnpm dev`
 
-| Command                   | Action                                           |
-| :------------------------ | :----------------------------------------------- |
-| `pnpm install`             | Installs dependencies                            |
-| `pnpm dev`             | Starts local dev server at `localhost:4321`      |
-| `pnpm build`           | Build your production site to `./dist/`          |
-| `pnpm preview`         | Preview your build locally, before deploying     |
-| `pnpm astro ...`       | Run CLI commands like `astro add`, `astro check` |
-| `pnpm astro -- --help` | Get help using the Astro CLI                     |
+## Deployment
 
-## 👀 Want to learn more?
-
-Feel free to check [our documentation](https://docs.astro.build) or jump into our [Discord server](https://astro.build/chat).
+This app is currently deployed via github actions over at arktos-01.

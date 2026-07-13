@@ -12,10 +12,12 @@
     "astro": "astro",
     "typecheck": "astro check",
     "lint": "eslint .",
-    "test": "node --test src/lib/signaling.test.ts src/lib/peer.test.ts"
+    "test": "node --test src/lib/signaling.test.ts src/lib/peer.test.ts src/lib/code.test.ts src/lib/settings.test.ts src/lib/serial.test.ts src/lib/stats.test.ts src/lib/wakelock.test.ts"
   },
   "dependencies": {
-    "astro": "^7.0.7"
+    "@tailwindcss/vite": "^4.2.2",
+    "astro": "^7.0.7",
+    "tailwindcss": "^4.2.2"
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.9",

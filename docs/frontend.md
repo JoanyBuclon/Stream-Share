@@ -80,7 +80,7 @@ petite fonction de rendu suffisent.
 - Vidéo : aperçu local (ou placeholder « en pause »).
 - Source : bouton natif « choisir la source » → nom réel (`track.label`) + aperçu.
 - Qualité : **presets** (Gaming / Bureautique / Ciné) au-dessus des réglages
-  résolution / FPS (`10/30/60/120`) / bitrate ; toggle **curseur**.
+  résolution / FPS (`10/30/60/120`) / bitrate.
 - Audio : toggles **son système** + **micro**.
 - Session : **copier le lien**, **liste des viewers** (pseudo + ping + état) avec
   **kick / ban** par ligne, **pause**, **stop**, estimation d'upload, chrono.
@@ -118,3 +118,31 @@ connect-src 'self';   # wss same-origin (/ws) passe avec 'self' ; sinon lister l
 ```
 
 Voir [`deployment.md`](./deployment.md) pour les en-têtes complets.
+
+## État d'implémentation (MVP)
+
+Ce qui est **câblé et testé en réel** (host ↔ viewer direct) :
+
+- Routage (landing / join par hash / host / viewer), **création + `reclaim`** host,
+  re-join viewer, **kick / ban**, **Stop immédiat**.
+- Host : capture `getDisplayMedia`, aperçu local, **changement de source à chaud**
+  (`replaceTrack`), copier le lien, liste des viewers.
+- Host — **modal Réglages** appliquée en direct : source, **presets** (Gaming /
+  Office / Cinema), **résolution** (`scaleResolutionDownBy`), **FPS**
+  (`applyConstraints`), **bitrate** (`maxBitrate`), **audio système + micro**
+  (mix WebAudio, `settings.ts` / `audio.ts`). *(Curseur retiré : la contrainte
+  `cursor` est ignorée par les navigateurs.)*
+- Host — **pause / reprise** (vidéo coupée, audio maintenu ; message de contrôle
+  `pause`/`resume` relayé aux viewers).
+- Viewer : lecture du flux, volume/mute, plein écran, PiP, états
+  live / **pause** / reconnexion / terminé / échec (avec **timeout de reconnexion**).
+- Viewer — **qualité par-viewer** : paliers `Auto / …p` (dynamiques, plafonnés au
+  flux host, cap annoncé par l'host) ; la demande est relayée à l'host, qui applique
+  `scaleResolutionDownBy` sur **le sender de ce viewer** (`effectiveScale`).
+- Viewer — **overlay stats** : toggle → polling `getStats()` (latence / fps / bitrate
+  / résolution / packet loss ; parsing pur dans `stats.ts`).
+- **Wake lock** host + viewer (`navigator.wakeLock`, ré-acquis à la visibilité,
+  best-effort, sans UI ; `wakelock.ts`).
+
+Reste : la police **Hanken Grotesk** n'est pas encore auto-hébergée (stack système
+en attendant). Le gros de la maquette est désormais implémenté.

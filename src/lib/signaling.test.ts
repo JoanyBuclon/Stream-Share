@@ -96,6 +96,20 @@ test('les méthodes émettent le bon JSON de protocole', async () => {
   );
 });
 
+test('reclaim() émet le JSON attendu; reclaimed / reclaim-error sont dispatchés', async () => {
+  const { sig, sock } = await connected();
+  sig.reclaim('7K2QP9', 'tok-uuid');
+  assert.deepEqual(JSON.parse(sock.sent[0]), { type: 'reclaim', code: '7K2QP9', hostToken: 'tok-uuid' });
+  const got: unknown[] = [];
+  sig.onMessage((m) => got.push(m));
+  sock.emitMessage({ type: 'reclaimed', viewers: [{ peerId: 'p2', pseudo: 'joany' }], iceServers: [] });
+  sock.emitMessage({ type: 'reclaim-error', reason: 'invalid' });
+  assert.deepEqual(got, [
+    { type: 'reclaimed', viewers: [{ peerId: 'p2', pseudo: 'joany' }], iceServers: [] },
+    { type: 'reclaim-error', reason: 'invalid' },
+  ]);
+});
+
 test('rien n est envoyé tant que le socket n est pas OPEN', () => {
   const sock = new FakeSocket(); // reste en CONNECTING
   const sig = new Signaling('ws://test', () => sock as unknown as WebSocket);

@@ -145,6 +145,18 @@ function cleanup(client) {
   }
 }
 
+// Départ explicite (l'utilisateur a cliqué Stop/Quitter) : volontaire, donc on termine tout
+// de suite — contrairement à une coupure de socket inattendue, qui ouvre au host une fenêtre
+// de grâce pour reclaim.
+function onLeave(client) {
+  const room = rooms.get(client.roomCode);
+  if (room && client.role === 'host' && room.hostId === client.id) {
+    if (room.graceTimer) clearTimeout(room.graceTimer);
+    destroyRoom(room); // notifie les viewers (peer-left host-left) + libère le code, sans grâce
+  }
+  cleanup(client); // retire le client ; pour un viewer, notifie aussi l'host
+}
+
 export function createSignalingServer(opts = {}) {
   if (opts.graceMs != null) graceMs = opts.graceMs;
   const server = createServer((req, res) => {
@@ -190,7 +202,7 @@ export function createSignalingServer(opts = {}) {
         case 'ban':
           return onKickBan(client, msg, true);
         case 'leave':
-          return cleanup(client);
+          return onLeave(client);
       }
     });
 

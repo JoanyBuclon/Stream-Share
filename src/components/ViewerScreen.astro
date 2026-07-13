@@ -1,0 +1,193 @@
+---
+// Viewer view: watch the host stream, with local-only controls (mute/volume/pip/fullscreen).
+// MVP scope — no quality tiers / stats overlay yet (see docs/frontend.md).
+---
+
+<section id="screen-viewer" class="flex min-h-0 flex-1 flex-col bg-black animate-fade" hidden>
+  <!-- top bar -->
+  <header class="flex flex-shrink-0 items-center justify-between px-[22px] py-3.5">
+    <div class="flex items-center gap-3.5">
+      <button
+        id="btn-leave"
+        class="cursor-pointer rounded-lg border border-white/10 bg-[#161616] px-3 py-[7px] font-mono text-xs text-fg-dim hover:bg-[#222]"
+        >← leave</button
+      >
+      <div class="flex items-center gap-[9px]">
+        <span
+          id="viewer-host-initials"
+          class="flex size-[30px] items-center justify-center rounded-lg bg-[#222] font-mono text-[11px] text-fg-dim"
+          >—</span
+        >
+        <div>
+          <div id="viewer-host-name" class="text-[13px] font-semibold leading-[1.1]">the host's screen</div>
+          <div class="font-mono text-[10px] text-muted-2">room <span id="viewer-room-code">—</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="flex items-center gap-2">
+      <div
+        id="viewer-live-badge"
+        class="flex items-center gap-[7px] rounded-full border border-live/30 bg-live/[0.12] px-[11px] py-[5px]"
+        hidden
+      >
+        <span class="size-[7px] animate-pulse-dot rounded-full bg-live"></span>
+        <span class="font-mono text-[11px] text-live-fg">LIVE</span>
+      </div>
+      <div
+        id="viewer-reconnecting-badge"
+        class="flex items-center gap-[7px] rounded-full border border-gold/[0.28] bg-gold/[0.12] px-[11px] py-[5px]"
+        hidden
+      >
+        <span class="block size-[11px] animate-spin-ring rounded-full border-2 border-gold/40 border-t-gold"></span>
+        <span class="font-mono text-[11px] text-gold">reconnecting…</span>
+      </div>
+      <div
+        class="flex items-center gap-[7px] rounded-lg border border-white/[0.08] bg-panel px-[11px] py-1.5 font-mono text-[11px] text-muted-2"
+      >
+        <span id="conn-dot" class="block size-1.5 rounded-full bg-muted-4"></span>
+        <span id="conn-label">connecting…</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- stage -->
+  <div class="relative flex min-h-0 flex-1 items-center justify-center">
+    <video id="viewer-video" class="absolute inset-0 size-full object-contain" autoplay playsinline hidden></video>
+
+    <!-- connection stats overlay (toggled from the control bar) -->
+    <div
+      id="viewer-stats"
+      class="pointer-events-none absolute right-4 top-4 min-w-[190px] rounded-[11px] border border-white/10 bg-ink/[0.82] px-4 py-3.5 font-mono backdrop-blur-[10px]"
+      hidden
+    >
+      <div class="mb-[11px] text-[10px] tracking-[0.1em] text-muted-3">CONNECTION STATS</div>
+      <div class="flex flex-col gap-2 text-xs">
+        <div class="flex justify-between gap-6"><span class="text-muted-2">latency</span><span id="stat-latency">—</span></div>
+        <div class="flex justify-between gap-6"><span class="text-muted-2">framerate</span><span id="stat-fps">—</span></div>
+        <div class="flex justify-between gap-6"><span class="text-muted-2">bitrate</span><span id="stat-bitrate">—</span></div>
+        <div class="flex justify-between gap-6"><span class="text-muted-2">resolution</span><span id="stat-res">—</span></div>
+        <div class="flex justify-between gap-6"><span class="text-muted-2">packet loss</span><span id="stat-loss">—</span></div>
+      </div>
+    </div>
+
+    <!-- reconnecting overlay -->
+    <div
+      id="viewer-reconnect-overlay"
+      class="absolute inset-0 flex flex-col items-center justify-center gap-4 bg-[#060606]/[0.66] backdrop-blur-[2px]"
+      hidden
+    >
+      <span class="block size-[34px] animate-spin-ring rounded-full border-[3px] border-gold/30 border-t-gold"></span>
+      <div class="text-[15px] font-medium text-gold">Reconnecting…</div>
+      <div class="font-mono text-xs text-muted-2">the stream resumes automatically</div>
+    </div>
+
+    <!-- ended -->
+    <div id="viewer-ended" class="max-w-[420px] p-[30px] text-center" hidden>
+      <div
+        class="mx-auto mb-[22px] flex size-[60px] items-center justify-center rounded-2xl border border-white/10 bg-[#141414]"
+      >
+        <span class="block size-[18px] rounded-[3px] bg-muted"></span>
+      </div>
+      <div class="mb-2 text-xl font-semibold">The host stopped sharing</div>
+      <div class="mb-6 text-sm leading-[1.55] text-muted-2">
+        The session has ended. Thanks for watching — you can join another room whenever you like.
+      </div>
+      <button
+        id="btn-viewer-back-home"
+        class="cursor-pointer rounded-[10px] bg-cream px-6 py-3 text-sm font-semibold text-ink hover:bg-white"
+        >Back to home</button
+      >
+    </div>
+
+    <!-- paused (host paused the share) -->
+    <div id="viewer-paused" class="max-w-[420px] p-[30px] text-center" hidden>
+      <div
+        class="mx-auto mb-[22px] flex size-[60px] items-center justify-center gap-[5px] rounded-2xl border border-gold/[0.24] bg-[#141414]"
+      >
+        <span class="block h-5 w-[5px] rounded-[2px] bg-gold"></span>
+        <span class="block h-5 w-[5px] rounded-[2px] bg-gold"></span>
+      </div>
+      <div class="mb-2 text-xl font-semibold">The host paused the share</div>
+      <div class="text-sm leading-[1.55] text-muted-2">
+        You're still in the room. The stream resumes as soon as the host resumes sharing.
+      </div>
+    </div>
+
+    <!-- error P2P -->
+    <div id="viewer-error" class="max-w-[440px] p-[30px] text-center" hidden>
+      <div
+        class="mx-auto mb-[22px] flex size-[60px] items-center justify-center rounded-2xl border border-live/[0.28] bg-live/10"
+      >
+        <span class="text-[26px] leading-none text-live">!</span>
+      </div>
+      <div class="mb-2 text-xl font-semibold">Direct connection failed</div>
+      <div class="mb-6 text-sm leading-[1.55] text-muted-2">
+        Your network (or the host's) is too restrictive to establish a direct peer-to-peer connection. Try another
+        network, or ask the host to retry.
+      </div>
+      <div class="flex justify-center gap-2.5">
+        <button
+          id="btn-retry"
+          class="cursor-pointer rounded-[10px] bg-cream px-5 py-[11px] text-[13px] font-semibold text-ink hover:bg-white"
+          >Retry</button
+        >
+        <button
+          id="btn-error-back-home"
+          class="cursor-pointer rounded-[10px] border border-white/[0.12] bg-elev px-5 py-[11px] text-[13px] text-fg-dim hover:bg-[#262626]"
+          >Back to home</button
+        >
+      </div>
+    </div>
+  </div>
+
+  <!-- control bar -->
+  <div id="viewer-controls" class="flex-shrink-0 px-[22px] pb-5 pt-3.5" hidden>
+    <div
+      class="flex flex-wrap items-center gap-3.5 rounded-[14px] border border-white/[0.09] bg-panel/90 px-4 py-[11px] backdrop-blur-[10px]"
+    >
+      <button id="btn-mute" class="flex cursor-pointer items-center gap-0.5 p-1 text-fg" title="mute">
+        <span
+          class="block size-0 border-y-[6px] border-r-[9px] border-y-transparent border-r-current"
+          aria-hidden="true"></span>
+        <span class="block h-[11px] w-[5px] rounded-[2px] bg-current" aria-hidden="true"></span>
+      </button>
+      <input id="vol-range" type="range" min="0" max="100" value="100" class="w-[110px] cursor-pointer accent-fg" />
+      <span id="vol-label" class="font-mono text-[11px] text-muted-2">100%</span>
+
+      <div class="h-6 w-px bg-white/[0.09]"></div>
+
+      <!-- quality tiers (populated dynamically, capped at the host stream) -->
+      <div id="viewer-quality" class="flex flex-wrap items-center gap-1 font-mono"></div>
+
+      <div class="flex-1"></div>
+
+      <button
+        id="btn-stats"
+        data-active="false"
+        class="cursor-pointer rounded-lg border border-white/10 bg-elev px-2.5 py-2 font-mono text-[11px] text-fg-dim hover:border-white/[0.24] data-[active=true]:border-good/40 data-[active=true]:bg-good/[0.12] data-[active=true]:text-good"
+        >stats</button
+      >
+      <button
+        id="btn-pip"
+        title="picture in picture"
+        class="flex cursor-pointer items-center justify-center rounded-lg border border-white/10 bg-elev px-2.5 py-2 hover:border-white/[0.24]"
+      >
+        <span class="relative block h-[13px] w-[17px] rounded-[2px] border-[1.5px] border-fg-dim">
+          <span class="absolute bottom-px right-px h-1.5 w-2 rounded-[1px] bg-fg-dim"></span>
+        </span>
+      </button>
+      <button
+        id="btn-fs"
+        title="fullscreen"
+        class="cursor-pointer rounded-lg border border-white/10 bg-elev px-2.5 py-2 hover:border-white/[0.24]"
+      >
+        <span class="relative block size-[15px]">
+          <span class="absolute left-0 top-0 size-1.5 border-l-[1.5px] border-t-[1.5px] border-fg-dim"></span>
+          <span class="absolute right-0 top-0 size-1.5 border-r-[1.5px] border-t-[1.5px] border-fg-dim"></span>
+          <span class="absolute bottom-0 left-0 size-1.5 border-b-[1.5px] border-l-[1.5px] border-fg-dim"></span>
+          <span class="absolute bottom-0 right-0 size-1.5 border-b-[1.5px] border-r-[1.5px] border-fg-dim"></span>
+        </span>
+      </button>
+    </div>
+  </div>
+</section>

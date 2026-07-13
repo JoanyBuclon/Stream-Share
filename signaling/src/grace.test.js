@@ -128,5 +128,35 @@ const j = (obj) => JSON.stringify(obj);
   host2.close();
 }
 
+// --- Scénario 5 : leave explicite du host → viewers notifiés tout de suite (pas de grâce) ---
+{
+  const host = await open(url);
+  const hostNext = reader(host);
+  host.send(j({ type: 'create' }));
+  const created = await until(hostNext, 'created');
+
+  const viewer = await open(url);
+  const viewerNext = reader(viewer);
+  viewer.send(j({ type: 'join', code: created.code, pseudo: 'sam' }));
+  await until(viewerNext, 'joined');
+  await until(hostNext, 'peer-joined');
+
+  const t0 = Date.now();
+  host.send(j({ type: 'leave' })); // arrêt volontaire (bouton Stop)
+  const left = await until(viewerNext, 'peer-left');
+  assert.equal(left.reason, 'host-left');
+  assert.ok(Date.now() - t0 < GRACE, 'notification immédiate, pas après la fenêtre de grâce');
+
+  // Salon détruit sur-le-champ : un reclaim échoue.
+  const host2 = await open(url);
+  const host2Next = reader(host2);
+  host2.send(j({ type: 'reclaim', code: created.code, hostToken: created.hostToken }));
+  const err = await until(host2Next, 'reclaim-error');
+  assert.equal(err.reason, 'invalid');
+  host.close();
+  viewer.close();
+  host2.close();
+}
+
 await new Promise((r) => server.close(r));
 console.log('grace.test.js OK');
