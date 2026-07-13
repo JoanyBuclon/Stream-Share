@@ -48,6 +48,14 @@ jobs:
       - name: Test (signaling)
         run: pnpm --dir signaling test
 
+      # E2E: real host↔viewer WebRTC flow in headless Chromium (Playwright starts the dev +
+      # signaling servers itself since CI=true → reuseExistingServer is off).
+      - name: Install Playwright browser
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: E2E (host ↔ viewer)
+        run: pnpm e2e
+
   publish:
     needs: quality
     runs-on: ubuntu-latest

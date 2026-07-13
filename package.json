@@ -12,7 +12,8 @@
     "astro": "astro",
     "typecheck": "astro check",
     "lint": "eslint .",
-    "test": "node --test src/lib/signaling.test.ts src/lib/peer.test.ts src/lib/code.test.ts src/lib/settings.test.ts src/lib/serial.test.ts src/lib/stats.test.ts src/lib/wakelock.test.ts"
+    "test": "node --test src/lib/signaling.test.ts src/lib/peer.test.ts src/lib/code.test.ts src/lib/settings.test.ts src/lib/serial.test.ts src/lib/stats.test.ts src/lib/wakelock.test.ts",
+    "e2e": "playwright test"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.2.2",
@@ -22,6 +23,7 @@
   "devDependencies": {
     "@astrojs/check": "^0.9.9",
     "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.61.1",
     "@types/node": "^24.0.0",
     "eslint": "^10.4.0",
     "eslint-plugin-astro": "^1.7.0",
