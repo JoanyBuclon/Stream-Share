@@ -78,7 +78,6 @@ export class HostController {
     hide(el('host-stage-meta'));
     hide(el('host-live-badge'));
     hide(el('btn-stop'));
-    hide(el('btn-change-source'));
     hide(el('btn-pause'));
     hide(el('host-paused'));
     hide(el('host-paused-badge'));
@@ -92,7 +91,6 @@ export class HostController {
     // Empty-state "Choose source" opens the settings modal (pick source + tune quality there);
     // the control-bar "Change source" is a direct quick re-pick.
     el('btn-choose-source').addEventListener('click', this.openSettings, { signal });
-    el('btn-change-source').addEventListener('click', this.chooseSource, { signal });
     el('btn-pause').addEventListener('click', () => void this.togglePause(), { signal });
     el('btn-resume').addEventListener('click', () => void this.togglePause(), { signal });
     // Once the preview knows its real dimensions: clamp the cap, re-apply, announce to viewers.
@@ -140,9 +138,7 @@ export class HostController {
     show(el('host-live-badge'));
     show(el('btn-stop'));
     show(el('btn-pause'));
-    show(el('btn-change-source'));
     show(el('host-quality-bar'));
-    setText('source-btn-label', video?.label || 'Change source');
     setText('host-source-name', video?.label || 'screen');
 
     try {

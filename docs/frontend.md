@@ -143,6 +143,13 @@ Ce qui est **câblé et testé en réel** (host ↔ viewer direct) :
   / résolution / packet loss ; parsing pur dans `stats.ts`).
 - **Wake lock** host + viewer (`navigator.wakeLock`, ré-acquis à la visibilité,
   best-effort, sans UI ; `wakelock.ts`).
+- Viewer — **UI auto-masquée** en lecture : la barre du haut + les contrôles
+  s'estompent après 3 s d'immobilité de la souris (ou dès qu'elle quitte le stage) ;
+  un mouvement les rappelle. Actif uniquement pendant le flux `live`.
+- Retour à l'accueil : **sort du plein écran** ; source choisie **uniquement dans
+  Réglages** (bouton de la barre retiré) ; l'entête viewer affiche **le code de room**
+  (l'host n'a pas de nom).
+- Police **Hanken Grotesk** auto-hébergée via l'API Fonts d'Astro (conforme CSP
+  `font-src 'self'`, repli système avant chargement).
 
-Reste : la police **Hanken Grotesk** n'est pas encore auto-hébergée (stack système
-en attendant). Le gros de la maquette est désormais implémenté.
+Le gros de la maquette est désormais implémenté ; reste une passe de test manuel complet.

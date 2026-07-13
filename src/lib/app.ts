@@ -52,6 +52,7 @@ function teardown(): void {
 
 function goHome(): void {
   teardown();
+  if (document.fullscreenElement) void document.exitFullscreen().catch(() => {}); // leave the viewer's fullscreen
   history.replaceState(null, '', location.pathname);
   showScreen('home');
 }

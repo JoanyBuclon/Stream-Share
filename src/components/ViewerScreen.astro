@@ -4,25 +4,15 @@
 ---
 
 <section id="screen-viewer" class="flex min-h-0 flex-1 flex-col bg-black animate-fade" hidden>
-  <!-- top bar -->
-  <header class="flex flex-shrink-0 items-center justify-between px-[22px] py-3.5">
+  <!-- top bar (auto-hides with the control bar while watching) -->
+  <header id="viewer-topbar" class="flex flex-shrink-0 items-center justify-between px-[22px] py-3.5 transition-opacity duration-300">
     <div class="flex items-center gap-3.5">
       <button
         id="btn-leave"
         class="cursor-pointer rounded-lg border border-white/10 bg-[#161616] px-3 py-[7px] font-mono text-xs text-fg-dim hover:bg-[#222]"
         >← leave</button
       >
-      <div class="flex items-center gap-[9px]">
-        <span
-          id="viewer-host-initials"
-          class="flex size-[30px] items-center justify-center rounded-lg bg-[#222] font-mono text-[11px] text-fg-dim"
-          >—</span
-        >
-        <div>
-          <div id="viewer-host-name" class="text-[13px] font-semibold leading-[1.1]">the host's screen</div>
-          <div class="font-mono text-[10px] text-muted-2">room <span id="viewer-room-code">—</span></div>
-        </div>
-      </div>
+      <div class="font-mono text-[13px] tracking-[0.14em] text-fg-dim">room <span id="viewer-room-code">—</span></div>
     </div>
     <div class="flex items-center gap-2">
       <div
@@ -140,8 +130,8 @@
     </div>
   </div>
 
-  <!-- control bar -->
-  <div id="viewer-controls" class="flex-shrink-0 px-[22px] pb-5 pt-3.5" hidden>
+  <!-- control bar (auto-hides after 3s idle / on mouse leave while watching) -->
+  <div id="viewer-controls" class="flex-shrink-0 px-[22px] pb-5 pt-3.5 transition-opacity duration-300" hidden>
     <div
       class="flex flex-wrap items-center gap-3.5 rounded-[14px] border border-white/[0.09] bg-panel/90 px-4 py-[11px] backdrop-blur-[10px]"
     >

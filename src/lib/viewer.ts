@@ -4,7 +4,7 @@
 
 import { Signaling, type ServerMessage, type ConnectionStatus } from './signaling.ts';
 import { Peer, type PeerSignal } from './peer.ts';
-import { el, show, hide, setText, initials } from './dom.ts';
+import { el, show, hide, setText } from './dom.ts';
 import { formatCode } from './code.ts';
 import { viewerTiers, type ViewerTier } from './settings.ts';
 import { readStats, rateStats, type RtcStat, type Sample } from './stats.ts';
@@ -49,6 +49,9 @@ function parseTier(v: string): ViewerTier {
 // Generous enough to cover the host's capped ICE restarts (a real blip recovers in seconds).
 const RECONNECT_TIMEOUT_MS = 20_000;
 
+// Immersive playback: fade the top bar + controls after the mouse sits still this long.
+const UI_IDLE_MS = 3_000;
+
 export class ViewerController {
   private readonly sig: Signaling;
   private readonly code: string;
@@ -68,6 +71,8 @@ export class ViewerController {
   private statsTimer: ReturnType<typeof setInterval> | null = null;
   private prevSample: Sample | null = null; // previous getStats sample (for bitrate/loss deltas)
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private uiHideTimer: ReturnType<typeof setTimeout> | null = null;
+  private watching = false; // true only while a live stream plays → gate the UI auto-hide
   private readonly ac = new AbortController(); // removes all DOM listeners on destroy()
   private readonly wakeLock = new WakeLock(); // keep the screen awake while watching
   private readonly offMessage: () => void;
@@ -83,8 +88,8 @@ export class ViewerController {
     this.hostId = init.hostId;
 
     setText('viewer-room-code', formatCode(this.code));
-    setText('viewer-host-initials', initials(this.pseudo)); // host label is unknown here; show room identity
     this.wireControls();
+    this.wireAutoHide();
     this.offMessage = sig.onMessage(this.onMessage);
     this.offStatus = sig.onStatus(this.onStatus);
 
@@ -256,6 +261,8 @@ export class ViewerController {
     hide(el('viewer-live-badge'));
     hide(el('viewer-reconnecting-badge'));
 
+    this.setWatching(state === 'live'); // gate the UI auto-hide
+
     const dot = el('conn-dot');
     switch (state) {
       case 'connecting':
@@ -367,6 +374,44 @@ export class ViewerController {
     );
   }
 
+  // Auto-hide the UI (top bar + controls) for an immersive view: fade out after UI_IDLE_MS of
+  // mouse stillness or when the pointer leaves the stage; any move brings it back. Only while
+  // watching a live stream — paused/ended/error screens always keep the UI.
+  private wireAutoHide(): void {
+    const stage = el('screen-viewer');
+    const signal = this.ac.signal;
+    stage.addEventListener('mousemove', this.pokeUi, { signal });
+    stage.addEventListener('mouseleave', () => this.setUiVisible(false), { signal });
+  }
+
+  private pokeUi = (): void => {
+    if (!this.watching) return;
+    this.setUiVisible(true);
+    if (this.uiHideTimer !== null) clearTimeout(this.uiHideTimer);
+    this.uiHideTimer = setTimeout(() => this.setUiVisible(false), UI_IDLE_MS);
+  };
+
+  private setUiVisible(visible: boolean): void {
+    const shown = visible || !this.watching; // never hide unless a stream is actually playing
+    for (const id of ['viewer-topbar', 'viewer-controls']) {
+      const node = el(id);
+      node.style.opacity = shown ? '1' : '0';
+      node.style.pointerEvents = shown ? '' : 'none';
+    }
+    el('screen-viewer').style.cursor = shown ? '' : 'none';
+  }
+
+  // Called from setState: arm the idle-hide when a stream goes live, disarm (and reveal) otherwise.
+  private setWatching(watching: boolean): void {
+    this.watching = watching;
+    if (this.uiHideTimer !== null) {
+      clearTimeout(this.uiHideTimer);
+      this.uiHideTimer = null;
+    }
+    if (watching) this.pokeUi(); // show now + start the 3s countdown
+    else this.setUiVisible(true);
+  }
+
   private leave = (): void => {
     this.destroy();
     this.onLeave();
@@ -378,6 +423,7 @@ export class ViewerController {
     this.wakeLock.release();
     this.stopStats();
     if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
+    if (this.uiHideTimer !== null) clearTimeout(this.uiHideTimer);
     this.offMessage();
     this.offStatus();
     this.peer?.close();
