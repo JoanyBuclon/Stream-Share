@@ -1,6 +1,6 @@
-// Viewer controller: a single Peer to the host, stream playback, lifecycle states
-// and local-only controls. On a signaling blip it re-joins (new peerId + Peer).
-// MVP scope — no quality tiers / stats yet (see docs/frontend.md).
+// Viewer controller: a single Peer to the host, stream playback, lifecycle states,
+// quality tier requests and a local stats overlay. On a signaling blip it re-joins
+// (new peerId + Peer). See docs/frontend.md.
 
 import { Signaling, type ServerMessage, type ConnectionStatus } from './signaling.ts';
 import { Peer, type PeerSignal } from './peer.ts';

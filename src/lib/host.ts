@@ -1,6 +1,7 @@
 // Host controller: capture a source, open one Peer per viewer (mesh), manage the viewer
-// sidebar, drive the settings modal (source / quality / audio), and reclaim the room after
-// a signaling blip. Per-viewer quality and pause are still deferred (see docs/frontend.md).
+// sidebar (per-viewer quality, kick/ban, stats), drive the settings modal (source / quality /
+// audio), pause/resume the stream, and reclaim the room after a signaling blip.
+// See docs/frontend.md.
 
 import { Signaling, type ServerMessage, type ConnectionStatus, type RoomViewer } from './signaling.ts';
 import { Peer, type PeerSignal } from './peer.ts';
