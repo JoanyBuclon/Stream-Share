@@ -20,6 +20,9 @@ test('maxBitrateBps: mbps → bps', () => {
 test('estimatedUpload: (bitrate + audio) × viewers (coût mesh)', () => {
   assert.equal(estimatedUpload({ ...DEFAULT_QUALITY, bitrate: 10, systemAudio: false, mic: false }, 1), 10);
   assert.equal(estimatedUpload({ ...DEFAULT_QUALITY, bitrate: 10, systemAudio: true, mic: true }, 1), 10.1);
+  // Une seule piste Opus mixée : le micro seul coûte autant que système + micro (pas d'addition).
+  assert.equal(estimatedUpload({ ...DEFAULT_QUALITY, bitrate: 10, systemAudio: true, mic: false }, 1), 10.1);
+  assert.equal(estimatedUpload({ ...DEFAULT_QUALITY, bitrate: 10, systemAudio: false, mic: true }, 1), 10.1);
   assert.equal(estimatedUpload({ ...DEFAULT_QUALITY, bitrate: 10, systemAudio: false, mic: false }, 3), 30);
   assert.equal(estimatedUpload({ ...DEFAULT_QUALITY, bitrate: 10, systemAudio: false, mic: false }, 0), 10, 'au moins 1 pour l affichage');
 });

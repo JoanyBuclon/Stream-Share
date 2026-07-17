@@ -83,7 +83,9 @@ export function maxBitrateBps(mbps: number): number {
 /** Rough TOTAL upload for the modal footer: in a mesh each viewer is a separate outgoing
  *  stream, so the cost scales with the viewer count (min 1 for display). */
 export function estimatedUpload(q: Quality, viewers: number): number {
-  const audio = (q.systemAudio ? 0.06 : 0) + (q.mic ? 0.05 : 0);
+  // System + mic are mixed into ONE Opus track (cf. AudioMixer), so the cost is not additive:
+  // either something is sent or nothing is. 0.13 = the 128 kbps negotiated in tuneOpus.
+  const audio = q.systemAudio || q.mic ? 0.13 : 0;
   return Math.round((q.bitrate + audio) * Math.max(1, viewers) * 10) / 10;
 }
 

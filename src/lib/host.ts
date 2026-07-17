@@ -179,7 +179,13 @@ export class HostController {
       this.quality = { ...this.quality, mic: false }; // mic permission denied → drop it, keep video/system
       mixed = await this.mixer.build(systemTrack, false);
     }
-    if (mixed) out.addTrack(mixed);
+    if (mixed) {
+      // Tells the stack what the track carries, so it stops optimising for intelligibility over
+      // fidelity (same lever as the video contentHint above). System audio present — alone or mixed
+      // with the mic — means music/games: keep the dynamics and the stereo image. Mic alone is voice.
+      mixed.contentHint = systemTrack ? 'music' : 'speech';
+      out.addTrack(mixed);
+    }
     this.outgoing = out;
     return out;
   }
