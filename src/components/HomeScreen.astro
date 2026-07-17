@@ -2,7 +2,11 @@
 // Landing: start a share or join one with a code. Behaviour wired in src/lib/app.ts.
 ---
 
-<section id="screen-home" class="flex flex-1 flex-col animate-fade" hidden>
+<!-- Not `hidden` like the other screens: it's the default route, and shipping it visible lets the
+     server-rendered markup paint before the deferred module runs. showScreen() re-asserts
+     exclusivity on the first route() — a #CODE deep-link flashes home for one frame, which is the
+     rare path paying for the common one rather than the reverse. -->
+<section id="screen-home" class="flex flex-1 flex-col animate-fade">
   <header class="flex items-center justify-between px-10 py-[26px] max-sm:px-5">
     <a id="brand-home" href="/" class="flex items-center gap-2.5">
       <img src="/favicon.svg" alt="" class="size-[18px]" />
