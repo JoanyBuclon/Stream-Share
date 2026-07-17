@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Peer, tuneStartBitrate, type PeerCallbacks, type PeerSignal } from './peer.ts';
+import { Peer, tuneOpus, tuneStartBitrate, type PeerCallbacks, type PeerSignal } from './peer.ts';
 
 // Fake RTCPeerConnection : enregistre les appels, laisse le test déclencher les évènements.
 // `failOnIce` permet de simuler un candidat ICE que addIceCandidate rejette (comme le vrai).
@@ -402,6 +402,28 @@ test('tuneStartBitrate ajoute start/min aux fmtp vidéo (VP9/AV1), épargne audi
 test('tuneStartBitrate est un no-op sans section vidéo ou sans bitrate', () => {
   assert.equal(tuneStartBitrate('m=audio 9 RTP\r\na=rtpmap:111 opus/48000/2', 10_000), 'm=audio 9 RTP\r\na=rtpmap:111 opus/48000/2');
   assert.equal(tuneStartBitrate('m=video 9 RTP\r\na=rtpmap:98 VP9/90000', 0), 'm=video 9 RTP\r\na=rtpmap:98 VP9/90000');
+});
+
+test('tuneOpus force stéréo + bitrate sur les fmtp opus, épargne la vidéo', () => {
+  const sdp = [
+    'm=audio 9 UDP/TLS/RTP/SAVPF 111',
+    'a=rtpmap:111 opus/48000/2',
+    'a=fmtp:111 minptime=10;useinbandfec=1',
+    'm=video 9 UDP/TLS/RTP/SAVPF 98',
+    'a=rtpmap:98 VP9/90000',
+    'a=fmtp:98 profile-id=0',
+  ].join('\r\n');
+  const out = tuneOpus(sdp);
+  assert.match(out, /a=fmtp:111 minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1;maxaveragebitrate=128000\r\n/);
+  assert.match(out, /a=fmtp:98 profile-id=0/); // vidéo intouchée
+});
+
+test('tuneOpus ne duplique pas une clé déjà posée (SDP Firefox) et ajoute un fmtp manquant', () => {
+  const firefox = 'm=audio 9 RTP\r\na=rtpmap:109 opus/48000/2\r\na=fmtp:109 stereo=0;useinbandfec=1';
+  assert.match(tuneOpus(firefox), /a=fmtp:109 stereo=1;useinbandfec=1;sprop-stereo=1;maxaveragebitrate=128000$/);
+  const noFmtp = 'm=audio 9 RTP\r\na=rtpmap:111 opus/48000/2';
+  assert.match(tuneOpus(noFmtp), /a=rtpmap:111 opus\/48000\/2\r\na=fmtp:111 stereo=1;sprop-stereo=1;/);
+  assert.equal(tuneOpus('m=video 9 RTP\r\na=rtpmap:98 VP9/90000'), 'm=video 9 RTP\r\na=rtpmap:98 VP9/90000'); // no-op
 });
 
 test('accept() gère une seconde offre (renégociation ICE restart côté viewer)', async () => {

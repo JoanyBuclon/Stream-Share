@@ -155,10 +155,23 @@ navigateur et l'OS le permettent (dispo variable selon plateforme — à tester 
 généralement OK pour un onglet ou l'écran entier, pas pour une fenêtre isolée).
 L'audio voyage dans la même `RTCPeerConnection` que la vidéo.
 
+**Qualité (deux réglages, tous deux nécessaires)** — par défaut la chaîne WebRTC
+est réglée pour la voix, ce qui rend l'audio d'onglet/système mono et sourd :
+
+1. **Capture** : `echoCancellation` / `noiseSuppression` / `autoGainControl` sont
+   mis à `false` (+ `channelCount: 2`) sur `getDisplayMedia`. Laissés par défaut,
+   le navigateur applique son traitement voix, qui downmixe en mono. Le micro,
+   lui, **garde** son traitement — c'est ce qu'on veut pour une voix.
+2. **Codec** : Opus est négocié mono ~32 kbps par défaut. `tuneOpus` (cf.
+   `peer.ts`) injecte `stereo=1;sprop-stereo=1;maxaveragebitrate=128000` dans
+   **chaque** SDP local. Un encodeur Opus lit ces params dans la description
+   **distante** : le stéréo côté host vient donc du `stereo=1` de la réponse du
+   viewer — d'où le tuning des deux côtés (offre, réponse, offre d'ICE restart).
+
 **Micro host (optionnel)** : l'host peut ajouter sa voix. Son système + micro
 (`getUserMedia`) sont **mixés en une seule piste** via WebAudio (`AudioContext`)
 avant l'envoi → une seule piste audio, synchronisée avec la vidéo par la stack.
-Toggle dans le menu source. Upload négligeable (~40-64 kbps).
+Toggle dans le menu source. Upload ~128 kbps (négligeable devant la vidéo).
 
 ## Contrôles
 

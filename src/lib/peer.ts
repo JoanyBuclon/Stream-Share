@@ -72,9 +72,7 @@ export class Peer {
       }
       const offer = await this.pc.createOffer();
       if (opts?.maxBitrateKbps && offer.sdp) offer.sdp = tuneStartBitrate(offer.sdp, opts.maxBitrateKbps);
-      await this.pc.setLocalDescription(offer);
-      if (this.closed) return; // fermé pendant l'await : ne pas émettre vers un pair retiré
-      this.emitLocalDescription();
+      await this.setLocalAndEmit(offer);
     } catch (err) {
       if (!this.closed) throw err; // rejet réel, pas un close() en vol
     }
@@ -124,9 +122,7 @@ export class Peer {
     if (this.closed || !this.isOfferer || this.restarting) return; // pas de restart chevauchant
     this.restarting = true;
     try {
-      await this.pc.setLocalDescription(await this.pc.createOffer({ iceRestart: true }));
-      if (this.closed) return;
-      this.emitLocalDescription();
+      await this.setLocalAndEmit(await this.pc.createOffer({ iceRestart: true }));
     } catch (err) {
       if (!this.closed) throw err;
     } finally {
@@ -142,10 +138,7 @@ export class Peer {
         await this.pc.setRemoteDescription(data.sdp);
         this.remoteReady = true;
         for (const ice of this.pendingIce.splice(0)) await this.addIce(ice);
-        if (data.sdp.type === 'offer') {
-          await this.pc.setLocalDescription(await this.pc.createAnswer());
-          this.emitLocalDescription();
-        }
+        if (data.sdp.type === 'offer') await this.setLocalAndEmit(await this.pc.createAnswer());
       } else if (this.remoteReady) {
         await this.addIce(data.ice);
       } else {
@@ -195,6 +188,15 @@ export class Peer {
     }
   }
 
+  /** Pose la description locale puis l'émet. Passage unique par lequel transitent offre, réponse et
+   *  offre d'ICE restart — le tuning Opus doit s'appliquer à chacune (cf. tuneOpus). */
+  private async setLocalAndEmit(desc: RTCSessionDescriptionInit): Promise<void> {
+    if (desc.sdp) desc.sdp = tuneOpus(desc.sdp);
+    await this.pc.setLocalDescription(desc);
+    if (this.closed) return; // fermé pendant l'await : ne pas émettre vers un pair retiré
+    this.emitLocalDescription();
+  }
+
   private emitLocalDescription(): void {
     const sdp = this.pc.localDescription;
     if (sdp) this.cb.onSignal({ sdp });
@@ -220,6 +222,59 @@ function preferVideoCodecs(transceiver: RTCRtpTransceiver): void {
   } catch {
     // ordre refusé par le navigateur (codec requis manquant…) — on garde l'ordre par défaut
   }
+}
+
+// WebRTC négocie Opus pour la voix par défaut : mono, ~32 kbps. Correct pour un micro, ça massacre
+// l'audio d'onglet/système (musique, jeux) — le son « cassé, comme en mono ». Un encodeur Opus suit
+// la description DISTANTE, donc chaque côté tune son propre SDP local : `stereo=1` dit au pair
+// « encode-moi du stéréo », `sprop-stereo=1` annonce ce qu'on envoie, `maxaveragebitrate` lève le
+// plafond. Ces params sont standard (RFC 7587) — honorés par Chrome, Firefox et Safari.
+// ponytail: 128 kbps stéréo en dur — transparent pour de la musique, négligeable devant la vidéo ;
+// le câbler sur les presets qualité si un host se plaint de l'upload.
+const OPUS_PARAMS: Record<string, string> = {
+  stereo: '1',
+  'sprop-stereo': '1',
+  maxaveragebitrate: '128000',
+  useinbandfec: '1',
+};
+
+export function tuneOpus(sdp: string): string {
+  const lines = sdp.split('\r\n');
+  let inAudio = false;
+  const opusPts = new Set<string>();
+  const withFmtp = new Set<string>();
+  for (const line of lines) {
+    if (line.startsWith('m=')) inAudio = line.startsWith('m=audio');
+    else if (inAudio) {
+      const rtpmap = /^a=rtpmap:(\d+) opus\//i.exec(line);
+      if (rtpmap) opusPts.add(rtpmap[1]);
+      const fmtp = /^a=fmtp:(\d+) /.exec(line);
+      if (fmtp) withFmtp.add(fmtp[1]);
+    }
+  }
+  if (opusPts.size === 0) return sdp;
+  return lines
+    .flatMap((line) => {
+      const fmtp = /^a=fmtp:(\d+) (.*)$/.exec(line);
+      if (fmtp && opusPts.has(fmtp[1])) return [`a=fmtp:${fmtp[1]} ${mergeOpusParams(fmtp[2])}`];
+      const rtpmap = /^a=rtpmap:(\d+) opus\//i.exec(line);
+      // Payload Opus sans ligne fmtp (rare) : il en faut une, sinon les params n'atterrissent nulle part.
+      if (rtpmap && !withFmtp.has(rtpmap[1])) return [line, `a=fmtp:${rtpmap[1]} ${mergeOpusParams('')}`];
+      return [line];
+    })
+    .join('\r\n');
+}
+
+// Fusionne dans les params existants plutôt que concaténer : Firefox émet déjà `stereo=1`, et un
+// fmtp qui répète une clé est ambigu. Les nôtres écrasent, le reste (minptime…) est conservé.
+function mergeOpusParams(existing: string): string {
+  const params = new Map<string, string>();
+  for (const kv of existing.split(';')) {
+    const eq = kv.indexOf('=');
+    if (eq > 0) params.set(kv.slice(0, eq).trim(), kv.slice(eq + 1).trim());
+  }
+  for (const [key, value] of Object.entries(OPUS_PARAMS)) params.set(key, value);
+  return [...params].map(([key, value]) => `${key}=${value}`).join(';');
 }
 
 // ponytail: chemin Chrome/VPx uniquement. Les params `x-google-*` sont honorés par Chrome (VP8/VP9),

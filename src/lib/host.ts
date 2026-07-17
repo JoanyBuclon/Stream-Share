@@ -115,7 +115,12 @@ export class HostController {
   private chooseSource = async (): Promise<void> => {
     const constraints: DisplayMediaStreamOptions = {
       video: { frameRate: { ideal: this.quality.fps } },
-      audio: this.quality.systemAudio,
+      // Left to its defaults, the browser runs its voice-tuned processing (AGC / noise suppression /
+      // echo cancellation) on tab & screen audio: it downmixes to mono and mangles music and games.
+      // Off + explicit stereo 48 kHz = the raw capture. The mic keeps its processing (cf. AudioMixer).
+      audio: this.quality.systemAudio
+        ? { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, sampleRate: 48000 }
+        : false,
     };
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia(constraints);
