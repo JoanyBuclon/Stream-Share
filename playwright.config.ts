@@ -1,4 +1,4 @@
-import { defineConfig } from '@playwright/test';
+import { defineConfig, devices } from '@playwright/test';
 
 // getDisplayMedia can't show its native picker headlessly, so the test overrides it with a
 // canvas stream (the WebRTC path stays real). These flags cover getUserMedia (mic) and force raw
@@ -22,7 +22,14 @@ export default defineConfig({
     launchOptions: { args: chromiumArgs },
     trace: 'on-first-retry',
   },
-  projects: [{ name: 'chromium', use: { browserName: 'chromium' } }],
+  projects: [
+    // Desktop — the non-regression control. testIgnore keeps the touch specs out: tap() needs
+    // hasTouch, which this project doesn't have.
+    { name: 'chromium', use: { browserName: 'chromium' }, testIgnore: /mobile\.spec\.ts/ },
+    // Pixel 7 = chromium + hasTouch + isMobile + 412x915. The root `use` (baseURL, launchOptions)
+    // merges in, so the fake-media flags still apply.
+    { name: 'mobile', use: { ...devices['Pixel 7'] }, testMatch: /mobile\.spec\.ts/ },
+  ],
   // Locally these reuse the already-running dev/signaling servers; in CI Playwright starts them.
   webServer: [
     {

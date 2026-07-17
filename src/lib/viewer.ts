@@ -52,6 +52,11 @@ const RECONNECT_TIMEOUT_MS = 20_000;
 // Immersive playback: fade the top bar + controls after the mouse sits still this long.
 const UI_IDLE_MS = 3_000;
 
+/** Did this event land on the viewer chrome (rather than the video stage behind it)? */
+function onViewerUi(e: Event): boolean {
+  return (e.target as HTMLElement).closest('#viewer-topbar, #viewer-controls') !== null;
+}
+
 export class ViewerController {
   private readonly sig: Signaling;
   private readonly code: string;
@@ -73,6 +78,7 @@ export class ViewerController {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private uiHideTimer: ReturnType<typeof setTimeout> | null = null;
   private watching = false; // true only while a live stream plays → gate the UI auto-hide
+  private uiVisible = true; // mirrors setUiVisible → lets a touch tap toggle rather than only reveal
   private readonly ac = new AbortController(); // removes all DOM listeners on destroy()
   private readonly wakeLock = new WakeLock(); // keep the screen awake while watching
   private readonly offMessage: () => void;
@@ -356,33 +362,60 @@ export class ViewerController {
       { signal },
     );
     el('btn-stats').addEventListener('click', () => this.toggleStats(), { signal });
-    el('btn-pip').addEventListener(
-      'click',
-      () => {
-        if (document.pictureInPictureElement) void document.exitPictureInPicture();
-        else void video.requestPictureInPicture().catch(() => {});
-      },
-      { signal },
-    );
-    el('btn-fs').addEventListener(
-      'click',
-      () => {
-        if (document.fullscreenElement) void document.exitFullscreen();
-        else void el('screen-viewer').requestFullscreen().catch(() => {});
-      },
-      { signal },
-    );
+    // iOS Safari ships neither API on the element: calling them throws a *synchronous* TypeError
+    // that the .catch() below could never see. Hide the buttons rather than offer a dead control.
+    if (document.pictureInPictureEnabled) {
+      el('btn-pip').addEventListener(
+        'click',
+        () => {
+          if (document.pictureInPictureElement) void document.exitPictureInPicture();
+          else void video.requestPictureInPicture().catch(() => {});
+        },
+        { signal },
+      );
+    } else hide(el('btn-pip'));
+    if (document.fullscreenEnabled) {
+      el('btn-fs').addEventListener(
+        'click',
+        () => {
+          if (document.fullscreenElement) void document.exitFullscreen();
+          else void el('screen-viewer').requestFullscreen().catch(() => {});
+        },
+        { signal },
+      );
+    } else hide(el('btn-fs'));
   }
 
-  // Auto-hide the UI (top bar + controls) for an immersive view: fade out after UI_IDLE_MS of
-  // mouse stillness or when the pointer leaves the stage; any move brings it back. Only while
-  // watching a live stream — paused/ended/error screens always keep the UI.
+  // Auto-hide the UI (top bar + controls) for an immersive view. Only while watching a live
+  // stream — paused/ended/error screens always keep the UI (pokeUi is `watching`-gated).
+  //
+  // Mouse: fade out after UI_IDLE_MS of stillness or when the pointer leaves the stage; any move
+  // brings it back. Touch: there is no "still" and no leave, so tap the stage to toggle.
   private wireAutoHide(): void {
     const stage = el('screen-viewer');
     const signal = this.ac.signal;
-    stage.addEventListener('mousemove', this.pokeUi, { signal });
-    stage.addEventListener('mouseleave', () => this.setUiVisible(false), { signal });
+    // pointermove filtered on pointerType, not mousemove: a tap also fires a compatibility
+    // mousemove, which would re-show the UI the same tap just dismissed. Compat mouse events have
+    // no pointer counterpart, so the filter is exact. For a real mouse, pointermove === mousemove.
+    stage.addEventListener('pointermove', this.onPointerMove, { signal });
+    stage.addEventListener('mouseleave', () => this.setUiVisible(false), { signal }); // not pointerleave: that fires on every touchend
+    stage.addEventListener('pointerup', this.onTouchTap, { signal });
   }
+
+  private onPointerMove = (e: PointerEvent): void => {
+    // Mouse: any move revives the UI. Touch: only a drag *on the controls* does — it keeps the bar
+    // alive through a slow volume drag, which emits no mousemove and used to fade mid-gesture.
+    if (e.pointerType === 'mouse' || onViewerUi(e)) this.pokeUi();
+  };
+
+  // Touch has no "pointer at rest" and no leave, so a tap on the stage toggles instead. On pointerup,
+  // never pointerdown: the up would otherwise re-reveal what the down just dismissed.
+  private onTouchTap = (e: PointerEvent): void => {
+    if (e.pointerType === 'mouse') return; // the mouse is served by pointermove/mouseleave above
+    if (onViewerUi(e)) this.pokeUi(); // touching a control keeps it up / ends a drag → re-arm
+    else if (this.uiVisible) this.setUiVisible(false); // tap the video → dismiss
+    else this.pokeUi(); // tap it again → bring the UI back
+  };
 
   private pokeUi = (): void => {
     if (!this.watching) return;
@@ -393,6 +426,7 @@ export class ViewerController {
 
   private setUiVisible(visible: boolean): void {
     const shown = visible || !this.watching; // never hide unless a stream is actually playing
+    this.uiVisible = shown;
     for (const id of ['viewer-topbar', 'viewer-controls']) {
       const node = el(id);
       node.style.opacity = shown ? '1' : '0';

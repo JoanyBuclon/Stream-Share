@@ -3,17 +3,17 @@
 ---
 
 <section id="screen-home" class="flex flex-1 flex-col animate-fade" hidden>
-  <header class="flex items-center justify-between px-10 py-[26px]">
+  <header class="flex items-center justify-between px-10 py-[26px] max-sm:px-5">
     <a id="brand-home" href="/" class="flex items-center gap-2.5">
       <img src="/favicon.svg" alt="" class="size-[18px]" />
       <span class="font-semibold tracking-[-0.01em]">stream share</span>
     </a>
   </header>
 
-  <div class="mx-auto flex w-full max-w-[1180px] flex-1 flex-col justify-center px-10">
-    <div class="mb-14 max-w-[640px]">
+  <div class="mx-auto flex w-full max-w-[1180px] flex-1 flex-col justify-center px-10 max-sm:px-5 max-sm:py-8">
+    <div class="mb-14 max-w-[640px] max-sm:mb-8">
       <div class="mb-5 font-mono text-xs uppercase tracking-[0.14em] text-muted-3">screen sharing, direct</div>
-      <h1 class="text-[64px] font-semibold leading-[1.02] tracking-[-0.03em] text-balance">
+      <h1 class="text-[64px] font-semibold leading-[1.02] tracking-[-0.03em] text-balance max-lg:text-[46px] max-sm:text-[34px]">
         Share your screen<br />with a single code.
       </h1>
       <p class="mt-[22px] max-w-[520px] text-[17px] leading-[1.6] text-muted">
@@ -22,11 +22,11 @@
       </p>
     </div>
 
-    <div class="grid max-w-[840px] grid-cols-2 gap-[18px]">
+    <div class="grid max-w-[840px] grid-cols-2 gap-[18px] max-sm:grid-cols-1">
       <!-- start -->
       <button
         id="btn-start"
-        class="flex min-h-[190px] cursor-pointer flex-col gap-3.5 rounded-2xl bg-cream px-7 pb-6 pt-7 text-left text-ink transition-transform hover:-translate-y-[3px]"
+        class="flex min-h-[190px] cursor-pointer flex-col gap-3.5 rounded-2xl bg-cream px-7 pb-6 pt-7 text-left text-ink transition-transform hover:-translate-y-[3px] disabled:cursor-default disabled:opacity-45 max-sm:min-h-[150px]"
       >
         <div class="flex w-full items-center justify-between">
           <span class="flex size-8 items-center justify-center rounded-[9px] bg-ink">
@@ -40,8 +40,18 @@
         </div>
       </button>
 
+      <!-- shown by app.ts when the browser has no getDisplayMedia (i.e. mobile) — kept outside the
+           button so the dimmed disabled card doesn't drag the explanation down with it -->
+      <div
+        id="start-unsupported"
+        class="order-first col-span-full rounded-xl border border-gold/[0.16] bg-gold/[0.06] px-4 py-3 text-[13px] leading-[1.5] text-gold"
+        hidden
+      >
+        Screen sharing needs a desktop browser — you can still join a share below.
+      </div>
+
       <!-- join -->
-      <div class="flex min-h-[190px] flex-col gap-3.5 rounded-2xl border border-white/[0.09] bg-panel p-7">
+      <div class="flex min-h-[190px] flex-col gap-3.5 rounded-2xl border border-white/[0.09] bg-panel p-7 max-sm:min-h-0">
         <div class="flex items-center justify-between">
           <span class="flex size-8 items-center justify-center rounded-[9px] bg-[#1e1e1e]">
             <span class="block h-2.5 w-3.5 rounded-[3px] border-2 border-muted"></span>
@@ -74,7 +84,7 @@
   </div>
 
   <footer
-    class="flex items-center justify-between border-t border-white/[0.05] px-10 py-[22px] font-mono text-[11px] text-muted-4"
+    class="flex items-center justify-between border-t border-white/[0.05] px-10 py-[22px] font-mono text-[11px] text-muted-4 max-sm:px-5"
   >
     <span>webRTC · direct connection</span>
     <span>stream share — v0.1</span>

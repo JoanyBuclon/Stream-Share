@@ -2,7 +2,7 @@
 // Viewer controllers. Owns the single Signaling connection per session.
 
 import { Signaling, type ServerMessage } from './signaling.ts';
-import { HostController } from './host.ts';
+import { HostController, supportsDisplayMedia } from './host.ts';
 import { ViewerController } from './viewer.ts';
 import { normalizeCode, isValidCode, formatCode } from './code.ts';
 import { el, show, hide, setText } from './dom.ts';
@@ -133,7 +133,14 @@ function wireBrand(): void {
 }
 
 function wireHome(): void {
-  el('btn-start').addEventListener('click', () => void startShare());
+  // Hosting needs getDisplayMedia, which no mobile browser implements. Say so instead of offering
+  // a button that would silently do nothing. Joining stays wired — that's the whole mobile flow.
+  const start = el<HTMLButtonElement>('btn-start');
+  if (supportsDisplayMedia()) start.addEventListener('click', () => void startShare());
+  else {
+    start.disabled = true;
+    show(el('start-unsupported'));
+  }
   const input = el<HTMLInputElement>('join-input');
   const submit = (): void => {
     const code = normalizeCode(input.value);

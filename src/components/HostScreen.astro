@@ -41,7 +41,7 @@
   </header>
 
   <!-- body: stage + sidebar -->
-  <div class="flex min-h-0 flex-1">
+  <div class="flex min-h-0 flex-1 max-lg:flex-col">
     <!-- stage -->
     <div class="flex min-w-0 flex-1 flex-col gap-3.5 p-[22px]">
       <div
@@ -159,7 +159,7 @@
     </div>
 
     <!-- sidebar: viewers -->
-    <aside class="flex w-[300px] flex-shrink-0 flex-col gap-3.5 border-l border-white/[0.07] p-5">
+    <aside class="flex w-[300px] flex-shrink-0 flex-col gap-3.5 border-l border-white/[0.07] p-5 max-lg:w-full max-lg:border-l-0 max-lg:border-t">
       <div class="flex items-center justify-between">
         <div class="text-sm font-semibold">Viewers</div>
         <span class="font-mono text-xs text-muted-2"><span id="viewer-count">0</span> connected</span>
@@ -178,7 +178,7 @@
       <!-- empty / waiting -->
       <div
         id="host-waiting"
-        class="flex flex-1 flex-col items-center justify-center rounded-[12px] border border-dashed border-white/10 px-5 py-[26px] text-center"
+        class="flex flex-1 flex-col items-center justify-center rounded-[12px] border border-dashed border-white/10 px-5 py-[26px] text-center max-lg:flex-none"
       >
         <div class="mb-4 flex size-11 items-center justify-center rounded-full border border-white/[0.12]">
           <span class="size-2 animate-pulse-dot rounded-full bg-muted-4"></span>
@@ -227,12 +227,12 @@
   <!-- settings modal (source + quality + audio); live-applies, "Done" just closes -->
   <div
     id="settings-modal"
-    class="fixed inset-0 z-[150] flex items-center justify-center bg-[#060606]/[0.72] p-[30px] backdrop-blur-[6px] animate-fade"
+    class="fixed inset-0 z-[150] flex items-center justify-center bg-[#060606]/[0.72] p-[30px] backdrop-blur-[6px] animate-fade max-lg:p-4"
     hidden
   >
     <div
       id="settings-card"
-      class="max-h-[88vh] w-full max-w-[620px] overflow-auto rounded-[18px] border border-white/[0.11] bg-[#121212]"
+      class="max-h-[88dvh] w-full max-w-[620px] overflow-auto rounded-[18px] border border-white/[0.11] bg-[#121212]"
     >
       <div class="flex items-center justify-between border-b border-white/[0.07] px-6 pb-[18px] pt-[22px]">
         <div>

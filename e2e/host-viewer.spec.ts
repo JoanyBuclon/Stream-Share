@@ -1,25 +1,5 @@
-import { test, expect, type Page } from '@playwright/test';
-
-// Replace the native screen-picker with a synthetic animated canvas stream, so the whole WebRTC
-// path runs for real (RTCPeerConnection, ICE, encode) but headless and without a user gesture.
-async function fakeDisplayMedia(page: Page): Promise<void> {
-  await page.addInitScript(() => {
-    navigator.mediaDevices.getDisplayMedia = async () => {
-      const canvas = document.createElement('canvas');
-      canvas.width = 640;
-      canvas.height = 360;
-      const ctx = canvas.getContext('2d');
-      let hue = 0;
-      setInterval(() => {
-        if (!ctx) return;
-        hue = (hue + 8) % 360;
-        ctx.fillStyle = `hsl(${hue}, 70%, 50%)`;
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-      }, 66); // keep painting so the encoder has fresh frames
-      return canvas.captureStream(15);
-    };
-  });
-}
+import { test, expect } from '@playwright/test';
+import { fakeDisplayMedia } from './fake-media.ts';
 
 test('host shares a source and a viewer connects to a live stream', async ({ browser }) => {
   // --- host: create a room and start sharing the (faked) source ---

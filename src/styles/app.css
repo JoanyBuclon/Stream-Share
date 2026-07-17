@@ -77,6 +77,15 @@
   .ss-tier[data-active='true'] {
     @apply bg-cream font-medium text-ink;
   }
+
+  /* Touch: these 24-30px hit areas are unusable with a thumb. Keyed on the input device, not a
+     breakpoint — desktop stays identical at every window width. */
+  @media (pointer: coarse) {
+    .ss-seg,
+    .ss-tier {
+      @apply px-3.5 py-2.5;
+    }
+  }
 }
 
 @layer base {

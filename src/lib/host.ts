@@ -25,6 +25,9 @@ import {
   type ViewerTier,
 } from './settings.ts';
 
+/** Screen capture only exists on desktop browsers — mobile has no getDisplayMedia at all. */
+export const supportsDisplayMedia = (): boolean => typeof navigator.mediaDevices?.getDisplayMedia === 'function';
+
 export interface HostInit {
   code: string;
   display: string;

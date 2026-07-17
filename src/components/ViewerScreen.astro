@@ -5,7 +5,7 @@
 
 <section id="screen-viewer" class="flex min-h-0 flex-1 flex-col bg-black animate-fade" hidden>
   <!-- top bar (auto-hides with the control bar while watching) -->
-  <header id="viewer-topbar" class="flex flex-shrink-0 items-center justify-between px-[22px] py-3.5 transition-opacity duration-300">
+  <header id="viewer-topbar" class="flex flex-shrink-0 items-center justify-between px-[22px] py-3.5 transition-opacity duration-300 max-sm:px-3">
     <div class="flex items-center gap-3.5">
       <button
         id="btn-leave"
@@ -131,7 +131,7 @@
   </div>
 
   <!-- control bar (auto-hides after 3s idle / on mouse leave while watching) -->
-  <div id="viewer-controls" class="flex-shrink-0 px-[22px] pb-5 pt-3.5 transition-opacity duration-300" hidden>
+  <div id="viewer-controls" class="flex-shrink-0 px-[22px] pb-5 pt-3.5 transition-opacity duration-300 max-sm:px-3 max-sm:pb-3" hidden>
     <div
       class="flex flex-wrap items-center gap-3.5 rounded-[14px] border border-white/[0.09] bg-panel/90 px-4 py-[11px] backdrop-blur-[10px]"
     >
@@ -141,7 +141,7 @@
           aria-hidden="true"></span>
         <span class="block h-[11px] w-[5px] rounded-[2px] bg-current" aria-hidden="true"></span>
       </button>
-      <input id="vol-range" type="range" min="0" max="100" value="100" class="w-[110px] cursor-pointer accent-fg" />
+      <input id="vol-range" type="range" min="0" max="100" value="100" class="w-[110px] cursor-pointer accent-fg max-sm:w-16" />
       <span id="vol-label" class="font-mono text-[11px] text-muted-2">100%</span>
 
       <div class="h-6 w-px bg-white/[0.09]"></div>
