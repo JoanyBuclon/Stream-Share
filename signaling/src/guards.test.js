@@ -19,19 +19,72 @@ assert.equal(originAllowed('https://evil.net', list), false);
 assert.equal(originAllowed(undefined, list), true, 'client non-navigateur : pas de vecteur CSWSH');
 assert.equal(originAllowed('https://evil.net', []), true, 'allow-list vide = non configuré (dev)');
 
-// S3 — un flood ferme la connexion (et un usage normal, lui, passe).
 const server = createSignalingServer();
 await new Promise((r) => server.listen(0, r));
 const url = `ws://localhost:${server.address().port}`;
 
-const ws = await new Promise((res, rej) => {
-  const s = new WebSocket(url);
-  s.onopen = () => res(s);
-  s.onerror = rej;
-});
-const closed = new Promise((r) => (ws.onclose = (e) => r(e.code)));
-for (let i = 0; i < 200; i++) ws.send(JSON.stringify({ type: 'signal', to: 'nobody' }));
+const open = () =>
+  new Promise((res, rej) => {
+    const s = new WebSocket(url);
+    s.onopen = () => res(s);
+    s.onerror = rej;
+  });
+function reader(ws) {
+  const q = [];
+  let waiting = null;
+  ws.onmessage = (e) => {
+    const m = JSON.parse(e.data);
+    if (waiting) {
+      waiting(m);
+      waiting = null;
+    } else q.push(m);
+  };
+  return () => (q.length ? Promise.resolve(q.shift()) : new Promise((r) => (waiting = r)));
+}
+const until = async (next, ...types) => {
+  for (;;) {
+    const m = await next();
+    if (types.includes(m.type)) return m;
+  }
+};
+const j = (o) => JSON.stringify(o);
+
+// S4 — le 11ᵉ viewer est refusé (MAX_VIEWERS = 10 par défaut).
+const host = await open();
+const hostNext = reader(host);
+host.send(j({ type: 'create' }));
+const { code } = await until(hostNext, 'created');
+
+const viewers = [];
+for (let i = 0; i < 10; i++) {
+  const v = await open();
+  const next = reader(v);
+  v.send(j({ type: 'join', code, pseudo: `v${i}` }));
+  assert.equal((await until(next, 'joined', 'join-error')).type, 'joined', `viewer ${i} sous le plafond`);
+  viewers.push(v);
+}
+const extra = await open();
+const extraNext = reader(extra);
+extra.send(j({ type: 'join', code, pseudo: 'v10' }));
+assert.equal((await until(extraNext, 'joined', 'join-error')).reason, 'full', 'le 11ᵉ est refusé');
+
+// S5 — le balayage de codes s'épuise : un `join` répété finit rate-limited, même sur des
+// codes inexistants (sinon les essais ratés seraient gratuits).
+let limited = false;
+for (let i = 0; i < 40 && !limited; i++) {
+  extra.send(j({ type: 'join', code: 'ZZZZZZ' }));
+  limited = (await until(extraNext, 'join-error')).reason === 'rate-limited';
+}
+assert.ok(limited, 'le join finit par être rate-limited');
+
+// S3 — un flood ferme la connexion.
+const flooder = await open();
+const closed = new Promise((r) => (flooder.onclose = (e) => r(e.code)));
+for (let i = 0; i < 200; i++) flooder.send(j({ type: 'signal', to: 'nobody' }));
 assert.equal(await closed, 1008, 'au-delà du seuil, la connexion est fermée');
 
+host.close();
+extra.close();
+for (const v of viewers) v.close();
 await new Promise((r) => server.close(r));
 console.log('guards.test.js OK');

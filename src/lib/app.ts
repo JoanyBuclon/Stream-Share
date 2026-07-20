@@ -81,6 +81,14 @@ async function startShare(): Promise<void> {
 
 // --- viewer flow ---
 
+// Raisons renvoyées par le signaling (`join-error`). Toute autre valeur retombe sur le
+// message générique — le serveur peut en ajouter sans casser le front.
+const JOIN_ERRORS: Record<string, string> = {
+  banned: 'you have been banned from this room',
+  full: 'this room is full',
+  'rate-limited': 'too many attempts — wait a minute',
+};
+
 function goJoin(code: string): void {
   teardown();
   showScreen('join');
@@ -105,7 +113,7 @@ async function doJoin(): Promise<void> {
       current.close();
       sig = null;
       const fail = el('join-fail');
-      fail.textContent = m.reason === 'banned' ? 'you have been banned from this room' : 'room not found or closed';
+      fail.textContent = JOIN_ERRORS[m.reason] ?? 'room not found or closed';
       show(fail);
     }
   });

@@ -1,13 +1,17 @@
 // Room-code generation + input normalization. Pure logic — unit-tested in rooms.test.js.
 // Cf. docs/rooms-and-codes.md.
 
+import { randomInt } from 'node:crypto';
+
 const ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'; // Crockford base32, sans I L O U
 
-/** Génère un code canonique 6 caractères, absent de `existing`. */
+/** Génère un code canonique 6 caractères, absent de `existing`.
+ *  `randomInt` (CSPRNG) et non `Math.random` : le code est le seul secret qui protège un
+ *  salon, un PRNG prédictible le rendrait devinable sans même balayer. */
 export function newCode(existing) {
   let code;
   do {
-    code = Array.from({ length: 6 }, () => ALPHABET[Math.floor(Math.random() * ALPHABET.length)]).join('');
+    code = Array.from({ length: 6 }, () => ALPHABET[randomInt(ALPHABET.length)]).join('');
   } while (existing.has(code));
   return code;
 }

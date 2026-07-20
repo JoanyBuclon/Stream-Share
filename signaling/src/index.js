@@ -25,6 +25,7 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
   .split(',')
   .map((o) => o.trim())
   .filter(Boolean);
+const MAX_VIEWERS = Number(process.env.MAX_VIEWERS) || 10;
 const MAX_PAYLOAD = 64 * 1024; // SDP/ICE tiennent dans quelques Ko
 const MSG_MAX_PER_SEC = 60; // au-delà, la connexion est fermée
 
@@ -38,20 +39,30 @@ const clients = new Map(); // peerId -> { id, ws, ip, token, roomCode, role }
 let seq = 0;
 const genId = () => `p${++seq}`;
 
-// create rate-limit : fenêtre glissante par IP (ponytail: en mémoire, pas de lib).
-const createLog = new Map();
-const CREATE_MAX = 10;
-const CREATE_WINDOW = 60_000;
-function allowCreate(ip, now) {
-  const hits = (createLog.get(ip) || []).filter((t) => now - t < CREATE_WINDOW);
-  if (hits.length >= CREATE_MAX) {
-    createLog.set(ip, hits);
-    return false;
-  }
+// Rate-limit par IP : fenêtre glissante en mémoire (ponytail: pas de lib, pas de Redis).
+// `join` est bridé pour rendre le balayage de codes non praticable (32⁶ codes / 30 essais
+// par minute et par IP). Les IP viennent de `clientIp`, donc réelles derrière le proxy.
+const RATE = {
+  create: { log: new Map(), max: 10, window: 60_000 },
+  join: { log: new Map(), max: 30, window: 60_000 },
+};
+function allow(kind, ip, now) {
+  const { log, max, window } = RATE[kind];
+  const hits = (log.get(ip) || []).filter((t) => now - t < window);
+  log.set(ip, hits);
+  if (hits.length >= max) return false;
   hits.push(now);
-  createLog.set(ip, hits);
   return true;
 }
+
+// Sans ceci, une clé par IP jamais revue reste à vie (les timestamps sont filtrés à la
+// lecture, mais la lecture n'arrive plus). Balayage à la fréquence de la fenêtre.
+setInterval(() => {
+  const now = Date.now();
+  for (const { log, window } of Object.values(RATE)) {
+    for (const [ip, hits] of log) if (hits.every((t) => now - t >= window)) log.delete(ip);
+  }
+}, 60_000).unref();
 
 /** IP réelle du client. Derrière le proxy, le *dernier* hop de X-Forwarded-For est celui
  *  ajouté par Traefik (l'adresse socket vue par lui) ; les entrées précédentes viennent du
@@ -81,7 +92,7 @@ function send(ws, type, payload = {}) {
 
 function onCreate(client) {
   const now = Date.now();
-  if (!allowCreate(client.ip, now)) return send(client.ws, 'error', { reason: 'rate-limited' });
+  if (!allow('create', client.ip, now)) return send(client.ws, 'error', { reason: 'rate-limited' });
   const code = newCode(rooms);
   const hostToken = randomUUID(); // secret pour reprendre la main (reclaim) après une coupure
   rooms.set(code, { code, hostId: client.id, hostToken, viewers: new Map(), bannedIps: new Set(), bannedTokens: new Set(), createdAt: now, graceTimer: null });
@@ -119,9 +130,15 @@ function destroyRoom(room) {
 }
 
 function onJoin(client, { code, pseudo, token }) {
+  // Compté avant toute vérification : un balayeur ne doit pas obtenir d'essais gratuits
+  // sur les codes inexistants — ce sont justement ceux qu'il envoie en masse.
+  if (!allow('join', client.ip, Date.now())) return send(client.ws, 'join-error', { reason: 'rate-limited' });
   const room = rooms.get(normalize(code));
   if (!room) return send(client.ws, 'join-error', { reason: 'not-found' });
   if (isBanned(room, client.ip, token)) return send(client.ws, 'join-error', { reason: 'banned' });
+  // Le mesh (un flux encodé par viewer côté host) ne tient pas au-delà d'une poignée :
+  // le plafond protège autant le navigateur du host que la mémoire du serveur.
+  if (room.viewers.size >= MAX_VIEWERS) return send(client.ws, 'join-error', { reason: 'full' });
   client.roomCode = room.code;
   client.role = 'viewer';
   client.token = token || '';
