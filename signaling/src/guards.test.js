@@ -83,6 +83,16 @@ const closed = new Promise((r) => (flooder.onclose = (e) => r(e.code)));
 for (let i = 0; i < 200; i++) flooder.send(j({ type: 'signal', to: 'nobody' }));
 assert.equal(await closed, 1008, 'au-delà du seuil, la connexion est fermée');
 
+// Q2 — /health reflète l'état réel. Les scénarios ci-dessus ont produit un salon, 10 viewers,
+// des `join` rate-limités et une socket fermée pour flood : le endpoint doit les avoir vus.
+const health = await (await fetch(`http://localhost:${server.address().port}/health`)).json();
+assert.equal(health.status, 'ok');
+assert.equal(health.rooms, 1);
+assert.equal(health.viewers, 10, 'le 11ᵉ a été refusé, il ne compte pas');
+assert.ok(health.connections >= 11, 'host + viewers, y compris les sockets sans salon');
+assert.ok(health.rejected.joinRateLimited > 0, 'les joins rate-limités sont comptés');
+assert.equal(health.rejected.floodClosed, 1, 'la socket fermée pour flood est comptée');
+
 host.close();
 extra.close();
 for (const v of viewers) v.close();

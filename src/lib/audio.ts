@@ -1,9 +1,19 @@
 // Mixes the host's system audio (from getDisplayMedia) and mic (getUserMedia) into a single
-// outgoing track via WebAudio. Pass-through when only one source is active (no context needed).
+// outgoing track via WebAudio. Pass-through when only one source is active — no graph is built,
+// and no context is created until a mix is actually needed. Unit-tested in audio.test.ts.
 
 export class AudioMixer {
   private ctx: AudioContext | null = null;
   private micStream: MediaStream | null = null;
+  private nodes: AudioNode[] = []; // graph of the current build — disconnected on the next one
+
+  private readonly makeContext: () => AudioContext;
+
+  /** `makeContext` is injected only so the rebuild/disconnect logic is testable without WebAudio.
+   *  Plain field, not a parameter property: Node's type stripping cannot erase those. */
+  constructor(makeContext: () => AudioContext = () => new AudioContext({ sampleRate: 48000 })) {
+    this.makeContext = makeContext;
+  }
 
   /** Outgoing audio track for the given system track + mic preference, or null if neither.
    *  Reuses an already-acquired mic (so a source change doesn't re-prompt); only (re)acquires
@@ -14,9 +24,12 @@ export class AudioMixer {
       this.micStream.getTracks().forEach((t) => t.stop());
       this.micStream = null;
     }
-    // Rebuild the mixing graph from scratch each call; the mic stream itself persists.
-    void this.ctx?.close();
-    this.ctx = null;
+    // Rebuild the graph each call, but NOT the context: `new AudioContext()` spins up a hardware
+    // audio device, while the nodes below are cheap. Disconnecting is not optional — a leftover
+    // MediaStreamSource stays connected to the previous destination and keeps pulling from its
+    // track for nothing. The context itself lives until teardown().
+    for (const node of this.nodes) node.disconnect();
+    this.nodes = [];
     const micTrack = this.micStream?.getAudioTracks()[0] ?? null;
     const sources = [systemTrack, micTrack].filter((t): t is MediaStreamTrack => t !== null);
     if (sources.length === 0) return null;
@@ -31,16 +44,23 @@ export class AudioMixer {
     // Pinned to 48 kHz — Opus's native rate, and what the capture is constrained to. Left to its
     // default the context adopts the hardware rate (44.1 kHz on plenty of Windows setups), which
     // would resample 48→44.1 here and back to 48 in the encoder: two conversions, zero benefit.
-    this.ctx = new AudioContext({ sampleRate: 48000 });
+    this.ctx ??= this.makeContext();
     const dest = this.ctx.createMediaStreamDestination();
-    for (const track of sources) this.ctx.createMediaStreamSource(new MediaStream([track])).connect(dest);
+    this.nodes.push(dest);
+    for (const track of sources) {
+      const src = this.ctx.createMediaStreamSource(new MediaStream([track]));
+      src.connect(dest);
+      this.nodes.push(src);
+    }
     return dest.stream.getAudioTracks()[0] ?? null;
   }
 
   teardown(): void {
     this.micStream?.getTracks().forEach((t) => t.stop());
     this.micStream = null;
-    void this.ctx?.close();
+    for (const node of this.nodes) node.disconnect();
+    this.nodes = [];
+    void this.ctx?.close(); // the only place the context is closed — cf. build()
     this.ctx = null;
   }
 }

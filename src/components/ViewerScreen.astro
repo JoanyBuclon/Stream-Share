@@ -60,10 +60,14 @@
       </div>
     </div>
 
-    <!-- reconnecting overlay -->
+    <!-- Reconnecting overlay. The ONLY state that keeps the video visible underneath (connecting,
+         paused, ended and error all hide it): an ICE blip is transient and frames often still
+         arrive, so cutting the picture would make a 1s hiccup look like a hard stop. That is
+         exactly why this must not carry a backdrop-filter — it would re-blur the whole stage
+         every video frame. Opaque scrim only; /0.8 keeps the text legible over moving content. -->
     <div
       id="viewer-reconnect-overlay"
-      class="absolute inset-0 flex flex-col items-center justify-center gap-4 bg-[#060606]/[0.66] backdrop-blur-[2px]"
+      class="absolute inset-0 flex flex-col items-center justify-center gap-4 bg-[#060606]/[0.8]"
       hidden
     >
       <span class="block size-[34px] animate-spin-ring rounded-full border-[3px] border-gold/30 border-t-gold"></span>

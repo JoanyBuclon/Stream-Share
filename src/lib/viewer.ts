@@ -211,6 +211,10 @@ export class ViewerController {
   }
 
   private async pollStats(): Promise<void> {
+    // setState masque #viewer-stats sur paused/reconnecting/ended/error mais laisse le timer
+    // tourner : sans ce garde on paie un getStats() + 5 setText par seconde dans un overlay
+    // que personne ne voit. stopStats() n'est atteint que par toggleStats / destroy.
+    if (!this.watching) return;
     try {
       const peer = this.peer;
       const report = await peer?.stats();
@@ -426,6 +430,11 @@ export class ViewerController {
 
   private setUiVisible(visible: boolean): void {
     const shown = visible || !this.watching; // never hide unless a stream is actually playing
+    // Appelé à chaque pointermove (60-144/s), mais seul le premier move après un masquage
+    // change quoi que ce soit. `uiVisible` n'est muté qu'ici et reflète toujours le dernier
+    // état écrit dans le DOM → le garde est sûr. Le ré-armement du timer d'auto-hide vit
+    // dans pokeUi, donc HORS de ce garde : la sémantique d'auto-hide en dépend.
+    if (shown === this.uiVisible) return;
     this.uiVisible = shown;
     for (const id of ['viewer-topbar', 'viewer-controls']) {
       const node = el(id);
@@ -465,5 +474,12 @@ export class ViewerController {
     const video = el<HTMLVideoElement>('viewer-video');
     video.srcObject = null;
     el('viewer-quality').replaceChildren(); // don't leave stale tier buttons for the next session
+    // Same reason, and it keeps the guard in setUiVisible self-contained: the next session gets
+    // a fresh instance (uiVisible = true) but THIS DOM. Today every exit from 'live' passes
+    // through setWatching(false) → setUiVisible(true), so the DOM is already restored and this
+    // is a no-op — the guard's precondition holds only by that non-local argument. One line to
+    // make it hold locally instead, because the failure it prevents (opacity:0 + the guard
+    // agreeing there is nothing to write → controls dead until a reload) is unrecoverable.
+    this.setUiVisible(true);
   }
 }

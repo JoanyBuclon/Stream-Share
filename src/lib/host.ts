@@ -322,11 +322,15 @@ export class HostController {
       b.addEventListener('click', () => this.setResolution(parseRes(b.dataset.res ?? 'source')), { signal });
     for (const b of document.querySelectorAll<HTMLElement>('#settings-modal [data-fps]'))
       b.addEventListener('click', () => this.setFps(Number(b.dataset.fps)), { signal });
-    el<HTMLInputElement>('bitrate-range').addEventListener(
-      'input',
-      (e) => this.setBitrate(Number((e.target as HTMLInputElement).value)),
-      { signal },
-    );
+    // `input` tire à la fréquence du pointeur pendant un drag (~60-120/s) : on n'y met que le
+    // libellé. `setBitrate` part sur `change`, qui ne tire qu'au relâchement (ou à la validation
+    // clavier) — sinon chaque pixel de drag coûte un `setParameters()` PAR viewer (aller-retour
+    // dans l'encodeur, seul chemin du host qui scale avec le mesh) + un `renderSettings()` entier.
+    const bitrate = el<HTMLInputElement>('bitrate-range');
+    bitrate.addEventListener('input', (e) => setText('bitrate-value', `${(e.target as HTMLInputElement).value} mbps`), {
+      signal,
+    });
+    bitrate.addEventListener('change', (e) => this.setBitrate(Number((e.target as HTMLInputElement).value)), { signal });
     el('toggle-sysaudio').addEventListener('click', () => void this.toggleSystemAudio(), { signal });
     el('toggle-mic').addEventListener('click', () => void this.toggleMic(), { signal });
   }

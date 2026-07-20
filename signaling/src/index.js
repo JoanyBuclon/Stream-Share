@@ -46,6 +46,11 @@ const RATE = {
   create: { log: new Map(), max: 10, window: 60_000 },
   join: { log: new Map(), max: 30, window: 60_000 },
 };
+// Compteurs cumulés depuis le démarrage, exposés par /health. Ce sont les rejets qui disent si
+// on se fait taper dessus — `rooms`/`viewers` ne disent que si le service sert. Volontairement
+// des entiers plats : pas de série temporelle ici, c'est le rôle de ce qui scrape.
+const rejected = { createRateLimited: 0, joinRateLimited: 0, originRejected: 0, floodClosed: 0, banned: 0 };
+
 function allow(kind, ip, now) {
   const { log, max, window } = RATE[kind];
   const hits = (log.get(ip) || []).filter((t) => now - t < window);
@@ -92,7 +97,10 @@ function send(ws, type, payload = {}) {
 
 function onCreate(client) {
   const now = Date.now();
-  if (!allow('create', client.ip, now)) return send(client.ws, 'error', { reason: 'rate-limited' });
+  if (!allow('create', client.ip, now)) {
+    rejected.createRateLimited++;
+    return send(client.ws, 'error', { reason: 'rate-limited' });
+  }
   const code = newCode(rooms);
   const hostToken = randomUUID(); // secret pour reprendre la main (reclaim) après une coupure
   rooms.set(code, { code, hostId: client.id, hostToken, viewers: new Map(), bannedIps: new Set(), bannedTokens: new Set(), createdAt: now, graceTimer: null });
@@ -132,7 +140,10 @@ function destroyRoom(room) {
 function onJoin(client, { code, pseudo, token }) {
   // Compté avant toute vérification : un balayeur ne doit pas obtenir d'essais gratuits
   // sur les codes inexistants — ce sont justement ceux qu'il envoie en masse.
-  if (!allow('join', client.ip, Date.now())) return send(client.ws, 'join-error', { reason: 'rate-limited' });
+  if (!allow('join', client.ip, Date.now())) {
+    rejected.joinRateLimited++;
+    return send(client.ws, 'join-error', { reason: 'rate-limited' });
+  }
   const room = rooms.get(normalize(code));
   if (!room) return send(client.ws, 'join-error', { reason: 'not-found' });
   if (isBanned(room, client.ip, token)) return send(client.ws, 'join-error', { reason: 'banned' });
@@ -162,6 +173,7 @@ function onKickBan(client, { peerId }, ban) {
   const viewer = clients.get(peerId);
   if (!viewer || viewer.roomCode !== room.code) return;
   if (ban) {
+    rejected.banned++;
     room.bannedIps.add(viewer.ip);
     if (viewer.token) room.bannedTokens.add(viewer.token);
   }
@@ -208,6 +220,18 @@ function onLeave(client) {
 export function createSignalingServer(opts = {}) {
   if (opts.graceMs != null) graceMs = opts.graceMs;
   const server = createServer((req, res) => {
+    // Volontairement NON routé par Traefik (qui n'envoie ici que Host + PathPrefix(/ws)) : joignable
+    // seulement depuis le réseau Docker et le healthcheck du compose. C'est ce qui permet d'exposer
+    // les compteurs sans réfléchir — les publier donnerait à un attaquant un retour direct sur
+    // l'effet de ses tentatives. Ne pas ajouter de router `/health` sans repasser sur ce choix.
+    if (req.method === 'GET' && req.url === '/health') {
+      let viewers = 0;
+      for (const room of rooms.values()) viewers += room.viewers.size;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      // `connections` compte toutes les sockets ouvertes, y compris celles qui n'ont encore ni
+      // créé ni rejoint : un écart durable avec rooms+viewers signale des clients qui traînent.
+      return res.end(JSON.stringify({ status: 'ok', rooms: rooms.size, viewers, connections: clients.size, rejected }));
+    }
     if (req.method === 'GET' && (req.url === '/' || req.url === '/test.html')) {
       try {
         const html = readFileSync(join(here, '..', 'public', 'test.html'));
@@ -225,7 +249,11 @@ export function createSignalingServer(opts = {}) {
   const wss = new WebSocketServer({
     server,
     maxPayload: MAX_PAYLOAD,
-    verifyClient: ({ origin }) => originAllowed(origin),
+    verifyClient: ({ origin }) => {
+      const ok = originAllowed(origin);
+      if (!ok) rejected.originRejected++;
+      return ok;
+    },
   });
 
   wss.on('connection', (ws, req) => {
@@ -246,7 +274,17 @@ export function createSignalingServer(opts = {}) {
         windowStart = now;
         msgCount = 0;
       }
-      if (++msgCount > MSG_MAX_PER_SEC) return ws.close(1008, 'rate-limited');
+      if (++msgCount > MSG_MAX_PER_SEC) {
+        // `close()` ne vide pas ce qui est déjà en tampon : le handler continue de tirer pour
+        // chaque message restant. Se fier à readyState compte UNE fermeture par connexion (et
+        // évite de re-fermer) — sinon un seul flooder gonfle le compteur du nombre de messages
+        // qu'il a réussi à empiler, et /health laisse croire à des centaines d'incidents.
+        if (ws.readyState === OPEN) {
+          rejected.floodClosed++;
+          ws.close(1008, 'rate-limited');
+        }
+        return;
+      }
 
       let msg;
       try {
