@@ -18,6 +18,15 @@ const ICE_SERVERS = (process.env.ICE_SERVERS || 'stun:stun.l.google.com:19302')
   .map((u) => u.trim())
   .filter(Boolean)
   .map((urls) => ({ urls }));
+// Derrière Traefik uniquement (cf. docker-compose.yml). En écoute directe, laisser à 0 :
+// X-Forwarded-For est alors entièrement contrôlé par le client.
+const TRUST_PROXY = process.env.TRUST_PROXY === '1';
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+const MAX_PAYLOAD = 64 * 1024; // SDP/ICE tiennent dans quelques Ko
+const MSG_MAX_PER_SEC = 60; // au-delà, la connexion est fermée
 
 const here = dirname(fileURLToPath(import.meta.url));
 const OPEN = 1; // WebSocket.OPEN
@@ -42,6 +51,28 @@ function allowCreate(ip, now) {
   hits.push(now);
   createLog.set(ip, hits);
   return true;
+}
+
+/** IP réelle du client. Derrière le proxy, le *dernier* hop de X-Forwarded-For est celui
+ *  ajouté par Traefik (l'adresse socket vue par lui) ; les entrées précédentes viennent du
+ *  client et sont donc usurpables. Sans TRUST_PROXY, l'en-tête n'est jamais lu. */
+export function clientIp(req, trustProxy = TRUST_PROXY) {
+  if (trustProxy) {
+    const last = String(req.headers['x-forwarded-for'] || '')
+      .split(',')
+      .pop()
+      .trim();
+    if (last) return last;
+  }
+  return req.socket.remoteAddress || 'unknown';
+}
+
+/** Anti-CSWSH. Origin absent = client non-navigateur (tests, CLI) : rien à usurper, on laisse
+ *  passer — le vecteur CSWSH n'existe que dans un navigateur, qui envoie toujours l'en-tête.
+ *  Allow-list vide = non configuré (dev) : pas de contrôle. */
+export function originAllowed(origin, list = ALLOWED_ORIGINS) {
+  if (!list.length || !origin) return true;
+  return list.includes(origin);
 }
 
 function send(ws, type, payload = {}) {
@@ -174,14 +205,32 @@ export function createSignalingServer(opts = {}) {
     res.end('not found');
   });
 
-  const wss = new WebSocketServer({ server });
+  const wss = new WebSocketServer({
+    server,
+    maxPayload: MAX_PAYLOAD,
+    verifyClient: ({ origin }) => originAllowed(origin),
+  });
+
   wss.on('connection', (ws, req) => {
-    const ip = req.socket.remoteAddress || 'unknown';
+    const ip = clientIp(req);
     const client = { id: genId(), ws, ip, token: '', roomCode: null, role: null };
     clients.set(client.id, client);
     send(ws, 'hello', { peerId: client.id });
 
+    // Throttle par connexion : fenêtre fixe d'une seconde. Au-delà du seuil on ferme au lieu
+    // de jeter le message — un `signal` perdu en silence casserait la négociation ICE, alors
+    // qu'une fermeture est un échec visible que le client sait gérer (reconnexion).
+    let windowStart = 0;
+    let msgCount = 0;
+
     ws.on('message', (raw) => {
+      const now = Date.now();
+      if (now - windowStart >= 1000) {
+        windowStart = now;
+        msgCount = 0;
+      }
+      if (++msgCount > MSG_MAX_PER_SEC) return ws.close(1008, 'rate-limited');
+
       let msg;
       try {
         msg = JSON.parse(raw);

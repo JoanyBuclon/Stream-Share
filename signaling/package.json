@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "test": "node src/rooms.test.js && node src/smoke.js && node src/grace.test.js && node src/ban.test.js"
+    "test": "node src/rooms.test.js && node src/smoke.js && node src/grace.test.js && node src/ban.test.js && node src/guards.test.js"
   },
   "dependencies": {
     "ws": "^8.18.0"

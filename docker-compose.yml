@@ -24,6 +24,9 @@ services:
       - web
     environment:
       - ICE_SERVERS=stun:stun.l.google.com:19302 # STUN only, by architecture decision (no TURN)
+      # Only safe because this port is never reachable except through Traefik (internal network).
+      - TRUST_PROXY=1
+      - ALLOWED_ORIGINS=https://stream.joanybuclon.com
     labels:
       - 'traefik.enable=true'
       # Same host, PathPrefix(/ws) → this service. The rule is longer than the web router's,
