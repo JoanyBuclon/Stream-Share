@@ -39,10 +39,9 @@ class FakeContext {
   }
 }
 
-// `new MediaStream([track])` n'existe pas sous Node.
-globalThis.MediaStream = class {
-  constructor(_tracks: unknown[] = []) {}
-} as unknown as typeof MediaStream;
+// `new MediaStream([track])` n'existe pas sous Node. Coquille vide assumée : le FakeContext
+// ignore l'argument de createMediaStreamSource, personne ne relit les pistes.
+globalThis.MediaStream = class {} as unknown as typeof MediaStream;
 
 const track = (id: string) => ({ kind: 'audio', id, stop: () => {} }) as unknown as MediaStreamTrack;
 
