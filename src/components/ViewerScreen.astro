@@ -82,8 +82,10 @@
       >
         <span class="block size-[18px] rounded-[3px] bg-muted"></span>
       </div>
-      <div class="mb-2 text-xl font-semibold">The host stopped sharing</div>
-      <div class="mb-6 text-sm leading-[1.55] text-muted-2">
+      <!-- texte posé par viewer.ts (END_TEXT) : cet écran sert aussi au kick et au ban, qui ne
+           doivent pas annoncer que le host a arrêté de partager -->
+      <div id="viewer-ended-title" class="mb-2 text-xl font-semibold">The host stopped sharing</div>
+      <div id="viewer-ended-body" class="mb-6 text-sm leading-[1.55] text-muted-2">
         The session has ended. Thanks for watching — you can join another room whenever you like.
       </div>
       <button

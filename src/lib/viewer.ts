@@ -22,8 +22,13 @@ const DOT = { good: 'var(--color-good)', gold: 'var(--color-gold)', muted: 'var(
 
 // Host pause/resume travels over the signal relay (opaque `data`), distinct from SDP/ICE.
 type PeerControl = { control: 'pause' | 'resume' };
-function isControl(data: unknown): data is PeerControl {
-  return typeof data === 'object' && data !== null && 'control' in data;
+export function isControl(data: unknown): data is PeerControl {
+  if (typeof data !== 'object' || data === null || !('control' in data)) return false;
+  // La valeur compte autant que la clé : `onControl` fait `hostPaused = control === 'pause'`,
+  // donc toute valeur inconnue vaut un resume. Sans ce test, `{control:'x'}` sort le viewer
+  // d'une pause du host — et un futur verbe côté host le ferait silencieusement aussi.
+  const control = (data as { control: unknown }).control;
+  return control === 'pause' || control === 'resume';
 }
 
 // The host announces its cap height (tier ceiling) over the same relay. Validate the value.
@@ -36,6 +41,24 @@ function isHeight(data: unknown): data is { height: number } {
     (data as { height: number }).height > 0
   );
 }
+
+// Les trois sorties terminales partagent l'écran `#viewer-ended`, mais pas le message : le
+// texte par défaut du markup est celui de 'host-left'.
+type EndReason = 'host-left' | 'kicked' | 'banned';
+const END_TEXT: Record<EndReason, { title: string; body: string }> = {
+  'host-left': {
+    title: 'The host stopped sharing',
+    body: 'The session has ended. Thanks for watching — you can join another room whenever you like.',
+  },
+  kicked: {
+    title: 'You were removed from this room',
+    body: 'The host ended your access to this share. You can join another room, or this one again if the host lets you back in.',
+  },
+  banned: {
+    title: 'You were banned from this room',
+    body: 'The host blocked your access to this share. Joining it again with the same code will be refused.',
+  },
+};
 
 function tierLabel(tier: ViewerTier): string {
   return tier === 'auto' ? 'Auto' : tier === 'source' ? 'Source' : `${tier}p`;
@@ -150,10 +173,10 @@ export class ViewerController {
         this.buildPeer(msg.hostId);
         break;
       case 'peer-left': // viewers only ever get the host's departure (room destroyed)
-        if (msg.peerId === this.hostId) this.endSession();
+        if (msg.peerId === this.hostId) this.endSession('host-left');
         break;
       case 'kicked':
-        this.endSession();
+        this.endSession(msg.banned ? 'banned' : 'kicked');
         break;
     }
   };
@@ -241,8 +264,13 @@ export class ViewerController {
     if (document.pictureInPictureElement) void document.exitPictureInPicture().catch(() => {});
   }
 
-  private endSession(): void {
+  private endSession(reason: EndReason): void {
     this.terminated = true; // keep the 'ended' UI; ignore the 'closed' status that sig.close() will fire
+    // Le même écran sert aux trois sorties. Sans ce texte, un viewer expulsé ou banni lisait
+    // « The host stopped sharing » — puis « you have been banned » s'il retapait le code, deux
+    // messages contradictoires dont aucun ne décrivait ce qui venait de se passer.
+    setText('viewer-ended-title', END_TEXT[reason].title);
+    setText('viewer-ended-body', END_TEXT[reason].body);
     this.setState('ended');
     this.peer?.close();
     this.peer = null;

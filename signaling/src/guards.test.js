@@ -77,6 +77,29 @@ for (let i = 0; i < 40 && !limited; i++) {
 }
 assert.ok(limited, 'le join finit par être rate-limited');
 
+// Payloads mal typés — `JSON.parse` rend n'importe quel type et le code supposait des chaînes.
+// Chacun de ces messages tuait le process (uncaughtException), donc TOUS les salons, pour 26
+// octets et sans aucun prérequis. L'assertion qui compte n'est pas la réponse au message :
+// c'est qu'une socket ouverte APRÈS reçoit encore son `hello`, donc que le serveur est vivant.
+const malformed = await open();
+for (const payload of [
+  'null',
+  '123',
+  '"str"',
+  j({ type: 'join', code: 123 }),
+  j({ type: 'join', code: { toUpperCase: 1 } }),
+  j({ type: 'join', code, pseudo: 123 }),
+  j({ type: 'reclaim', code: 123 }),
+  j({ type: 'signal', to: {} }),
+  j({ type: 'kick', peerId: {} }),
+]) {
+  malformed.send(payload);
+}
+const survivor = await open();
+assert.equal((await reader(survivor)()).type, 'hello', 'le serveur survit aux payloads mal typés');
+malformed.close();
+survivor.close();
+
 // S3 — un flood ferme la connexion.
 const flooder = await open();
 const closed = new Promise((r) => (flooder.onclose = (e) => r(e.code)));

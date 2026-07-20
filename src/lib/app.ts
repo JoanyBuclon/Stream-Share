@@ -52,6 +52,7 @@ function teardown(): void {
 
 function goHome(): void {
   teardown();
+  hide(el('start-error')); // pas d'erreur périmée au retour sur l'accueil
   if (document.fullscreenElement) void document.exitFullscreen().catch(() => {}); // leave the viewer's fullscreen
   history.replaceState(null, '', location.pathname);
   showScreen('home');
@@ -61,6 +62,7 @@ function goHome(): void {
 
 async function startShare(): Promise<void> {
   teardown();
+  hide(el('start-error')); // une nouvelle tentative repart d'un écran propre
   sig = new Signaling(signalingUrl());
   const current = sig;
   const off = current.onMessage((m: ServerMessage) => {
@@ -75,7 +77,11 @@ async function startShare(): Promise<void> {
     await current.connect();
     current.create();
   } catch {
+    // On est encore sur l'accueil (showScreen('host') n'a lieu qu'à la réception de `created`),
+    // donc goHome ne change pas d'écran : il libère le socket. Le message vient après, sinon
+    // goHome le masquerait aussitôt. Le chemin viewer gérait déjà ce cas ; le host, non.
     goHome();
+    show(el('start-error'));
   }
 }
 

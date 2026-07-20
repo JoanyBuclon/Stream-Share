@@ -49,7 +49,7 @@ const RATE = {
 // Compteurs cumulés depuis le démarrage, exposés par /health. Ce sont les rejets qui disent si
 // on se fait taper dessus — `rooms`/`viewers` ne disent que si le service sert. Volontairement
 // des entiers plats : pas de série temporelle ici, c'est le rôle de ce qui scrape.
-const rejected = { createRateLimited: 0, joinRateLimited: 0, originRejected: 0, floodClosed: 0, banned: 0 };
+const rejected = { createRateLimited: 0, joinRateLimited: 0, originRejected: 0, floodClosed: 0, banned: 0, handlerError: 0 };
 
 function allow(kind, ip, now) {
   const { log, max, window } = RATE[kind];
@@ -111,7 +111,7 @@ function onCreate(client) {
 
 // Le host reprend son salon après une coupure, dans la fenêtre de grâce, via son hostToken.
 function onReclaim(client, { code, hostToken }) {
-  const room = rooms.get(normalize(code || ''));
+  const room = rooms.get(normalize(code));
   // Réclamable seulement si le salon existe, est en grâce (host absent) et le token correspond.
   if (!room || !room.graceTimer || room.hostToken !== hostToken) {
     return send(client.ws, 'reclaim-error', { reason: 'invalid' });
@@ -153,7 +153,9 @@ function onJoin(client, { code, pseudo, token }) {
   client.roomCode = room.code;
   client.role = 'viewer';
   client.token = token || '';
-  const name = (pseudo || 'viewer').slice(0, 20);
+  // `String()` : `pseudo` vient de JSON.parse, donc de n'importe quel type — un nombre jetait
+  // sur `.slice`. Le cap à 20 est la seule borne côté serveur, le front n'en pose aucune.
+  const name = String(pseudo ?? 'viewer').slice(0, 20);
   room.viewers.set(client.id, { id: client.id, pseudo: name });
   send(client.ws, 'joined', { hostId: room.hostId, iceServers: ICE_SERVERS });
   const host = clients.get(room.hostId);
@@ -292,21 +294,33 @@ export function createSignalingServer(opts = {}) {
       } catch {
         return;
       }
-      switch (msg.type) {
-        case 'create':
-          return onCreate(client);
-        case 'join':
-          return onJoin(client, msg);
-        case 'reclaim':
-          return onReclaim(client, msg);
-        case 'signal':
-          return onSignal(client, msg); // sert aussi à l'ICE restart
-        case 'kick':
-          return onKickBan(client, msg, false);
-        case 'ban':
-          return onKickBan(client, msg, true);
-        case 'leave':
-          return onLeave(client);
+      // JSON.parse rend n'importe quel type, pas seulement un objet : `null`, un nombre, une
+      // chaîne. Le try/catch ci-dessus ne couvre QUE le parse — `msg.type` sur `null` jetait
+      // hors du handler, donc uncaughtException, donc le process meurt avec tous les salons.
+      if (!msg || typeof msg !== 'object') return;
+      // Filet pour les handlers : le contenu du payload reste non fiable même une fois l'objet
+      // validé (code numérique, pseudo objet…). Une valeur inattendue ne doit jamais dépasser
+      // la connexion qui l'a envoyée. Compté, pas loggué — le signaling n'écrit rien sur
+      // disque, et un flooder ferait grossir le fichier json-file de Docker sans borne.
+      try {
+        switch (msg.type) {
+          case 'create':
+            return onCreate(client);
+          case 'join':
+            return onJoin(client, msg);
+          case 'reclaim':
+            return onReclaim(client, msg);
+          case 'signal':
+            return onSignal(client, msg); // sert aussi à l'ICE restart
+          case 'kick':
+            return onKickBan(client, msg, false);
+          case 'ban':
+            return onKickBan(client, msg, true);
+          case 'leave':
+            return onLeave(client);
+        }
+      } catch {
+        rejected.handlerError++;
       }
     });
 

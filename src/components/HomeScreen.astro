@@ -54,6 +54,17 @@
         Screen sharing needs a desktop browser — you can still join a share below.
       </div>
 
+      <!-- shown by app.ts quand le signaling est injoignable. Même placement que
+           #start-unsupported : hors du bouton, en tête de grille. Sans lui, l'échec renvoyait à
+           l'accueil sans un mot, sur le seul chemin d'entrée du host. -->
+      <div
+        id="start-error"
+        class="order-first col-span-full rounded-xl border border-live/[0.22] bg-live/[0.08] px-4 py-3 text-[13px] leading-[1.5] text-live-fg"
+        hidden
+      >
+        Could not reach the server — check your connection and try again.
+      </div>
+
       <!-- join -->
       <div class="flex min-h-[190px] flex-col gap-3.5 rounded-2xl border border-white/[0.09] bg-panel p-7 max-sm:min-h-0">
         <div class="flex items-center justify-between">

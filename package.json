@@ -13,7 +13,7 @@
     "astro": "astro",
     "typecheck": "astro check",
     "lint": "eslint .",
-    "test": "node --test src/lib/signaling.test.ts src/lib/peer.test.ts src/lib/code.test.ts src/lib/settings.test.ts src/lib/serial.test.ts src/lib/stats.test.ts src/lib/wakelock.test.ts src/lib/audio.test.ts",
+    "test": "node --test \"src/lib/*.test.ts\"",
     "e2e": "playwright test"
   },
   "dependencies": {

@@ -3,6 +3,11 @@ name: CI & Publish
 on:
   push:
     branches: [master]
+  # Sans ceci, `quality` ne tourne qu'APRÈS le merge : une PR ne peut pas être validée par la
+  # CI et la casse se découvre déjà sur master. `publish` reste sur push (needs: quality), donc
+  # une PR exécute les tests sans jamais publier d'image.
+  pull_request:
+    branches: [master]
 
 env:
   REGISTRY: ghcr.io
@@ -46,7 +51,7 @@ jobs:
         run: pnpm test
 
       - name: Test (signaling)
-        run: pnpm --dir signaling test
+        run: pnpm --ignore-workspace --dir signaling test
 
       # E2E: real host↔viewer WebRTC flow in headless Chromium (Playwright starts the dev +
       # signaling servers itself since CI=true → reuseExistingServer is off).
@@ -58,6 +63,9 @@ jobs:
 
   publish:
     needs: quality
+    # `needs` ne suffit pas : sans ce garde, l'ajout du trigger pull_request publierait une
+    # image à chaque PR (et échouerait sur les forks, qui n'ont pas packages: write).
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: read

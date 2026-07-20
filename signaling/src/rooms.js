@@ -19,8 +19,10 @@ export function newCode(existing) {
 /** Affichage : tiret au milieu → "7K2QP9" devient "7K2-QP9". */
 export const format = (code) => `${code.slice(0, 3)}-${code.slice(3)}`;
 
-/** Saisie : retire tiret/espaces, majuscules → forme canonique. */
-export const normalize = (input) => (input || '').toUpperCase().replace(/[^0-9A-Z]/g, '');
+/** Saisie : retire tiret/espaces, majuscules → forme canonique.
+ *  `String()` et non `input || ''` : l'entrée vient de JSON.parse côté serveur, donc de
+ *  n'importe quel type. `{"code":123}` passait le `||` puis jetait sur `.toUpperCase`. */
+export const normalize = (input) => String(input ?? '').toUpperCase().replace(/[^0-9A-Z]/g, '');
 
 /** Banni si l'IP OU le token correspond. L'IP attrape celui qui change de token ;
  *  le token (localStorage) attrape celui qui change d'IP sans vider son storage
