@@ -53,6 +53,9 @@ function teardown(): void {
 function goHome(): void {
   teardown();
   hide(el('start-error')); // pas d'erreur périmée au retour sur l'accueil
+  // Même raison que dans goJoin. Conditionné : sans getDisplayMedia, wireHome a désactivé ce
+  // bouton définitivement — un reset inconditionnel le rallumerait sur mobile.
+  if (supportsDisplayMedia()) el<HTMLButtonElement>('btn-start').disabled = false;
   if (document.fullscreenElement) void document.exitFullscreen().catch(() => {}); // leave the viewer's fullscreen
   history.replaceState(null, '', location.pathname);
   showScreen('home');
@@ -63,11 +66,16 @@ function goHome(): void {
 async function startShare(): Promise<void> {
   teardown();
   hide(el('start-error')); // une nouvelle tentative repart d'un écran propre
+  // Deux chemins de réarmement : `created` ci-dessous (on quitte l'accueil sans passer par
+  // goHome), et goHome pour tous les autres — échec, ou départ pendant l'attente.
+  const start = el<HTMLButtonElement>('btn-start');
+  start.disabled = true; // la carte se ternit (disabled:opacity-45) — c'est le retour visuel
   sig = new Signaling(signalingUrl());
   const current = sig;
   const off = current.onMessage((m: ServerMessage) => {
     if (m.type === 'created') {
       off();
+      start.disabled = false; // on quitte l'accueil : réarmé pour le retour
       history.replaceState(null, '', `#${m.code}`);
       showScreen('host');
       host = new HostController(current, m, { onEnd: goHome });
@@ -80,7 +88,7 @@ async function startShare(): Promise<void> {
     // On est encore sur l'accueil (showScreen('host') n'a lieu qu'à la réception de `created`),
     // donc goHome ne change pas d'écran : il libère le socket. Le message vient après, sinon
     // goHome le masquerait aussitôt. Le chemin viewer gérait déjà ce cas ; le host, non.
-    goHome();
+    goHome(); // réarme aussi #btn-start
     show(el('start-error'));
   }
 }
@@ -97,27 +105,48 @@ const JOIN_ERRORS: Record<string, string> = {
 
 function goJoin(code: string): void {
   teardown();
+  // Quitter l'écran pendant une tentative (retour accueil, deep-link) ne passe par aucune des
+  // trois sorties : sans ce reset le bouton resterait « Joining… » et désactivé pour de bon.
+  setJoinBusy(false);
   showScreen('join');
   setText('join-code', formatCode(code));
   hide(el('join-fail'));
   el<HTMLInputElement>('pseudo-input').focus();
 }
 
+// Chaque `setJoinBusy(true)` est apparié à un `false` sur les trois sorties (joined, join-error,
+// échec réseau) : sans ça le bouton reste mort et l'écran join devient un cul-de-sac.
+function setJoinBusy(busy: boolean): void {
+  const btn = el<HTMLButtonElement>('btn-do-join');
+  btn.disabled = busy;
+  btn.textContent = busy ? 'Joining…' : 'Join the stream';
+}
+
 async function doJoin(): Promise<void> {
   const code = currentCode();
   if (!isValidCode(code)) return;
   const pseudo = el<HTMLInputElement>('pseudo-input').value.trim() || 'viewer';
+  // Comme les trois autres entrées (startShare, goHome, goJoin). `doJoin` était la seule à
+  // écraser `sig` sans fermer la tentative précédente : deux sockets, deux ViewerController sur
+  // le même DOM (le premier plus référencé, donc jamais détruit) et surtout **deux flux encodés
+  // par le host** pour une seule personne, le mesh ouvrant un peer par viewer.
+  // Le garde `disabled` ci-dessous ne suffit pas : Entrée est câblé sur #pseudo-input (wireJoin),
+  // pas sur le bouton, donc un bouton désactivé ne ferme que le chemin souris.
+  teardown();
+  setJoinBusy(true);
   sig = new Signaling(signalingUrl());
   const current = sig;
   const off = current.onMessage((m: ServerMessage) => {
     if (m.type === 'joined') {
       off();
+      setJoinBusy(false); // on quitte l'écran join : réarmé pour le prochain passage
       showScreen('viewer');
       viewer = new ViewerController(current, m, { code, pseudo, token: getToken() }, { onLeave: goHome });
     } else if (m.type === 'join-error') {
       off();
       current.close();
       sig = null;
+      setJoinBusy(false);
       const fail = el('join-fail');
       fail.textContent = JOIN_ERRORS[m.reason] ?? 'room not found or closed';
       show(fail);
@@ -127,6 +156,7 @@ async function doJoin(): Promise<void> {
     await current.connect();
     current.join(code, pseudo, getToken());
   } catch {
+    setJoinBusy(false);
     const fail = el('join-fail');
     fail.textContent = 'could not reach the server';
     show(fail);

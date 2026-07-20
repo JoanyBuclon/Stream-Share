@@ -56,4 +56,14 @@ test('start a share is disabled when the browser has no getDisplayMedia', async 
   await expect(page.locator('#start-unsupported')).toBeVisible();
   // joining is the whole point of mobile — it must stay wired
   await expect(page.locator('#join-input')).toBeEnabled();
+
+  // goHome re-enables #btn-start (it is disabled while a share is being created), and that reset
+  // MUST stay behind supportsDisplayMedia() — otherwise coming back from any screen hands a
+  // mobile user a live "Start a share" button that cannot work. Checking on first paint only
+  // never exercises goHome, so an unconditional reset would pass every other assertion here.
+  await page.goto('/#7K2QP9');
+  await expect(page.locator('#screen-join')).toBeVisible();
+  await page.click('#btn-back-home');
+  await expect(page.locator('#screen-home')).toBeVisible();
+  await expect(page.locator('#btn-start')).toBeDisabled();
 });
