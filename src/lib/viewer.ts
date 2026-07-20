@@ -232,6 +232,15 @@ export class ViewerController {
     }
   }
 
+  // A PiP window is a separate always-on-top surface: it outlives the stream and keeps showing a
+  // dead frame long after the session is over, with no control to close it (our button lives on a
+  // screen the user is no longer looking at). Fullscreen doesn't need this — it stays on our own
+  // document, where the terminal panel is readable and Esc gets out.
+  // Not called on 'paused': that one is transient and resuming must find the window still there.
+  private closePip(): void {
+    if (document.pictureInPictureElement) void document.exitPictureInPicture().catch(() => {});
+  }
+
   private endSession(): void {
     this.terminated = true; // keep the 'ended' UI; ignore the 'closed' status that sig.close() will fire
     this.setState('ended');
@@ -310,6 +319,7 @@ export class ViewerController {
       case 'ended':
         hide(video);
         hide(el('viewer-controls'));
+        this.closePip();
         show(el('viewer-ended'));
         setText('conn-label', 'ended');
         dot.style.background = DOT.muted;
@@ -317,6 +327,7 @@ export class ViewerController {
       case 'error':
         hide(video);
         hide(el('viewer-controls'));
+        this.closePip();
         show(el('viewer-error'));
         setText('conn-label', 'failed');
         dot.style.background = DOT.red;
@@ -471,6 +482,7 @@ export class ViewerController {
     this.offStatus();
     this.peer?.close();
     this.peer = null;
+    this.closePip(); // covers the paths that never reach setState('ended'): leave, hash change, teardown
     const video = el<HTMLVideoElement>('viewer-video');
     video.srcObject = null;
     el('viewer-quality').replaceChildren(); // don't leave stale tier buttons for the next session

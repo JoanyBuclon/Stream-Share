@@ -64,9 +64,12 @@ export class Peer {
       // renégociation. Les senders sont mémorisés par kind pour replaceTracks().
       for (const kind of ['video', 'audio'] as const) {
         const track = stream.getTracks().find((t) => t.kind === kind);
-        const transceiver = track
-          ? this.pc.addTransceiver(track, { direction: 'sendonly', streams: [stream] })
-          : this.pc.addTransceiver(kind, { direction: 'sendonly' });
+        // `streams: [stream]` DOIT être passé même sans piste. C'est lui qui met un `a=msid` sur
+        // le m-line ; sans msid, le viewer reçoit bien la piste plus tard (replaceTrack) mais elle
+        // n'appartient à aucun flux — `ontrack` livre `streams: []`, rien n'est attaché au <video>,
+        // et comme replaceTrack ne renégocie pas, l'association n'arrive JAMAIS. Écran noir
+        // définitif pour qui rejoint pendant une pause (aucune piste vidéo dans `outgoing`).
+        const transceiver = this.pc.addTransceiver(track ?? kind, { direction: 'sendonly', streams: [stream] });
         if (kind === 'video') preferVideoCodecs(transceiver); // VP9/AV1 avant VP8 (meilleure qualité/bit)
         this.senders.set(kind, transceiver.sender);
       }
