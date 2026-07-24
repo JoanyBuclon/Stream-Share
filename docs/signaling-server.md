@@ -29,7 +29,7 @@ connexion (envoyé dans `hello`) et ne route que par salon.
 
 | `type`    | Payload                   | Effet                                                                                                                     |
 | --------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `create`  | —                         | Crée un salon, renvoie `created` (code + `hostToken`). L'émetteur devient host.                                           |
+| `create`  | —                         | Crée un salon, renvoie `created` (code + `hostToken`). L'émetteur devient host. Rate-limit atteint ou 2ᵉ `create` sur une socket déjà en salon → `error`. |
 | `join`    | `{ code, pseudo, token }` | Valide le code **et le ban** (IP ou token). OK → `joined` à l'émetteur + `peer-joined` à l'host. KO/banni → `join-error`. |
 | `reclaim` | `{ code, hostToken }`     | **(host)** reprend son salon après une coupure, dans la fenêtre de grâce. OK → `reclaimed`. KO → `reclaim-error`.         |
 | `signal`  | `{ to, data }`            | Relaie `data` (SDP offer/answer ou ICE candidate) au pair `to`. Sert aussi à l'ICE restart.                               |
@@ -43,6 +43,7 @@ connexion (envoyé dans `hello`) et ne route que par salon.
 | --------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
 | `hello`         | `{ peerId }`                               | Id de connexion attribué à ce client.                                                                        |
 | `created`       | `{ code, display, hostToken, iceServers }` | Salon créé. `display` = code formaté `XXX-XXX`, `hostToken` = secret de reclaim, `iceServers` = config STUN. |
+| `error`         | `{ reason }`                               | Échec d'un `create` : `rate-limited` (plafond atteint) ou `already-in-room` (2ᵉ `create` sur une socket déjà en salon). |
 | `joined`        | `{ hostId, iceServers }`                   | Le viewer est entré ; id de l'host à contacter + config STUN.                                                |
 | `join-error`    | `{ reason }`                               | Code inconnu / salon fermé / banni (message opaque).                                                         |
 | `peer-joined`   | `{ peerId, pseudo }`                       | Notifie l'host qu'un viewer est arrivé → l'host initie l'offre.                                              |
@@ -92,8 +93,9 @@ Trois niveaux, tous **minimaux** (on ne vise pas une reprise de session complexe
   **`reclaim { code, hostToken }`** dans la fenêtre de grâce — il **récupère son
   ancien `peerId`** pour que les `signal { to: hostId }` des viewers continuent de
   router (continuité). Le serveur lui renvoie la liste des viewers dans `reclaimed`.
-- **Média** : côté host/offerer, sur `iceConnectionState → failed`, `pc.restartIce()`
-  renégocie le transport **sans détruire la connexion** ; les nouveaux candidats
+- **Média** : côté host/offerer, sur `iceConnectionState → failed`, `Peer.restartIce()`
+  (une offre `createOffer({ iceRestart: true })`) renégocie le transport **sans détruire
+  la connexion** ; les nouveaux candidats
   repassent par `signal`. `disconnected` est juste remonté (il se rétablit souvent
   seul). Les restarts sont **plafonnés (5)** pour ne pas boucler sur un lien mort ;
   côté viewer, un « reconnexion… » qui ne repart pas bascule sur **« connexion

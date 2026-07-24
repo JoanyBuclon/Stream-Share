@@ -44,29 +44,43 @@ Toute la logique protocolaire vit dans des modules TS agnostiques :
 ```
 src/
 ├── pages/
-│   └── index.astro       # markup statique + <script> qui monte l'app
+│   └── index.astro       # markup statique (4 écrans) + <script> qui monte l'app
+├── components/           # les 4 écrans .astro (Home / Join / Host / Viewer)
 └── lib/
-    ├── app.ts            # état de l'UI (idle | joining | hosting | viewing) + rendu DOM
+    ├── app.ts            # orchestrateur : routage par hash (#CODE), bascule d'écran
+    │                     #   (états 'home' | 'join' | 'host' | 'viewer'), une Signaling
+    │                     #   par session, passe la main aux contrôleurs
+    ├── host.ts           # contrôleur host : capture, qualité, sidebar viewers, modale, pause
+    ├── viewer.ts         # contrôleur viewer : lecture, contrôles locaux, overlay stats
+    ├── viewer-state.ts   # DOMAINE PUR : machine à états du viewer (reduce(session, event))
+    ├── roster.ts         # DOMAINE PUR : reconcileRoster (diff des viewers après reclaim)
     ├── signaling.ts      # client ws + protocole (cf. signaling-server.md)
-    └── peer.ts           # wrapper RTCPeerConnection (offer/answer/ICE, senders)
+    ├── peer.ts           # wrapper RTCPeerConnection (offer/answer/ICE, senders)
+    ├── settings.ts       # logique pure qualité (presets, tiers, scale, upload estimé)
+    ├── audio.ts          # AudioMixer (système + micro, WebAudio 48 kHz)
+    ├── stats.ts          # parsing pur de getStats → métriques viewer
+    ├── code.ts           # génération/validation des codes (miroir de rooms.js)
+    └── dom.ts · serial.ts · wakelock.ts   # helpers (el/hook, sérialisation, wake lock)
 ```
 
-`signaling.ts` et `peer.ts` isolent les deux protocoles ; `app.ts` fait l'UI et le
-câblage (met à jour le DOM sur les événements : viewer qui rejoint/part, stats,
-changements d'état). La réactivité ici est **modérée** → un objet d'état + une
-petite fonction de rendu suffisent.
+`signaling.ts` et `peer.ts` isolent les deux protocoles. `app.ts` **orchestre**
+(route, bascule d'écran) et délègue tout le rendu et le câblage événementiel aux
+**contrôleurs** `host.ts` / `viewer.ts` (mise à jour du DOM sur les événements :
+viewer qui rejoint/part, stats, changements d'état). La décision d'état du viewer
+est extraite en **domaine pur** (`viewer-state.ts`) : le contrôleur `dispatch(event)`
+puis `render()`, testable sans DOM.
 
 **Callbacks à brancher pour les états transverses (voir plus bas) :**
 
 - `signaling.onMessage(msg)` — messages serveur (peer-joined, signal, peer-left,
   reclaimed…). `signaling.onStatus(s)` — `open | reconnecting | closed` → alimente
   l'overlay « reconnexion… » / l'état « déconnecté ».
-- `peer.onTrack(stream)` (flux reçu) · `peer.onState(s)` (état connexion) ·
-  `peer.onIceState(s)` — `disconnected` → « reconnexion… », `failed` → « connexion
-  impossible ».
+- `peer.onTrack(stream)` (flux reçu) · `peer.onIceState(s)` — `disconnected` →
+  « reconnexion… », `failed` → « connexion impossible ». (Le wrapper n'expose que
+  l'état ICE de transport : pas de callback d'état de connexion global.)
 - Au reconnect du socket : un **viewer** re-`join`, un **host** appelle
-  `reclaim(code, hostToken)` (le `hostToken` reçu dans `created` est conservé en
-  mémoire/localStorage).
+  `reclaim(code, hostToken)` (le `hostToken` reçu dans `created` est conservé
+  **en mémoire** — un rechargement de page le perd et empêche le reclaim).
 
 ```
 // ponytail: vanilla + modules TS, zéro dépendance framework. Introduire Svelte
@@ -82,14 +96,13 @@ petite fonction de rendu suffisent.
 - Qualité : **presets** (Gaming / Bureautique / Ciné) au-dessus des réglages
   résolution / FPS (`10/30/60/120`) / bitrate.
 - Audio : toggles **son système** + **micro**.
-- Session : **copier le lien**, **liste des viewers** (pseudo + ping + état) avec
-  **kick / ban** par ligne, **pause**, **stop**, estimation d'upload, chrono.
-- Stats : bitrate / fps par viewer (`getStats`).
+- Session : **copier le lien**, **liste des viewers** (avatar + pseudo + état « connected »)
+  avec **kick / ban** par ligne, **pause**, **stop**, estimation d'upload.
 
 **Viewer**
 
 - Vidéo : `<video>` du flux (placeholder « en pause » / écran « host a arrêté »).
-- Qualité : paliers **`Source · Auto · 1440p · 1080p · 720p`** (dynamiques,
+- Qualité : paliers **`Auto · Source · 1440p · 1080p · 720p · 480p`** (dynamiques,
   plafonnés au flux host — les paliers au-dessus n'apparaissent pas).
 - Audio : **volume** + **mute**.
 - Vue : **picture-in-picture**, **plein écran**, **quitter**.

@@ -17,17 +17,19 @@ Deux images GHCR distinctes : `ghcr.io/joanybuclon/stream-share-web` et
 
 ### Dockerfile web (`Dockerfile`)
 
-Multi-stage repris du Portfolio, **sans le sous-setting de polices** (pas de
-police custom ici) : stage `node:24-alpine` qui fait `pnpm build`, puis
-`nginx:stable-alpine` qui sert `dist/`. Le `.dockerignore` exclut `signaling/`,
-`docs/`, etc. — le build du front n'en a pas besoin.
+Multi-stage : stage `node:24-alpine` qui fait `pnpm build` (Astro **auto-héberge la
+police Hanken Grotesk au build**, cf. `astro.config.mjs` — pas d'étape de subsetting
+séparée à écrire dans le Dockerfile), puis `nginx:stable-alpine` qui sert `dist/` et
+**copie aussi `nginx-security-headers.conf`** (le fichier d'en-têtes partagé, cf. § CSP).
+Le `.dockerignore` exclut `signaling/`, `docs/`, etc. — le build du front n'en a pas besoin.
 
 ### Dockerfile signaling (`signaling/Dockerfile`)
 
-Pas de nginx : un process Node qui tourne en continu. `pnpm install --prod` puis
-`node src/index.js`, `EXPOSE 8080`. Le `.dockerignore` du dossier écarte les
-tests et le client de test (`public/test.html`) — inutiles en prod (la route `/`
-part vers le `web`, seul `/ws` atteint ce service).
+Pas de nginx : un process Node qui tourne en continu. `pnpm install --prod`,
+`EXPOSE 8080`, **`USER node`** (non-root — le runtime ne fait que lire ses fichiers et
+bind 8080), puis `node src/index.js`. Le `.dockerignore` du dossier écarte les tests et
+le client de test (`public/test.html`) — inutiles en prod (la route `/` part vers le
+`web`, seul `/ws` atteint ce service).
 
 ## Routage Traefik
 
@@ -61,6 +63,8 @@ services:
     networks: [web]
     environment:
       - ICE_SERVERS=stun:stun.l.google.com:19302 # STUN seul, par décision (pas de TURN)
+      - TRUST_PROXY=1 # ne lire X-Forwarded-For que derrière Traefik (port non exposé hors réseau interne)
+      - ALLOWED_ORIGINS=https://stream.joanybuclon.com # allow-list Origin (anti-CSWSH)
     labels:
       - 'traefik.enable=true'
       - 'traefik.http.routers.streamshare-ws.rule=Host(`stream.joanybuclon.com`) && PathPrefix(`/ws`)'
@@ -75,31 +79,39 @@ networks:
 
 ## Intégration continue (`.github/workflows/docker-publish.yml`)
 
-Repris du Portfolio, adapté à nos deux packages. Déclencheur : `push` sur
-`master`. Actions **épinglées par SHA**. Deux jobs :
+Repris du Portfolio, adapté à nos deux packages. Déclencheurs : `push` **et**
+`pull_request` sur `master` (une PR passe `quality` sans jamais publier). Actions
+**épinglées par SHA**. Deux jobs :
 
 1. **`quality`** — filet avant toute publication :
    - `pnpm install --frozen-lockfile` (web **et** `signaling`).
    - `pnpm audit --audit-level=high` sur les deux (bloque sur CVE haute/critique).
    - `typecheck` (`astro check` sur les modules TS du front).
    - `lint` (`eslint .` — couvre aussi le JS du signaling depuis la config racine).
-   - **Tests** : `pnpm test` (lib client, `node --test`) **et** `pnpm --dir signaling
-     test` (suites `rooms` / `smoke` / `grace` / `ban`).
-2. **`publish`** (dépend de `quality`) — **matrice deux images** (`web`,
-   `signaling`) : login GHCR, `metadata-action` (tags `latest` + `sha-<court>`),
-   build & push Buildx avec cache `gha` **scoped par image**.
+   - **Tests unitaires** : `pnpm test` (lib client, `node --test "src/lib/*.test.ts"`)
+     **et** `pnpm --ignore-workspace --dir signaling test` (six suites : `rooms`,
+     `smoke`, `grace`, `ban`, `guards`, `authz`). `--ignore-workspace` est requis,
+     sinon le workspace racine capte le dossier et la commande no-op silencieusement.
+   - **E2E** : `pnpm e2e` (Playwright, projets `chromium` + `mobile`) — le vrai chemin
+     WebRTC host↔viewer en headless.
+2. **`publish`** (dépend de `quality`, **uniquement sur `push`** — gaté par
+   `if: github.event_name == 'push'`) — **matrice deux images** (`web`, `signaling`) :
+   login GHCR, `metadata-action` (tags `latest` + `sha-<court>`), build & push Buildx
+   avec cache `gha` **scoped par image**.
 
 Rien ne se publie si un test, le lint ou le typecheck échoue.
 
-> Le front est encore un **placeholder** Astro. L'image `web` l'embarque tel quel ;
-> quand la vraie UI arrivera, aucun travail d'infra ne sera à refaire — seul le
-> contenu de `src/` change.
+> L'infra est **agnostique au front** : l'image `web` embarque le `dist/` d'Astro
+> quel qu'en soit le contenu — faire évoluer l'UI ne demande aucun changement d'infra.
 
-## En-têtes / CSP (`nginx.conf`)
+## En-têtes / CSP (`nginx-security-headers.conf`)
 
-Reprend les en-têtes de sécurité du Portfolio (`framedeny`, HSTS, nosniff,
-`referrerPolicy` côté Traefik ; cache immutable + CSP côté nginx) **mais adapte la
-CSP** pour le WebSocket et le média :
+`framedeny`, HSTS, nosniff, `referrerPolicy` viennent de **Traefik** ; le cache
+immutable (`/_astro/`) est dans `nginx.conf`. La **CSP + Permissions-Policy** vivent
+dans un fichier partagé **`nginx-security-headers.conf`**, `include`d dans les **deux**
+`location` (`/` et `/_astro/`) — car `add_header` de nginx **remplace** (n'hérite pas)
+dès qu'une `location` déclare le sien, donc les en-têtes doivent être re-déclarés
+partout. La CSP est adaptée pour le WebSocket et le média :
 
 ```
 Content-Security-Policy:
@@ -109,9 +121,11 @@ Content-Security-Policy:
   script-src 'self' 'unsafe-inline';
   style-src 'self' 'unsafe-inline';
   img-src 'self' data:;
+  font-src 'self';                    # police Hanken Grotesk auto-hébergée
   object-src 'none';
   frame-ancestors 'none';
   base-uri 'self';
+  form-action 'self';
 ```
 
 - `connect-src 'self'` : autorise la socket signaling (`wss` same-origin).
@@ -130,9 +144,12 @@ le réseau `web` (port 8080). Le client se connecte en `wss://` — pas de certi
 
 | Variable      | Défaut                         | Usage                                                       |
 | ------------- | ------------------------------ | ----------------------------------------------------------- |
-| `ICE_SERVERS` | `stun:stun.l.google.com:19302` | Liste STUN passée aux clients. Pas de TURN (choix d'archi). |
-| `PORT`        | `8080`                         | Port d'écoute interne du signaling.                         |
-| `GRACE_MS`    | `30000`                        | Délai de grâce avant destruction d'un salon (reclaim host). |
+| `ICE_SERVERS`     | `stun:stun.l.google.com:19302` | Liste STUN passée aux clients. Pas de TURN (choix d'archi).            |
+| `PORT`            | `8080`                         | Port d'écoute interne du signaling.                                    |
+| `GRACE_MS`        | `30000`                        | Délai de grâce avant destruction d'un salon (reclaim host).           |
+| `TRUST_PROXY`     | _(off)_                        | `=1` → lire `X-Forwarded-For` (dernier hop). **Uniquement derrière le proxy.** |
+| `ALLOWED_ORIGINS` | _(vide)_                       | Allow-list d'`Origin` (anti-CSWSH). Vide = pas de contrôle (dev).     |
+| `MAX_VIEWERS`     | `10`                           | Plafond de viewers par salon (au-delà → `join-error: full`).          |
 
 ```
 // ponytail: pas de secret, pas de base, pas de volume. Deux conteneurs

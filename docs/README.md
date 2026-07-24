@@ -18,9 +18,11 @@ transite par le serveur.
 
 ## Cadre & décisions structurantes
 
-- **1 host → plusieurs viewers en mesh** (typiquement 2-4). Le plafond n'est pas
-  logiciel : c'est l'uplink et le GPU de l'host (cf. [`webrtc-media.md`](./webrtc-media.md)).
-  On **n'impose aucun cap arbitraire** — c'est l'host qui arbitre.
+- **1 host → plusieurs viewers en mesh** (typiquement 2-4). Le vrai plafond est
+  **physique** — l'uplink et le GPU de l'host (cf. [`webrtc-media.md`](./webrtc-media.md)),
+  le mesh ouvrant un flux encodé par viewer. Un **cap logiciel** l'accompagne
+  (`MAX_VIEWERS`, défaut **10**) : au-delà, le join est refusé (`join-error: full`) — le
+  mesh ne tient de toute façon pas beaucoup plus loin.
 - **STUN public obligatoire** pour la traversée NAT. Il ne voit jamais de média.
 - **Pas de TURN, pas de SFU — définitif.** Les deux relaieraient du flux média par
   un serveur, ce qui détruirait le principe « zéro média serveur » et l'objectif

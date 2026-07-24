@@ -24,10 +24,12 @@ Le mesh met tout le coût sur l'host :
 - **Upload** : N × le bitrate. À 4K60 (~25-40 Mbps), 4 viewers = 100-160 Mbps
   d'upload — au-delà, la plupart des connexions résidentielles saturent.
 
-C'est le **plafond réel**, et il est **physique, pas logiciel** : il dépend de
-l'uplink et du GPU de l'host. En pratique 2-4 viewers en haute qualité. On
-**n'impose aucun cap arbitraire** (cohérent avec « aucune limite ») — c'est
-l'host qui arbitre, et l'UI l'avertit à mesure que le nombre de viewers monte.
+C'est le **plafond réel**, et il est **d'abord physique** : il dépend de l'uplink
+et du GPU de l'host. En pratique 2-4 viewers en haute qualité. Un **cap logiciel**
+le double côté serveur (`MAX_VIEWERS`, défaut **10** ; au-delà → `join-error: full`) —
+non pour brider la qualité, mais parce que le mesh ne tient pas beaucoup plus loin :
+il protège autant le navigateur de l'host que la mémoire du serveur. L'UI avertit
+l'host à mesure que le nombre de viewers monte.
 
 **Pas de SFU — définitif.** Un SFU (l'host envoie **un** flux, un serveur le
 redistribue) lèverait ce plafond, mais relaierait le média par un serveur → même
@@ -46,20 +48,21 @@ du navigateur (pas de code à écrire pour ça).
 
 ```ts
 const stream = await navigator.mediaDevices.getDisplayMedia({
-  video: {
-    frameRate: { ideal: 60 }, // FPS choisi par l'host (voir ci-dessous)
-  },
-  audio: true, // son système/onglet si dispo (cf. § Audio)
-  systemAudio: 'include',
-  surfaceSwitching: 'include', // Chrome/Edge : changer de source sans re-prompt
-  selfBrowserSurface: 'exclude',
+  video: { frameRate: { ideal: quality.fps } }, // FPS choisi par l'host (voir ci-dessous)
+  // Son système : on coupe le traitement voix du navigateur (AGC / réduction de bruit /
+  // annulation d'écho) et on force stéréo 48 kHz = capture brute. `false` si le partage du
+  // son système est désactivé dans les réglages.
+  audio: quality.systemAudio
+    ? { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, sampleRate: 48000 }
+    : false,
 });
-stream.getVideoTracks()[0].contentHint = 'motion'; // jeux : fluidité > détail
+stream.getVideoTracks()[0].contentHint = 'motion'; // jeux : fluidité > détail (posé par contentHintFor)
 ```
 
 - **Sélecteur natif uniquement.** Pas de grille de sources maison (impossible en
   navigateur). Après sélection, on affiche `track.label` (nom réel) + un aperçu du
-  vrai flux. `surfaceSwitching` permet de changer de source sans redemander.
+  vrai flux. Changer de source relance le sélecteur natif (un nouveau
+  `getDisplayMedia`) : pas de switch sans re-consentement côté web.
 - **Résolution** : dictée par la source. On ne la bride pas → 4K native si l'host
   partage un écran 4K (il peut downscaler, cf. § Qualité).
 - **FPS** : choix host `10 / 30 / 60 / 120`. `10` sert au contenu bureautique ; `120`
@@ -73,8 +76,10 @@ stream.getVideoTracks()[0].contentHint = 'motion'; // jeux : fluidité > détail
 
 Déclenchée par `peer-joined` (cf. [`signaling-server.md`](./signaling-server.md)) :
 
-1. Host : `new RTCPeerConnection({ iceServers })`, `addTrack` pour chaque piste
-   du `stream`.
+1. Host : `new RTCPeerConnection({ iceServers })`, puis un transceiver `sendonly` par
+   **kind** (`video`, `audio`) via `addTransceiver` — **même si la source initiale n'a pas
+   cette piste** (m-lines pré-négociées + `streams: [stream]` pour poser le `a=msid`). C'est
+   ce qui permet le hot-swap de source/audio par `replaceTrack` **sans renégocier**.
 2. Host : `createOffer` → `setLocalDescription` → `signal(offer)` au viewer.
 3. Viewer : `setRemoteDescription` → `createAnswer` → `signal(answer)`.
 4. Les deux : ICE candidates en trickle via `signal`.
@@ -140,10 +145,10 @@ L'host fixe le **plafond** (capture + res/bitrate max) ; chaque viewer peut dema
 applique `scaleResolutionDownBy` + `maxBitrate` **sur le sender de ce viewer-là** —
 zéro média serveur, aucun SFU.
 
-- Paliers exposés au viewer : **`Source`** (pas de downscale) · **`Auto`** (WebRTC
-  adapte seul via bandwidth estimation — gratuit, défaut) · **`1440p / 1080p / 720p`**.
+- Paliers exposés au viewer : **`Auto`** (WebRTC adapte seul via bandwidth estimation —
+  gratuit, défaut) · **`Source`** (pas de downscale) · **`1440p / 1080p / 720p / 480p`**.
 - **Plafonné au flux host** : les paliers au-dessus de ce que l'host envoie
-  **n'apparaissent pas** (on ne peut pas upscaler au-delà de la source). Plancher 720p.
+  **n'apparaissent pas** (on ne peut pas upscaler au-delà de la source). Plancher 480p.
 - **Rappel du coût** : la capture est payée **une fois**. Baisser un viewer allège
   **son** encode + upload, pas la capture ; si _personne_ ne veut la 4K, c'est la
   **capture** de l'host qu'il faut baisser.
@@ -212,9 +217,9 @@ notifié **avant** l'offre (pas de flash « live »).
 Le wrapper `Peer` remonte l'état ICE via `onIceState` et, **côté host/offerer
 uniquement**, tente un ICE restart :
 
-- Sur `iceConnectionState` → **`failed`**, `pc.restartIce()` réémet une offre
-  `iceRestart` (renégociation) **sans détruire la connexion** ; le viewer y répond
-  via `accept()`, les nouveaux candidats repassent par `signal`. Une garde empêche
+- Sur `iceConnectionState` → **`failed`**, `Peer.restartIce()` réémet une offre
+  `createOffer({ iceRestart: true })` (renégociation) **sans détruire la connexion** ; le
+  viewer y répond via `accept()`, les nouveaux candidats repassent par `signal`. Une garde empêche
   deux restarts de se chevaucher, et le nombre de restarts est **plafonné (5)** :
   sur un lien définitivement mort, on cesse au lieu de re-offrir en boucle (le
   compteur se réinitialise dès qu'on repasse `connected`).

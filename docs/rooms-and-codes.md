@@ -38,13 +38,15 @@ Pas de base de données, pas de Redis.
   (probabilité quasi nulle, mais la boucle est gratuite).
 
 ```ts
+import { randomInt } from 'node:crypto';
+
 const ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'; // Crockford, sans I L O U
 
 // Génération : clé canonique 6 caractères, sans tiret.
 function newCode(existing): string {
   let code: string;
   do {
-    code = Array.from({ length: 6 }, () => ALPHABET[Math.floor(Math.random() * ALPHABET.length)]).join('');
+    code = Array.from({ length: 6 }, () => ALPHABET[randomInt(ALPHABET.length)]).join('');
   } while (existing.has(code));
   return code;
 }
@@ -53,10 +55,12 @@ function newCode(existing): string {
 const format = (code: string) => `${code.slice(0, 3)}-${code.slice(3)}`;
 
 // Saisie (join) : normaliser avant lookup — tiret et casse sont cosmétiques.
-const normalize = (input: string) => input.toUpperCase().replace(/[^0-9A-Z]/g, '');
+// String() car l'entrée vient de JSON.parse (n'importe quel type) : {"code":123} jetait sur .toUpperCase.
+const normalize = (input: string) => String(input ?? '').toUpperCase().replace(/[^0-9A-Z]/g, '');
 
-// ponytail: Math.random suffit pour un code éphémère non-secret ; l'anti-abus
-// repose sur le rate-limit, pas sur l'imprévisibilité du RNG.
+// ponytail: randomInt (CSPRNG), pas Math.random — le code EST le seul secret qui
+// protège un salon (partage par lien). Le rate-limit sur join rend le balayage
+// non praticable, mais ne remplace pas l'imprévisibilité du RNG.
 ```
 
 ## Cycle de vie
