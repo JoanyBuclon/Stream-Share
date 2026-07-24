@@ -16,9 +16,9 @@ export type ServerMessage =
   | { type: 'kicked'; banned: boolean }
   | { type: 'error'; reason: string };
 
-// 'reconnecting' = coupure inattendue, une tentative est planifiée. 'closed' = fermé
-// volontairement ou après épuisement des tentatives. L'app re-join sur un 'open' qui suit
-// un 'reconnecting'.
+// 'reconnecting' = unexpected drop, a retry is scheduled. 'closed' = closed
+// intentionally or after the retry budget is exhausted. The app re-joins on an 'open' that
+// follows a 'reconnecting'.
 export type ConnectionStatus = 'open' | 'reconnecting' | 'closed';
 
 export type MessageHandler = (msg: ServerMessage) => void;
@@ -26,7 +26,7 @@ export type StatusHandler = (status: ConnectionStatus) => void;
 export type SocketFactory = (url: string) => WebSocket;
 export type Scheduler = (fn: () => void, ms: number) => void;
 
-const OPEN = 1; // WebSocket.OPEN — évite de dépendre du global dans les tests.
+const OPEN = 1; // WebSocket.OPEN — avoids depending on the global in tests.
 const MAX_RETRIES = 5;
 const RETRY_DELAY_MS = 500;
 
@@ -53,15 +53,15 @@ export class Signaling {
     this.schedule = schedule;
   }
 
-  /** Ouvre la connexion (tentative manuelle : réinitialise le budget de reconnexion).
-   *  Résout à l'ouverture, rejette sur erreur/fermeture avant ouverture. */
+  /** Opens the connection (manual attempt: resets the reconnection budget).
+   *  Resolves on open, rejects on error/close before open. */
   connect(): Promise<void> {
     this.retries = 0;
     return this.open();
   }
 
-  // Ouvre un socket. Utilisé par connect() et par les tentatives de reconnexion internes
-  // (qui NE réinitialisent PAS `retries`, sinon le plafond ne serait jamais atteint).
+  // Opens a socket. Used by connect() and by the internal reconnection attempts
+  // (which do NOT reset `retries`, otherwise the cap would never be reached).
   private open(): Promise<void> {
     const previous = this.socket;
     this.intentionalClose = false;
@@ -73,35 +73,35 @@ export class Signaling {
         'open',
         () => {
           this.hasOpened = true;
-          this.retries = 0; // ouverture réussie → budget rendu (le cap vise les échecs consécutifs)
+          this.retries = 0; // successful open → budget restored (the cap targets consecutive failures)
           this.setStatus('open');
           resolve();
         },
         { once: true },
       );
-      socket.addEventListener('error', () => reject(new Error('signaling: connexion échouée')), { once: true });
+      socket.addEventListener('error', () => reject(new Error('signaling: connection failed')), { once: true });
       socket.addEventListener(
         'close',
         () => {
-          // Rejet no-op si la promesse est déjà résolue/rejetée ; utile seulement si le socket
-          // se ferme avant de s'ouvrir (sans `error` préalable) pour ne pas la laisser pendre.
-          reject(new Error('signaling: fermé avant ouverture'));
+          // No-op reject if the promise is already resolved/rejected; only useful if the socket
+          // closes before opening (without a prior `error`) so it isn't left hanging.
+          reject(new Error('signaling: closed before open'));
           this.onClose(socket);
         },
         { once: true },
       );
-      // Fermé après réassignation : le handler close de l'ancien socket verra qu'il n'est plus courant.
+      // Closed after reassignment: the old socket's close handler will see it is no longer current.
       previous?.close();
     });
   }
 
-  /** Abonne un handler aux messages serveur. Retourne la fonction de désabonnement. */
+  /** Subscribes a handler to server messages. Returns the unsubscribe function. */
   onMessage(handler: MessageHandler): () => void {
     this.handlers.add(handler);
     return () => this.handlers.delete(handler);
   }
 
-  /** Abonne un handler au statut de connexion (open / reconnecting / closed). */
+  /** Subscribes a handler to the connection status (open / reconnecting / closed). */
   onStatus(handler: StatusHandler): () => void {
     this.statusHandlers.add(handler);
     return () => this.statusHandlers.delete(handler);
@@ -113,7 +113,7 @@ export class Signaling {
   join(code: string, pseudo: string, token: string): void {
     this.send({ type: 'join', code, pseudo, token });
   }
-  /** (host) Reprend son salon après une coupure, dans la fenêtre de grâce. */
+  /** (host) Reclaims its room after a drop, within the grace window. */
   reclaim(code: string, hostToken: string): void {
     this.send({ type: 'reclaim', code, hostToken });
   }
@@ -135,9 +135,9 @@ export class Signaling {
   }
 
   private onClose(socket: WebSocket): void {
-    if (socket !== this.socket) return; // socket remplacé par un connect() : on ignore
-    // Pas de reconnexion si fermeture volontaire, si on n'a jamais réussi à ouvrir
-    // (l'appelant a déjà le rejet de connect()), ou si les tentatives sont épuisées.
+    if (socket !== this.socket) return; // socket replaced by a connect(): ignore
+    // No reconnection if closed intentionally, if we never managed to open
+    // (the caller already has connect()'s rejection), or if the retries are exhausted.
     if (this.intentionalClose || !this.hasOpened || this.retries >= MAX_RETRIES) {
       this.setStatus('closed');
       return;
@@ -152,7 +152,7 @@ export class Signaling {
       try {
         handler(status);
       } catch (err) {
-        console.error('signaling: un handler de statut a levé une exception', err);
+        console.error('signaling: a status handler threw an exception', err);
       }
     }
   }
@@ -167,20 +167,20 @@ export class Signaling {
     try {
       parsed = JSON.parse(raw);
     } catch {
-      return; // message non-JSON : ignoré (le serveur ne devrait jamais en envoyer).
+      return; // non-JSON message: ignored (the server should never send one).
     }
-    // Garde anti-crash minimale (le serveur est de confiance, pas de validation de schéma) :
-    // on écarte les payloads sans `type` string, qui feraient planter les handlers.
+    // Minimal anti-crash guard (the server is trusted, no schema validation):
+    // we discard payloads without a string `type`, which would crash the handlers.
     if (typeof parsed !== 'object' || parsed === null || typeof (parsed as { type?: unknown }).type !== 'string') {
       return;
     }
     const msg = parsed as ServerMessage;
-    // Un handler qui jette ne doit pas priver les autres du message.
+    // A handler that throws must not deprive the others of the message.
     for (const handler of this.handlers) {
       try {
         handler(msg);
       } catch (err) {
-        console.error('signaling: un handler a levé une exception', err);
+        console.error('signaling: a handler threw an exception', err);
       }
     }
   }

@@ -5,7 +5,7 @@
 
 <section id="screen-host" tabindex="-1" class="flex min-h-0 flex-1 flex-col animate-fade focus:outline-none" hidden>
   <!-- top bar -->
-  <header class="flex flex-shrink-0 items-center justify-between border-b border-white/[0.07] px-[22px] py-3.5">
+  <header class="flex flex-shrink-0 flex-wrap items-center justify-between gap-y-2 border-b border-white/[0.07] px-[22px] py-3.5 max-sm:px-3">
     <div class="flex items-center gap-[18px]">
       <a id="brand-host" href="/" class="flex items-center gap-[9px]">
         <img src="/favicon.svg" alt="" class="size-[18px]" />
@@ -126,7 +126,7 @@
           </div>
           <button
             id="btn-settings"
-            class="flex cursor-pointer items-center gap-[7px] rounded-[9px] border border-white/10 bg-elev px-3.5 py-[9px] text-[13px] text-fg hover:bg-[#262626]"
+            class="flex cursor-pointer items-center gap-[7px] rounded-[9px] border border-white/10 bg-elev px-3.5 py-[9px] text-[13px] text-fg hover:bg-elev-hover"
           >
             <span class="block size-3 rounded-full border-[1.5px] border-fg-dim"></span>
             Settings
@@ -137,7 +137,7 @@
 
         <button
           id="btn-pause"
-          class="flex cursor-pointer items-center gap-2 rounded-[9px] border border-white/10 bg-elev px-[15px] py-[9px] text-[13px] font-medium text-fg hover:bg-[#262626]"
+          class="flex cursor-pointer items-center gap-2 rounded-[9px] border border-white/10 bg-elev px-[15px] py-[9px] text-[13px] font-medium text-fg hover:bg-elev-hover"
           hidden
         >
           <span id="pause-icon" class="flex gap-[3px]">
@@ -172,8 +172,8 @@
         </div>
       </div>
 
-      <!-- populated list -->
-      <div id="viewers-list" class="flex flex-col gap-1.5" hidden></div>
+      <!-- populated list — scrolls in the stacked layout so 10 viewers don't push the stage off-screen -->
+      <div id="viewers-list" class="flex flex-col gap-1.5 max-lg:max-h-[40vh] max-lg:overflow-y-auto" hidden></div>
 
       <!-- empty / waiting -->
       <div
@@ -189,7 +189,7 @@
         <button
           id="btn-copy-link-waiting"
           data-copied="false"
-          class="w-full cursor-pointer rounded-[9px] border border-white/[0.12] bg-elev px-3 py-2.5 text-[13px] font-medium text-fg transition-colors hover:bg-[#262626] data-[copied=true]:border-good/40 data-[copied=true]:bg-good/[0.12] data-[copied=true]:text-good"
+          class="w-full cursor-pointer rounded-[9px] border border-white/[0.12] bg-elev px-3 py-2.5 text-[13px] font-medium text-fg transition-colors hover:bg-elev-hover data-[copied=true]:border-good/40 data-[copied=true]:bg-good/[0.12] data-[copied=true]:text-good"
           >Copy room link</button
         >
       </div>
@@ -210,7 +210,7 @@
       <div class="flex gap-2">
         <button
           data-hook="kick"
-          class="cursor-pointer rounded-md border border-white/[0.08] bg-elev-2 px-3 py-2 font-mono text-[10px] text-muted hover:bg-[#2c2c2c] hover:text-fg"
+          class="cursor-pointer rounded-md border border-white/[0.08] bg-elev-2 px-3 py-2 font-mono text-[10px] text-muted hover:bg-elev-hover hover:text-fg"
           >kick</button
         >
         <button
@@ -247,21 +247,21 @@
         <button
           id="btn-settings-close"
           aria-label="Close settings"
-          class="flex size-8 cursor-pointer items-center justify-center rounded-lg border border-white/10 bg-elev text-base text-fg-dim hover:bg-[#262626]"
+          class="flex size-8 cursor-pointer items-center justify-center rounded-lg border border-white/10 bg-elev text-base text-fg-dim hover:bg-elev-hover"
           >✕</button
         >
       </div>
 
       <div class="flex flex-col gap-5 px-6 pb-2 pt-5">
         <!-- source -->
-        <div class="flex items-center justify-between gap-4">
+        <div class="flex flex-wrap items-center justify-between gap-4 gap-y-2">
           <div>
             <div class="text-[13px] text-fg-dim">Source</div>
             <div id="settings-source-hint" class="mt-0.5 font-mono text-xs text-muted-3">no source selected</div>
           </div>
           <button
             id="btn-modal-source"
-            class="cursor-pointer rounded-[9px] border border-white/[0.12] bg-elev px-[15px] py-[9px] text-[13px] font-medium text-fg hover:bg-[#262626]"
+            class="cursor-pointer rounded-[9px] border border-white/[0.12] bg-elev px-[15px] py-[9px] text-[13px] font-medium text-fg hover:bg-elev-hover"
             >Choose source</button
           >
         </div>
@@ -270,7 +270,7 @@
         <div class="font-mono text-[10px] uppercase tracking-[0.12em] text-muted-3">Quality</div>
 
         <!-- preset -->
-        <div class="flex items-center justify-between gap-4">
+        <div class="flex flex-wrap items-center justify-between gap-4 gap-y-2">
           <span class="text-[13px] text-fg-dim">Preset</span>
           <div class="inline-flex gap-1.5 font-mono">
             <button class="ss-seg" data-preset="gaming">Gaming</button>
@@ -280,7 +280,7 @@
         </div>
 
         <!-- resolution -->
-        <div class="flex items-center justify-between gap-4">
+        <div class="flex flex-wrap items-center justify-between gap-4 gap-y-2">
           <span class="text-[13px] text-fg-dim">Resolution</span>
           <div class="inline-flex gap-[3px] rounded-[9px] border border-white/[0.08] bg-[#0d0d0d] p-[3px] font-mono">
             <button class="ss-seg" data-res="2160">4K</button>
@@ -292,7 +292,7 @@
         </div>
 
         <!-- framerate -->
-        <div class="flex items-center justify-between gap-4">
+        <div class="flex flex-wrap items-center justify-between gap-4 gap-y-2">
           <span class="text-[13px] text-fg-dim">Framerate</span>
           <div class="inline-flex gap-[3px] rounded-[9px] border border-white/[0.08] bg-[#0d0d0d] p-[3px] font-mono">
             <button class="ss-seg" data-fps="10">10</button>
@@ -303,7 +303,7 @@
         </div>
 
         <!-- bitrate -->
-        <div class="flex items-center justify-between gap-4">
+        <div class="flex flex-wrap items-center justify-between gap-4 gap-y-2">
           <span class="text-[13px] text-fg-dim">Bitrate</span>
           <div class="flex max-w-[320px] flex-1 items-center gap-3">
             <input id="bitrate-range" type="range" min="2" max="60" value="20" aria-label="Bitrate (mbps)" class="flex-1 cursor-pointer accent-fg" />
@@ -314,7 +314,7 @@
         <div class="h-px bg-white/[0.07]"></div>
 
         <!-- audio -->
-        <div class="flex items-center justify-between gap-4">
+        <div class="flex flex-wrap items-center justify-between gap-4 gap-y-2">
           <span class="text-[13px] text-fg-dim">Audio</span>
           <div class="flex gap-2">
             <button id="toggle-sysaudio" class="ss-audio" data-active="true">
@@ -328,7 +328,7 @@
       </div>
 
       <div
-        class="mt-1.5 flex items-center justify-between gap-4 border-t border-white/[0.07] px-6 pb-[22px] pt-[18px]"
+        class="mt-1.5 flex flex-wrap items-center justify-between gap-4 gap-y-2 border-t border-white/[0.07] px-6 pb-[22px] pt-[18px]"
       >
         <div class="font-mono text-[11px] text-muted-3">
           ≈ <span id="est-upload">20</span> mbps upload · <span id="est-res">Source</span> ·

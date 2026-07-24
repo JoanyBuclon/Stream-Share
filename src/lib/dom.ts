@@ -7,6 +7,14 @@ export function el<T extends HTMLElement = HTMLElement>(id: string): T {
   return node as T;
 }
 
+/** Query a required `[data-hook]` descendant, throwing if the template changed (mirrors `el`, so a
+ *  markup drift fails with a clear message instead of an opaque null-deref). */
+export function hook<T extends HTMLElement = HTMLElement>(root: ParentNode, name: string): T {
+  const node = root.querySelector<T>(`[data-hook="${name}"]`);
+  if (!node) throw new Error(`stream-share: missing [data-hook="${name}"] in the template`);
+  return node;
+}
+
 export const show = (node: HTMLElement): void => {
   node.hidden = false;
 };

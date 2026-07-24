@@ -8,18 +8,24 @@ export class AudioMixer {
   private nodes: AudioNode[] = []; // graph of the current build — disconnected on the next one
 
   private readonly makeContext: () => AudioContext;
+  private readonly getMic: () => Promise<MediaStream>;
 
-  /** `makeContext` is injected only so the rebuild/disconnect logic is testable without WebAudio.
-   *  Plain field, not a parameter property: Node's type stripping cannot erase those. */
-  constructor(makeContext: () => AudioContext = () => new AudioContext({ sampleRate: 48000 })) {
+  /** `makeContext` and `getMic` are injected only so the rebuild/disconnect logic and the mic
+   *  acquisition are testable without WebAudio or a real device. Plain fields, not parameter
+   *  properties: Node's type stripping cannot erase those. */
+  constructor(
+    makeContext: () => AudioContext = () => new AudioContext({ sampleRate: 48000 }),
+    getMic: () => Promise<MediaStream> = () => navigator.mediaDevices.getUserMedia({ audio: true }),
+  ) {
     this.makeContext = makeContext;
+    this.getMic = getMic;
   }
 
   /** Outgoing audio track for the given system track + mic preference, or null if neither.
    *  Reuses an already-acquired mic (so a source change doesn't re-prompt); only (re)acquires
    *  when the mic goes off→on. Throws if the mic is requested but permission is denied. */
   async build(systemTrack: MediaStreamTrack | null, wantMic: boolean): Promise<MediaStreamTrack | null> {
-    if (wantMic && !this.micStream) this.micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    if (wantMic && !this.micStream) this.micStream = await this.getMic();
     if (!wantMic && this.micStream) {
       this.micStream.getTracks().forEach((t) => t.stop());
       this.micStream = null;

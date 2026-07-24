@@ -1,7 +1,7 @@
-// Stream-Share signaling server: registre de salons en mémoire + relais aveugle
-// des messages WebRTC (SDP/ICE). Aucun média ne transite ici. Cf. docs/signaling-server.md.
+// Stream-Share signaling server: in-memory room registry + blind relay
+// of WebRTC messages (SDP/ICE). No media transits here. See docs/signaling-server.md.
 //
-// Run:  node src/index.js   (puis ouvrir http://localhost:8080/test.html dans 2 onglets)
+// Run:  node src/index.js   (then open http://localhost:8080/test.html in 2 tabs)
 import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -11,24 +11,24 @@ import { WebSocketServer } from 'ws';
 import { newCode, format, normalize, isBanned } from './rooms.js';
 
 const PORT = Number(process.env.PORT) || 8080;
-// Délai laissé au host pour se reconnecter (reclaim) avant destruction du salon.
-let graceMs = Number(process.env.GRACE_MS) || 30_000;
+// Grace period given to the host to reconnect (reclaim) before the room is destroyed.
+const DEFAULT_GRACE_MS = Number(process.env.GRACE_MS) || 30_000;
 const ICE_SERVERS = (process.env.ICE_SERVERS || 'stun:stun.l.google.com:19302')
   .split(',')
   .map((u) => u.trim())
   .filter(Boolean)
   .map((urls) => ({ urls }));
-// Derrière Traefik uniquement (cf. docker-compose.yml). En écoute directe, laisser à 0 :
-// X-Forwarded-For est alors entièrement contrôlé par le client.
+// Behind Traefik only (see docker-compose.yml). When listening directly, leave at 0:
+// X-Forwarded-For is then entirely controlled by the client.
 const TRUST_PROXY = process.env.TRUST_PROXY === '1';
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
   .split(',')
   .map((o) => o.trim())
   .filter(Boolean);
 const MAX_VIEWERS = Number(process.env.MAX_VIEWERS) || 10;
-const MAX_PAYLOAD = 64 * 1024; // SDP/ICE tiennent dans quelques Ko
-const MSG_MAX_PER_SEC = 60; // au-delà, la connexion est fermée
-const HEARTBEAT_MS = 30_000; // ping toutes les 30 s ; une socket sans pong au tour suivant est morte
+const MAX_PAYLOAD = 64 * 1024; // SDP/ICE fit in a few KB
+const MSG_MAX_PER_SEC = 60; // beyond this, the connection is closed
+const HEARTBEAT_MS = 30_000; // ping every 30 s; a socket with no pong by the next round is dead
 
 const here = dirname(fileURLToPath(import.meta.url));
 const OPEN = 1; // WebSocket.OPEN
@@ -40,16 +40,16 @@ const clients = new Map(); // peerId -> { id, ws, ip, token, roomCode, role }
 let seq = 0;
 const genId = () => `p${++seq}`;
 
-// Rate-limit par IP : fenêtre glissante en mémoire (ponytail: pas de lib, pas de Redis).
-// `join` est bridé pour rendre le balayage de codes non praticable (32⁶ codes / 30 essais
-// par minute et par IP). Les IP viennent de `clientIp`, donc réelles derrière le proxy.
+// Per-IP rate limit: in-memory sliding window (ponytail: no lib, no Redis).
+// `join` is throttled to make code scanning impractical (32⁶ codes / 30 attempts
+// per minute per IP). IPs come from `clientIp`, so they are real behind the proxy.
 const RATE = {
   create: { log: new Map(), max: 10, window: 60_000 },
   join: { log: new Map(), max: 30, window: 60_000 },
 };
-// Compteurs cumulés depuis le démarrage, exposés par /health. Ce sont les rejets qui disent si
-// on se fait taper dessus — `rooms`/`viewers` ne disent que si le service sert. Volontairement
-// des entiers plats : pas de série temporelle ici, c'est le rôle de ce qui scrape.
+// Cumulative counters since startup, exposed by /health. The rejections are what tell whether
+// we're under attack — `rooms`/`viewers` only tell whether the service is serving. Deliberately
+// flat integers: no time series here, that's the job of whatever scrapes it.
 const rejected = { createRateLimited: 0, joinRateLimited: 0, originRejected: 0, floodClosed: 0, banned: 0, handlerError: 0 };
 
 function allow(kind, ip, now) {
@@ -73,8 +73,8 @@ export function _resetState() {
   seq = 0;
 }
 
-// Sans ceci, une clé par IP jamais revue reste à vie (les timestamps sont filtrés à la
-// lecture, mais la lecture n'arrive plus). Balayage à la fréquence de la fenêtre.
+// Without this, a key for an IP never seen again lives forever (timestamps are filtered on
+// read, but the read no longer happens). Swept at the frequency of the window.
 setInterval(() => {
   const now = Date.now();
   for (const { log, window } of Object.values(RATE)) {
@@ -82,9 +82,9 @@ setInterval(() => {
   }
 }, 60_000).unref();
 
-/** IP réelle du client. Derrière le proxy, le *dernier* hop de X-Forwarded-For est celui
- *  ajouté par Traefik (l'adresse socket vue par lui) ; les entrées précédentes viennent du
- *  client et sont donc usurpables. Sans TRUST_PROXY, l'en-tête n'est jamais lu. */
+/** Real client IP. Behind the proxy, the *last* hop of X-Forwarded-For is the one
+ *  added by Traefik (the socket address it sees); the earlier entries come from the
+ *  client and are therefore spoofable. Without TRUST_PROXY, the header is never read. */
 export function clientIp(req, trustProxy = TRUST_PROXY) {
   if (trustProxy) {
     const last = String(req.headers['x-forwarded-for'] || '')
@@ -96,9 +96,9 @@ export function clientIp(req, trustProxy = TRUST_PROXY) {
   return req.socket.remoteAddress || 'unknown';
 }
 
-/** Anti-CSWSH. Origin absent = client non-navigateur (tests, CLI) : rien à usurper, on laisse
- *  passer — le vecteur CSWSH n'existe que dans un navigateur, qui envoie toujours l'en-tête.
- *  Allow-list vide = non configuré (dev) : pas de contrôle. */
+/** Anti-CSWSH. Origin absent = non-browser client (tests, CLI): nothing to spoof, let it
+ *  through — the CSWSH vector only exists in a browser, which always sends the header.
+ *  Empty allow-list = not configured (dev): no check. */
 export function originAllowed(origin, list = ALLOWED_ORIGINS) {
   if (!list.length || !origin) return true;
   return list.includes(origin);
@@ -109,10 +109,10 @@ function send(ws, type, payload = {}) {
 }
 
 function onCreate(client) {
-  // Une socket ne tient qu'un salon. Sans ce garde, un second `create` écrase `client.roomCode`
-  // et le salon précédent devient orphelin : `cleanup` ne collecte que le dernier, les autres
-  // vivent sans host jusqu'à l'OOM et leur code sort du pool. Le front n'ouvre jamais deux
-  // salons sur une même socket (app.ts).
+  // A socket holds only one room. Without this guard, a second `create` overwrites `client.roomCode`
+  // and the previous room becomes orphaned: `cleanup` only collects the last one, the others
+  // live on without a host until OOM and their code leaves the pool. The front never opens two
+  // rooms on the same socket (app.ts).
   if (client.roomCode) return send(client.ws, 'error', { reason: 'already-in-room' });
   const now = Date.now();
   if (!allow('create', client.ip, now)) {
@@ -120,24 +120,24 @@ function onCreate(client) {
     return send(client.ws, 'error', { reason: 'rate-limited' });
   }
   const code = newCode(rooms);
-  const hostToken = randomUUID(); // secret pour reprendre la main (reclaim) après une coupure
+  const hostToken = randomUUID(); // secret to take back control (reclaim) after a disconnect
   rooms.set(code, { code, hostId: client.id, hostToken, viewers: new Map(), bannedIps: new Set(), bannedTokens: new Set(), createdAt: now, graceTimer: null });
   client.roomCode = code;
   client.role = 'host';
   send(client.ws, 'created', { code, display: format(code), hostToken, iceServers: ICE_SERVERS });
 }
 
-// Le host reprend son salon après une coupure, dans la fenêtre de grâce, via son hostToken.
+// The host takes back its room after a disconnect, within the grace window, via its hostToken.
 function onReclaim(client, { code, hostToken }) {
   const room = rooms.get(normalize(code));
-  // Réclamable seulement si le salon existe, est en grâce (host absent) et le token correspond.
+  // Reclaimable only if the room exists, is in grace (host absent) and the token matches.
   if (!room || !room.graceTimer || room.hostToken !== hostToken) {
     return send(client.ws, 'reclaim-error', { reason: 'invalid' });
   }
   clearTimeout(room.graceTimer);
   room.graceTimer = null;
-  // Continuité du peerId : le host reprend son ancien id pour que les `signal {to: hostId}`
-  // envoyés par les viewers continuent de router vers lui.
+  // peerId continuity: the host takes back its old id so that the `signal {to: hostId}`
+  // sent by viewers keep routing to it.
   clients.delete(client.id);
   client.id = room.hostId;
   client.roomCode = room.code;
@@ -156,23 +156,28 @@ function destroyRoom(room) {
 }
 
 function onJoin(client, { code, pseudo, token }) {
-  // Compté avant toute vérification : un balayeur ne doit pas obtenir d'essais gratuits
-  // sur les codes inexistants — ce sont justement ceux qu'il envoie en masse.
+  // Counted before any check: a scanner must not get free attempts
+  // on non-existent codes — those are precisely the ones it sends en masse.
   if (!allow('join', client.ip, Date.now())) {
     rejected.joinRateLimited++;
     return send(client.ws, 'join-error', { reason: 'rate-limited' });
   }
   const room = rooms.get(normalize(code));
   if (!room) return send(client.ws, 'join-error', { reason: 'not-found' });
-  if (isBanned(room, client.ip, token)) return send(client.ws, 'join-error', { reason: 'banned' });
-  // Le mesh (un flux encodé par viewer côté host) ne tient pas au-delà d'une poignée :
-  // le plafond protège autant le navigateur du host que la mémoire du serveur.
+  if (isBanned(room, client.ip, token)) {
+    // Counted HERE (join refused because of ban), not when the ban is issued: `rejected` measures the abuse suffered,
+    // and a banned user who retries IS abuse. A ban issued by the host is a deliberate action.
+    rejected.banned++;
+    return send(client.ws, 'join-error', { reason: 'banned' });
+  }
+  // The mesh (one stream encoded per viewer on the host side) doesn't hold beyond a handful:
+  // the cap protects the host's browser as much as the server's memory.
   if (room.viewers.size >= MAX_VIEWERS) return send(client.ws, 'join-error', { reason: 'full' });
   client.roomCode = room.code;
   client.role = 'viewer';
   client.token = token || '';
-  // `String()` : `pseudo` vient de JSON.parse, donc de n'importe quel type — un nombre jetait
-  // sur `.slice`. Le cap à 20 est la seule borne côté serveur, le front n'en pose aucune.
+  // `String()`: `pseudo` comes from JSON.parse, so from any type — a number threw
+  // on `.slice`. The cap at 20 is the only bound on the server side, the front sets none.
   const name = String(pseudo ?? 'viewer').slice(0, 20);
   room.viewers.set(client.id, { id: client.id, pseudo: name });
   send(client.ws, 'joined', { hostId: room.hostId, iceServers: ICE_SERVERS });
@@ -180,8 +185,11 @@ function onJoin(client, { code, pseudo, token }) {
   if (host) send(host.ws, 'peer-joined', { peerId: client.id, pseudo: name });
 }
 
-// Relais aveugle : le serveur ne lit pas `data`, il le recopie vers le pair cible du même salon.
+// Blind relay: the server does not read `data`, it copies it to the target peer in the same room.
 function onSignal(client, { to, data }) {
+  // Without this guard, two clients outside any room (roomCode null on both sides → null === null) could
+  // relay to each other. Defense-in-depth: a client must be in a room to relay.
+  if (!client.roomCode) return;
   const target = clients.get(to);
   if (!target || target.roomCode !== client.roomCode) return;
   send(target.ws, 'signal', { from: client.id, data });
@@ -193,8 +201,7 @@ function onKickBan(client, { peerId }, ban) {
   const viewer = clients.get(peerId);
   if (!viewer || viewer.roomCode !== room.code) return;
   if (ban) {
-    rejected.banned++;
-    room.bannedIps.add(viewer.ip);
+    room.bannedIps.add(viewer.ip); // rejected.banned is counted at the refused join, not here (host action)
     if (viewer.token) room.bannedTokens.add(viewer.token);
   }
   room.viewers.delete(peerId);
@@ -205,19 +212,19 @@ function onKickBan(client, { peerId }, ban) {
   } catch {}
 }
 
-function cleanup(client) {
-  // Si la map ne référence plus CET objet sous cet id (host reclaimé sous le même id, ou
-  // second cleanup via close+error), on ne touche à rien : sinon on supprimerait le reclaimé.
+function cleanup(client, grace) {
+  // If the map no longer references THIS object under this id (host reclaimed under the same id, or
+  // a second cleanup via close+error), touch nothing: otherwise we'd delete the reclaimed one.
   if (clients.get(client.id) !== client) return;
   clients.delete(client.id);
   const room = rooms.get(client.roomCode);
   client.roomCode = null;
   if (!room) return;
   if (client.role === 'host' && room.hostId === client.id) {
-    // Délai de grâce : on garde le salon vivant pour laisser le host se reconnecter (reclaim).
-    // Les viewers ne sont pas notifiés tant que la grâce n'a pas expiré.
-    room.graceTimer = setTimeout(() => destroyRoom(room), graceMs);
-    room.graceTimer.unref(); // ne pas maintenir le process en vie juste pour ce timer
+    // Grace period: keep the room alive to let the host reconnect (reclaim).
+    // Viewers are not notified until the grace has expired.
+    room.graceTimer = setTimeout(() => destroyRoom(room), grace);
+    room.graceTimer.unref(); // don't keep the process alive just for this timer
   } else {
     room.viewers.delete(client.id);
     const host = clients.get(room.hostId);
@@ -225,41 +232,45 @@ function cleanup(client) {
   }
 }
 
-// Départ explicite (l'utilisateur a cliqué Stop/Quitter) : volontaire, donc on termine tout
-// de suite — contrairement à une coupure de socket inattendue, qui ouvre au host une fenêtre
-// de grâce pour reclaim.
-function onLeave(client) {
+// Explicit departure (the user clicked Stop/Leave): deliberate, so we finish right
+// away — unlike an unexpected socket drop, which opens a grace
+// window for the host to reclaim.
+function onLeave(client, grace) {
   const room = rooms.get(client.roomCode);
   if (room && client.role === 'host' && room.hostId === client.id) {
     if (room.graceTimer) clearTimeout(room.graceTimer);
-    destroyRoom(room); // notifie les viewers (peer-left host-left) + libère le code, sans grâce
+    destroyRoom(room); // notifies the viewers (peer-left host-left) + frees the code, no grace
   }
-  cleanup(client); // retire le client ; pour un viewer, notifie aussi l'host
+  cleanup(client, grace); // removes the client; for a viewer, also notifies the host
 }
 
 export function createSignalingServer(opts = {}) {
-  if (opts.graceMs != null) graceMs = opts.graceMs;
+  // Local to the closure, no longer a module-level `let` shared across servers: two createSignalingServer
+  // in the same process no longer clash (the last one used to win retroactively for all of them).
+  const grace = opts.graceMs ?? DEFAULT_GRACE_MS;
   const server = createServer((req, res) => {
-    // Volontairement NON routé par Traefik (qui n'envoie ici que Host + PathPrefix(/ws)) : joignable
-    // seulement depuis le réseau Docker et le healthcheck du compose. C'est ce qui permet d'exposer
-    // les compteurs sans réfléchir — les publier donnerait à un attaquant un retour direct sur
-    // l'effet de ses tentatives. Ne pas ajouter de router `/health` sans repasser sur ce choix.
+    // Deliberately NOT routed by Traefik (which only sends Host + PathPrefix(/ws) here): reachable
+    // only from the Docker network and the compose healthcheck. This is what lets us expose
+    // the counters without a second thought — publishing them would give an attacker direct feedback on
+    // the effect of their attempts. Don't add a `/health` router without revisiting this choice.
     if (req.method === 'GET' && req.url === '/health') {
       let viewers = 0;
       for (const room of rooms.values()) viewers += room.viewers.size;
       res.writeHead(200, { 'content-type': 'application/json' });
-      // `connections` compte toutes les sockets ouvertes, y compris celles qui n'ont encore ni
-      // créé ni rejoint : un écart durable avec rooms+viewers signale des clients qui traînent.
+      // `connections` counts all open sockets, including those that have neither
+      // created nor joined yet: a lasting gap with rooms+viewers signals clients hanging around.
       return res.end(JSON.stringify({ status: 'ok', rooms: rooms.size, viewers, connections: clients.size, rejected }));
     }
-    if (req.method === 'GET' && (req.url === '/' || req.url === '/test.html')) {
+    // Dev test page only. `public/` is already excluded from the prod image (.dockerignore), so
+    // this path answers 404 there anyway; the gate makes the intent explicit and costs one line.
+    if (req.method === 'GET' && process.env.NODE_ENV !== 'production' && (req.url === '/' || req.url === '/test.html')) {
       try {
         const html = readFileSync(join(here, '..', 'public', 'test.html'));
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
         return res.end(html);
       } catch {
         res.writeHead(404);
-        return res.end('test.html introuvable');
+        return res.end('test.html not found');
       }
     }
     res.writeHead(404);
@@ -301,9 +312,9 @@ export function createSignalingServer(opts = {}) {
     clients.set(client.id, client);
     send(ws, 'hello', { peerId: client.id });
 
-    // Throttle par connexion : fenêtre fixe d'une seconde. Au-delà du seuil on ferme au lieu
-    // de jeter le message — un `signal` perdu en silence casserait la négociation ICE, alors
-    // qu'une fermeture est un échec visible que le client sait gérer (reconnexion).
+    // Per-connection throttle: fixed one-second window. Beyond the threshold we close instead
+    // of dropping the message — a `signal` lost silently would break the ICE negotiation, whereas
+    // a close is a visible failure the client knows how to handle (reconnection).
     let windowStart = 0;
     let msgCount = 0;
 
@@ -314,10 +325,10 @@ export function createSignalingServer(opts = {}) {
         msgCount = 0;
       }
       if (++msgCount > MSG_MAX_PER_SEC) {
-        // `close()` ne vide pas ce qui est déjà en tampon : le handler continue de tirer pour
-        // chaque message restant. Se fier à readyState compte UNE fermeture par connexion (et
-        // évite de re-fermer) — sinon un seul flooder gonfle le compteur du nombre de messages
-        // qu'il a réussi à empiler, et /health laisse croire à des centaines d'incidents.
+        // `close()` does not flush what is already buffered: the handler keeps firing for
+        // each remaining message. Relying on readyState counts ONE close per connection (and
+        // avoids re-closing) — otherwise a single flooder inflates the counter by the number of messages
+        // it managed to queue up, and /health makes it look like hundreds of incidents.
         if (ws.readyState === OPEN) {
           rejected.floodClosed++;
           ws.close(1008, 'rate-limited');
@@ -331,14 +342,14 @@ export function createSignalingServer(opts = {}) {
       } catch {
         return;
       }
-      // JSON.parse rend n'importe quel type, pas seulement un objet : `null`, un nombre, une
-      // chaîne. Le try/catch ci-dessus ne couvre QUE le parse — `msg.type` sur `null` jetait
-      // hors du handler, donc uncaughtException, donc le process meurt avec tous les salons.
+      // JSON.parse returns any type, not just an object: `null`, a number, a
+      // string. The try/catch above covers ONLY the parse — `msg.type` on `null` threw
+      // out of the handler, hence uncaughtException, hence the process dies along with all the rooms.
       if (!msg || typeof msg !== 'object') return;
-      // Filet pour les handlers : le contenu du payload reste non fiable même une fois l'objet
-      // validé (code numérique, pseudo objet…). Une valeur inattendue ne doit jamais dépasser
-      // la connexion qui l'a envoyée. Compté, pas loggué — le signaling n'écrit rien sur
-      // disque, et un flooder ferait grossir le fichier json-file de Docker sans borne.
+      // Safety net for the handlers: the payload content stays untrusted even once the object
+      // is validated (numeric code, object pseudo…). An unexpected value must never get past
+      // the connection that sent it. Counted, not logged — the signaling writes nothing to
+      // disk, and a flooder would grow Docker's json-file without bound.
       try {
         switch (msg.type) {
           case 'create':
@@ -348,21 +359,21 @@ export function createSignalingServer(opts = {}) {
           case 'reclaim':
             return onReclaim(client, msg);
           case 'signal':
-            return onSignal(client, msg); // sert aussi à l'ICE restart
+            return onSignal(client, msg); // also serves the ICE restart
           case 'kick':
             return onKickBan(client, msg, false);
           case 'ban':
             return onKickBan(client, msg, true);
           case 'leave':
-            return onLeave(client);
+            return onLeave(client, grace);
         }
       } catch {
         rejected.handlerError++;
       }
     });
 
-    ws.on('close', () => cleanup(client));
-    ws.on('error', () => cleanup(client));
+    ws.on('close', () => cleanup(client, grace));
+    ws.on('error', () => cleanup(client, grace));
   });
 
   return server;
@@ -372,7 +383,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const server = createSignalingServer();
   server.on('error', (err) => {
     if (err.code === 'EADDRINUSE') {
-      console.error(`Port ${PORT} déjà utilisé. Relance avec un autre port : PORT=8090 pnpm start`);
+      console.error(`Port ${PORT} already in use. Restart with another port: PORT=8090 pnpm start`);
       process.exit(1);
     }
     throw err;

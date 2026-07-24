@@ -79,6 +79,15 @@ const b1sig = await until(b1, 'signal');
 assert.equal(b1sig.from, host2.id, 'b1 only gets its own host relay, not a1 from another room');
 assert.deepEqual(b1sig.data, { ok: 1 });
 
+// A client not in any room (roomCode null) must not relay at all: without the `!client.roomCode`
+// guard, two roomless clients would pass the `null === null` room check. Prove the outsider's signal
+// to b1 is dropped — b1 only ever sees its own host's relay.
+const outsider = await connect();
+outsider.send({ type: 'signal', to: b1.id, data: { leak: 2 } });
+host2.send({ type: 'signal', to: b1.id, data: { ok2: 1 } });
+const b1sig2 = await until(b1, 'signal');
+assert.deepEqual(b1sig2.data, { ok2: 1 }, 'a roomless outsider cannot relay into a room');
+
 // A plain kick (not ban) removes the viewer but does not ban: it can rejoin the same room.
 host1.send({ type: 'kick', peerId: a2.id });
 const kicked = await until(a2, 'kicked');
@@ -87,7 +96,17 @@ const a2b = await connect();
 a2b.send({ type: 'join', code: code1, pseudo: 'a2-again' });
 assert.equal((await until(a2b, 'joined', 'join-error')).type, 'joined', 'a kicked (not banned) viewer can rejoin');
 
-for (const c of [host1, a1, a2, host2, b1, a2b]) c.ws.close();
+// A ban DOES block rejoin, and the refusal is counted under rejected.banned (an abuse suffered),
+// not at the moment the host issues the ban (a voluntary action).
+host1.send({ type: 'ban', peerId: a2b.id });
+await until(a2b, 'kicked');
+const a2c = await connect();
+a2c.send({ type: 'join', code: code1, pseudo: 'a2-banned' });
+assert.equal((await until(a2c, 'join-error')).reason, 'banned', 'a banned viewer is refused on rejoin');
+const health = await (await fetch(`http://localhost:${server.address().port}/health`)).json();
+assert.equal(health.rejected.banned, 1, 'the refused rejoin is counted, not the ban issuance');
+
+for (const c of [host1, a1, a2, host2, b1, a2b, a2c, outsider]) c.ws.close();
 await new Promise((r) => server.close(r));
 _resetState(); // leave the shared state clean for the sibling test files
 console.log('authz.test.js OK');

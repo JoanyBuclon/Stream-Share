@@ -9,7 +9,7 @@ import { AudioMixer } from './audio.ts';
 import { serial } from './serial.ts';
 import { WakeLock } from './wakelock.ts';
 import { reconcileRoster } from './roster.ts';
-import { el, show, hide, setText, initials } from './dom.ts';
+import { el, hook, show, hide, setText, initials } from './dom.ts';
 import {
   applyPreset,
   effectiveScale,
@@ -133,6 +133,9 @@ export class HostController {
     };
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia(constraints);
+      // The picker can resolve after the controller was destroyed (Stop/leave while it was open):
+      // don't run setStream on a torn-down controller — it would repaint the DOM and recreate peers.
+      if (this.ac.signal.aborted) return void stream.getTracks().forEach((t) => t.stop());
       await this.setStream(stream);
     } catch (e) {
       // NotAllowedError = the user dismissed the picker or a policy blocked it: intended, stay
@@ -151,7 +154,8 @@ export class HostController {
     const video = capture.getVideoTracks()[0];
     if (video) {
       video.contentHint = contentHintFor(this.quality);
-      video.addEventListener('ended', this.stop, { signal: this.ac.signal }); // "Stop sharing" from the browser chrome
+      // `once`: a new track per source change would otherwise stack a `stop` listener each time.
+      video.addEventListener('ended', this.stop, { once: true, signal: this.ac.signal }); // "Stop sharing" from the browser chrome
     }
     this.applyFps();
     const preview = el<HTMLVideoElement>('host-video');
@@ -223,7 +227,7 @@ export class HostController {
     // Late joiner during a pause: tell them BEFORE the offer so they never flash 'live'.
     if (this.paused) this.sig.signal(peerId, { control: 'pause' });
     void peer
-      .offer(this.outgoing, { maxBitrateKbps: this.quality.bitrate * 1000 }) // relève start/min-bitrate SDP
+      .offer(this.outgoing, { maxBitrateKbps: this.quality.bitrate * 1000 }) // raises the SDP start/min-bitrate
       .then(() => {
         this.applyVideoQualityTo(entry);
         const h = this.capHeight();
@@ -333,10 +337,10 @@ export class HostController {
       b.addEventListener('click', () => this.setResolution(parseRes(b.dataset.res ?? 'source')), { signal });
     for (const b of document.querySelectorAll<HTMLElement>('#settings-modal [data-fps]'))
       b.addEventListener('click', () => this.setFps(Number(b.dataset.fps)), { signal });
-    // `input` tire à la fréquence du pointeur pendant un drag (~60-120/s) : on n'y met que le
-    // libellé. `setBitrate` part sur `change`, qui ne tire qu'au relâchement (ou à la validation
-    // clavier) — sinon chaque pixel de drag coûte un `setParameters()` PAR viewer (aller-retour
-    // dans l'encodeur, seul chemin du host qui scale avec le mesh) + un `renderSettings()` entier.
+    // `input` fires at the pointer's rate during a drag (~60-120/s): put only the label there.
+    // `setBitrate` runs on `change`, which fires only on release (or keyboard commit) — otherwise
+    // every pixel of drag costs one `setParameters()` PER viewer (a round-trip into the encoder,
+    // the only host path that scales with the mesh) + a full `renderSettings()`.
     const bitrate = el<HTMLInputElement>('bitrate-range');
     bitrate.addEventListener('input', (e) => setText('bitrate-value', `${(e.target as HTMLInputElement).value} mbps`), {
       signal,
@@ -443,7 +447,9 @@ export class HostController {
           entry.tier = msg.data.quality; // viewer picked a quality tier → apply on its sender
           this.applyVideoQualityTo(entry);
         } else if (entry.peer) {
-          void entry.peer.accept(msg.data as PeerSignal);
+          // A malformed SDP from a (hostile or broken) viewer rejects accept; swallow it so it
+          // doesn't surface as an unhandled rejection on the host tab. One bad peer stays local.
+          entry.peer.accept(msg.data as PeerSignal).catch(() => {});
         }
         break;
       }
@@ -481,12 +487,14 @@ export class HostController {
   private addViewer(peerId: string, pseudo: string): void {
     if (this.viewers.has(peerId)) return;
     const tpl = el<HTMLTemplateElement>('tpl-viewer-row');
-    const row = tpl.content.firstElementChild!.cloneNode(true) as HTMLElement;
-    row.querySelector<HTMLElement>('[data-hook="initials"]')!.textContent = initials(pseudo);
-    row.querySelector<HTMLElement>('[data-hook="name"]')!.textContent = pseudo;
+    const first = tpl.content.firstElementChild;
+    if (!first) throw new Error('stream-share: empty #tpl-viewer-row');
+    const row = first.cloneNode(true) as HTMLElement;
+    hook(row, 'initials').textContent = initials(pseudo);
+    hook(row, 'name').textContent = pseudo;
     const signal = this.ac.signal;
-    const kickBtn = row.querySelector<HTMLElement>('[data-hook="kick"]')!;
-    const banBtn = row.querySelector<HTMLElement>('[data-hook="ban"]')!;
+    const kickBtn = hook(row, 'kick');
+    const banBtn = hook(row, 'ban');
     // Name the target: three identical "kick" buttons in the a11y tree are indistinguishable.
     kickBtn.setAttribute('aria-label', `Kick ${pseudo}`);
     banBtn.setAttribute('aria-label', `Ban ${pseudo}`);

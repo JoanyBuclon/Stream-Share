@@ -1,13 +1,13 @@
 // Room-code generation + input normalization. Pure logic — unit-tested in rooms.test.js.
-// Cf. docs/rooms-and-codes.md.
+// See docs/rooms-and-codes.md.
 
 import { randomInt } from 'node:crypto';
 
-const ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'; // Crockford base32, sans I L O U
+const ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'; // Crockford base32, without I L O U
 
-/** Génère un code canonique 6 caractères, absent de `existing`.
- *  `randomInt` (CSPRNG) et non `Math.random` : le code est le seul secret qui protège un
- *  salon, un PRNG prédictible le rendrait devinable sans même balayer. */
+/** Generates a canonical 6-character code, absent from `existing`.
+ *  `randomInt` (CSPRNG) and not `Math.random`: the code is the only secret protecting a
+ *  room, a predictable PRNG would make it guessable without even scanning. */
 export function newCode(existing) {
   let code;
   do {
@@ -16,17 +16,17 @@ export function newCode(existing) {
   return code;
 }
 
-/** Affichage : tiret au milieu → "7K2QP9" devient "7K2-QP9". */
+/** Display: dash in the middle → "7K2QP9" becomes "7K2-QP9". */
 export const format = (code) => `${code.slice(0, 3)}-${code.slice(3)}`;
 
-/** Saisie : retire tiret/espaces, majuscules → forme canonique.
- *  `String()` et non `input || ''` : l'entrée vient de JSON.parse côté serveur, donc de
- *  n'importe quel type. `{"code":123}` passait le `||` puis jetait sur `.toUpperCase`. */
+/** Input: strips dash/spaces, uppercases → canonical form.
+ *  `String()` and not `input || ''`: the input comes from JSON.parse on the server side, so from
+ *  any type. `{"code":123}` passed the `||` then threw on `.toUpperCase`. */
 export const normalize = (input) => String(input ?? '').toUpperCase().replace(/[^0-9A-Z]/g, '');
 
-/** Banni si l'IP OU le token correspond. L'IP attrape celui qui change de token ;
- *  le token (localStorage) attrape celui qui change d'IP sans vider son storage
- *  (mobile/CGNAT où le ban IP est faible). Token vide → jamais un match. */
+/** Banned if the IP OR the token matches. The IP catches the one who changes token;
+ *  the token (localStorage) catches the one who changes IP without clearing their storage
+ *  (mobile/CGNAT where the IP ban is weak). Empty token → never a match. */
 export function isBanned(room, ip, token) {
   return room.bannedIps.has(ip) || (!!token && room.bannedTokens.has(token));
 }

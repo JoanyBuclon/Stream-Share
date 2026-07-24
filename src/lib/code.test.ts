@@ -20,3 +20,13 @@ test('formatCode: tiret au milieu pour 6 chars, sinon inchangé', () => {
   assert.equal(formatCode('7K2QP9'), '7K2-QP9');
   assert.equal(formatCode('7K2'), '7K2');
 });
+
+test('isValidCode accepte exactement l’alphabet que le serveur génère (miroir de rooms.js)', () => {
+  // rooms.js `ALPHABET`, tenu en phase à la main (code.ts:1-2 explique pourquoi pas de module
+  // partagé). Ce test est le fil-piège : un code que le serveur peut émettre DOIT valider côté
+  // client — retirer une lettre d’un seul des deux le casse ici.
+  const SERVER_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+  assert.equal(SERVER_ALPHABET.length, 32, 'Crockford base32 : 10 chiffres + 22 lettres, sans I L O U');
+  for (const c of SERVER_ALPHABET) assert.equal(isValidCode(c.repeat(6)), true, `caractère ${c}`);
+  for (const c of 'ILOU') assert.equal(isValidCode(c.repeat(6)), false, `exclu ${c}`);
+});

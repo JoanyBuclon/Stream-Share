@@ -30,9 +30,9 @@ const DOT = { good: 'var(--color-good)', gold: 'var(--color-gold)', muted: 'var(
 type PeerControl = { control: 'pause' | 'resume' };
 export function isControl(data: unknown): data is PeerControl {
   if (typeof data !== 'object' || data === null || !('control' in data)) return false;
-  // La valeur compte autant que la clé : `onControl` fait `hostPaused = control === 'pause'`,
-  // donc toute valeur inconnue vaut un resume. Sans ce test, `{control:'x'}` sort le viewer
-  // d'une pause du host — et un futur verbe côté host le ferait silencieusement aussi.
+  // The value matters as much as the key: `onControl` does `hostPaused = control === 'pause'`,
+  // so any unknown value counts as a resume. Without this check, `{control:'x'}` pulls the viewer
+  // out of a host pause — and a future host-side verb would do so silently too.
   const control = (data as { control: unknown }).control;
   return control === 'pause' || control === 'resume';
 }
@@ -48,8 +48,8 @@ export function isHeight(data: unknown): data is { height: number } {
   );
 }
 
-// Les trois sorties terminales partagent l'écran `#viewer-ended`, mais pas le message : le
-// texte par défaut du markup est celui de 'host-left'. (EndReason vient du domaine viewer-state.)
+// The three terminal exits share the `#viewer-ended` screen, but not the message: the markup's
+// default text is the 'host-left' one. (EndReason comes from the viewer-state domain.)
 const END_TEXT: Record<EndReason, { title: string; body: string }> = {
   'host-left': {
     title: 'The host stopped sharing',
@@ -162,7 +162,7 @@ export class ViewerController {
         else if (isHeight(msg.data)) {
           this.hostHeight = msg.data.height; // host announced its cap → tier ceiling
           this.renderTiers();
-        } else void this.peer?.accept(msg.data as PeerSignal);
+        } else this.peer?.accept(msg.data as PeerSignal).catch(() => {}); // bad SDP → local, not an unhandled rejection
         break;
       }
       case 'joined': // fresh join after a reconnect
@@ -194,8 +194,8 @@ export class ViewerController {
       .catch(() => show(el('viewer-play-prompt')));
   }
 
-  // Rebuild the quality-tier buttons from the received video height (fires on the video 'resize'
-  // event, so it tracks host resolution changes). Tiers above the host stream never appear.
+  // Rebuild the quality-tier buttons from the host's announced cap height (called on the `height`
+  // relay and on a tier pick). Tiers above the host stream never appear.
   private renderTiers(): void {
     if (!this.hostHeight) return; // wait for the host to announce its cap height
     const container = el('viewer-quality');
@@ -240,9 +240,9 @@ export class ViewerController {
   }
 
   private async pollStats(): Promise<void> {
-    // render() masque #viewer-stats sur paused/reconnecting/ended/error mais laisse le timer
-    // tourner : sans ce garde on paie un getStats() + 5 setText par seconde dans un overlay
-    // que personne ne voit. stopStats() n'est atteint que par toggleStats / destroy.
+    // render() hides #viewer-stats on paused/reconnecting/ended/error but leaves the timer
+    // running: without this guard we pay a getStats() + 5 setText per second on an overlay
+    // nobody sees. stopStats() is only reached via toggleStats / destroy.
     if (!this.watching) return;
     try {
       const peer = this.peer;
@@ -271,10 +271,10 @@ export class ViewerController {
   }
 
   private endSession(reason: EndReason): void {
-    // Le même écran sert aux trois sorties. Sans ce texte, un viewer expulsé ou banni lisait
-    // « The host stopped sharing » — puis « you have been banned » s'il retapait le code, deux
-    // messages contradictoires dont aucun ne décrivait ce qui venait de se passer. Poser le texte
-    // avant le dispatch qui rend l'écran 'ended'. Le domaine marque la session terminée (absorbante).
+    // The same screen serves all three exits. Without this text, a kicked or banned viewer read
+    // "The host stopped sharing" — then "you have been banned" if they re-entered the code, two
+    // contradictory messages, neither describing what had just happened. Set the text before the
+    // dispatch that renders the 'ended' screen. The domain marks the session terminated (absorbing).
     setText('viewer-ended-title', END_TEXT[reason].title);
     setText('viewer-ended-body', END_TEXT[reason].body);
     this.dispatch({ type: 'terminate', reason });
@@ -490,10 +490,10 @@ export class ViewerController {
 
   private setUiVisible(visible: boolean): void {
     const shown = visible || !this.watching; // never hide unless a stream is actually playing
-    // Appelé à chaque pointermove (60-144/s), mais seul le premier move après un masquage
-    // change quoi que ce soit. `uiVisible` n'est muté qu'ici et reflète toujours le dernier
-    // état écrit dans le DOM → le garde est sûr. Le ré-armement du timer d'auto-hide vit
-    // dans pokeUi, donc HORS de ce garde : la sémantique d'auto-hide en dépend.
+    // Called on every pointermove (60-144/s), but only the first move after a hide changes
+    // anything. `uiVisible` is mutated only here and always reflects the last state written
+    // to the DOM → the guard is safe. Re-arming the auto-hide timer lives in pokeUi, so OUTSIDE
+    // this guard: the auto-hide semantics depend on that.
     if (shown === this.uiVisible) return;
     this.uiVisible = shown;
     for (const id of ['viewer-topbar', 'viewer-controls']) {

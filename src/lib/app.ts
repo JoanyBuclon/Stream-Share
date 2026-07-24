@@ -9,6 +9,13 @@ import { el, show, hide, setText } from './dom.ts';
 
 type Screen = 'home' | 'join' | 'host' | 'viewer';
 const SCREENS: Screen[] = ['home', 'join', 'host', 'viewer'];
+// Per-screen tab title, so several open tabs (a host and a viewer) are distinguishable.
+const TITLES: Record<Screen, string> = {
+  home: 'stream share',
+  join: 'Join a share — stream share',
+  host: 'Sharing — stream share',
+  viewer: 'Watching — stream share',
+};
 const TOKEN_KEY = 'ss-token';
 
 let sig: Signaling | null = null;
@@ -34,6 +41,7 @@ function signalingUrl(): string {
 
 function showScreen(name: Screen): void {
   for (const s of SCREENS) el(`screen-${s}`).hidden = s !== name;
+  document.title = TITLES[name];
   // Hiding the section that held focus drops it to <body>, so a keyboard user restarts from the
   // top of the document on every screen change. Move focus onto the new section (tabindex=-1).
   // Callers that want a specific target (goJoin → pseudo-input) focus it after, and win.
@@ -56,9 +64,9 @@ function teardown(): void {
 
 function goHome(): void {
   teardown();
-  hide(el('start-error')); // pas d'erreur périmée au retour sur l'accueil
-  // Même raison que dans goJoin. Conditionné : sans getDisplayMedia, wireHome a désactivé ce
-  // bouton définitivement — un reset inconditionnel le rallumerait sur mobile.
+  hide(el('start-error')); // no stale error when returning to the home screen
+  // Same reason as in goJoin. Conditional: without getDisplayMedia, wireHome disabled this
+  // button for good — an unconditional reset would turn it back on on mobile.
   if (supportsDisplayMedia()) el<HTMLButtonElement>('btn-start').disabled = false;
   if (document.fullscreenElement) void document.exitFullscreen().catch(() => {}); // leave the viewer's fullscreen
   history.replaceState(null, '', location.pathname);
@@ -69,17 +77,21 @@ function goHome(): void {
 
 async function startShare(): Promise<void> {
   teardown();
-  hide(el('start-error')); // une nouvelle tentative repart d'un écran propre
-  // Deux chemins de réarmement : `created` ci-dessous (on quitte l'accueil sans passer par
-  // goHome), et goHome pour tous les autres — échec, ou départ pendant l'attente.
+  hide(el('start-error')); // a new attempt starts from a clean screen
+  // Two re-arm paths: `created` below (we leave the home screen without going through
+  // goHome), and goHome for all the others — failure, or leaving during the wait.
   const start = el<HTMLButtonElement>('btn-start');
-  start.disabled = true; // la carte se ternit (disabled:opacity-45) — c'est le retour visuel
+  start.disabled = true; // the card dims (disabled:opacity-45) — that's the visual feedback
   sig = new Signaling(signalingUrl());
   const current = sig;
   const off = current.onMessage((m: ServerMessage) => {
+    // A newer startShare/doJoin (or a teardown) already replaced `sig`: this connection is stale,
+    // so stop listening and never install a controller over the newer attempt. teardown() closes
+    // the old socket, so this mostly catches a `created` already in flight when the swap happened.
+    if (sig !== current) return void off();
     if (m.type === 'created') {
       off();
-      start.disabled = false; // on quitte l'accueil : réarmé pour le retour
+      start.disabled = false; // we leave the home screen: re-armed for the return
       history.replaceState(null, '', `#${m.code}`);
       showScreen('host');
       host = new HostController(current, m, { onEnd: goHome });
@@ -89,18 +101,18 @@ async function startShare(): Promise<void> {
     await current.connect();
     current.create();
   } catch {
-    // On est encore sur l'accueil (showScreen('host') n'a lieu qu'à la réception de `created`),
-    // donc goHome ne change pas d'écran : il libère le socket. Le message vient après, sinon
-    // goHome le masquerait aussitôt. Le chemin viewer gérait déjà ce cas ; le host, non.
-    goHome(); // réarme aussi #btn-start
+    // We are still on the home screen (showScreen('host') only happens when `created` is received),
+    // so goHome doesn't change screen: it releases the socket. The message comes after, otherwise
+    // goHome would hide it right away. The viewer path already handled this case; the host didn't.
+    goHome(); // also re-arms #btn-start
     show(el('start-error'));
   }
 }
 
 // --- viewer flow ---
 
-// Raisons renvoyées par le signaling (`join-error`). Toute autre valeur retombe sur le
-// message générique — le serveur peut en ajouter sans casser le front.
+// Reasons returned by the signaling (`join-error`). Any other value falls back to the
+// generic message — the server can add more without breaking the front end.
 const JOIN_ERRORS: Record<string, string> = {
   banned: 'you have been banned from this room',
   full: 'this room is full',
@@ -109,8 +121,8 @@ const JOIN_ERRORS: Record<string, string> = {
 
 function goJoin(code: string): void {
   teardown();
-  // Quitter l'écran pendant une tentative (retour accueil, deep-link) ne passe par aucune des
-  // trois sorties : sans ce reset le bouton resterait « Joining… » et désactivé pour de bon.
+  // Leaving the screen during an attempt (return home, deep-link) goes through none of the
+  // three exits: without this reset the button would stay "Joining…" and disabled for good.
   setJoinBusy(false);
   showScreen('join');
   setText('join-code', formatCode(code));
@@ -118,8 +130,8 @@ function goJoin(code: string): void {
   el<HTMLInputElement>('pseudo-input').focus();
 }
 
-// Chaque `setJoinBusy(true)` est apparié à un `false` sur les trois sorties (joined, join-error,
-// échec réseau) : sans ça le bouton reste mort et l'écran join devient un cul-de-sac.
+// Each `setJoinBusy(true)` is paired with a `false` on the three exits (joined, join-error,
+// network failure): without it the button stays dead and the join screen becomes a dead end.
 function setJoinBusy(busy: boolean): void {
   const btn = el<HTMLButtonElement>('btn-do-join');
   btn.disabled = busy;
@@ -130,20 +142,23 @@ async function doJoin(): Promise<void> {
   const code = currentCode();
   if (!isValidCode(code)) return;
   const pseudo = el<HTMLInputElement>('pseudo-input').value.trim() || 'viewer';
-  // Comme les trois autres entrées (startShare, goHome, goJoin). `doJoin` était la seule à
-  // écraser `sig` sans fermer la tentative précédente : deux sockets, deux ViewerController sur
-  // le même DOM (le premier plus référencé, donc jamais détruit) et surtout **deux flux encodés
-  // par le host** pour une seule personne, le mesh ouvrant un peer par viewer.
-  // Le garde `disabled` ci-dessous ne suffit pas : Entrée est câblé sur #pseudo-input (wireJoin),
-  // pas sur le bouton, donc un bouton désactivé ne ferme que le chemin souris.
+  // Like the three other entry points (startShare, goHome, goJoin). `doJoin` was the only one to
+  // overwrite `sig` without closing the previous attempt: two sockets, two ViewerControllers on
+  // the same DOM (the first no longer referenced, so never destroyed) and above all **two streams
+  // encoded by the host** for a single person, the mesh opening one peer per viewer.
+  // The `disabled` guard below is not enough: Enter is wired on #pseudo-input (wireJoin),
+  // not on the button, so a disabled button only closes the mouse path.
   teardown();
   setJoinBusy(true);
   sig = new Signaling(signalingUrl());
   const current = sig;
   const off = current.onMessage((m: ServerMessage) => {
+    // Superseded by a newer attempt/teardown: stop listening. Without this, a stale `join-error`
+    // would null a newer `sig`, and a stale `joined` would install a second ViewerController.
+    if (sig !== current) return void off();
     if (m.type === 'joined') {
       off();
-      setJoinBusy(false); // on quitte l'écran join : réarmé pour le prochain passage
+      setJoinBusy(false); // we leave the join screen: re-armed for the next visit
       showScreen('viewer');
       viewer = new ViewerController(current, m, { code, pseudo, token: getToken() }, { onLeave: goHome });
     } else if (m.type === 'join-error') {
@@ -198,14 +213,16 @@ function wireHome(): void {
   el('btn-join').addEventListener('click', submit);
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') submit();
-    else hide(el('join-error'));
   });
+  // Clear the error on `input`, not `keydown`: a mouse paste or dictation leaves no keystroke, so a
+  // now-valid code would keep the red error showing under it.
+  input.addEventListener('input', () => hide(el('join-error')));
 }
 
 function wireJoin(): void {
   el('btn-do-join').addEventListener('click', () => void doJoin());
   el('pseudo-input').addEventListener('keydown', (e) => {
-    if ((e as KeyboardEvent).key === 'Enter') void doJoin();
+    if (e.key === 'Enter') void doJoin();
   });
   el('btn-back-home').addEventListener('click', (e) => {
     e.preventDefault();

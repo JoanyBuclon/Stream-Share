@@ -7,6 +7,7 @@
   --color-panel: #131313; /* cards / sidebars */
   --color-elev: #1d1d1d; /* raised buttons */
   --color-elev-2: #232323; /* raised buttons (alt) */
+  --color-elev-hover: #262626; /* raised-button hover — one token instead of 4 divergent inline grays */
   --color-fg: #ededed; /* primary text */
   --color-fg-dim: #cfcfcf; /* secondary text / icons */
   --color-muted: #9a9a9a;

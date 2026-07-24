@@ -7,4 +7,6 @@ COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile --prod
 COPY src ./src
 EXPOSE 8080
+# Drop root: the runtime only reads its files and binds 8080 (>1024). The node image ships this user.
+USER node
 CMD ["node", "src/index.js"]

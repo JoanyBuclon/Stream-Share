@@ -44,15 +44,17 @@ class FakeContext {
 globalThis.MediaStream = class {} as unknown as typeof MediaStream;
 
 const track = (id: string) => ({ kind: 'audio', id, stop: () => {} }) as unknown as MediaStreamTrack;
+const micStream = () => ({ getAudioTracks: () => [track('mic')], getTracks: () => [track('mic')] }) as unknown as MediaStream;
 
-/** Mixer + compteur de contextes créés, avec un seul FakeContext réutilisé s'il est redemandé. */
-function harness() {
+/** Mixer + compteur de contextes créés, avec un seul FakeContext réutilisé s'il est redemandé.
+ *  `getMic` est injecté (comme makeContext) → plus besoin de forcer le champ privé micStream. */
+function harness(getMic: () => Promise<MediaStream> = () => Promise.resolve(micStream())) {
   const contexts: FakeContext[] = [];
   const mixer = new AudioMixer(() => {
     const c = new FakeContext();
     contexts.push(c);
     return c as unknown as AudioContext;
-  });
+  }, getMic);
   return { mixer, contexts };
 }
 
@@ -61,23 +63,32 @@ test('mixing twice reuses the same AudioContext', async () => {
   await mixer.build(track('sys'), false);
   assert.equal(contexts.length, 0, 'une source unique passe en direct : aucun contexte');
 
-  // Deux sources → il faut mixer. On simule le micro déjà acquis en passant par le vrai chemin :
-  // sans navigator.mediaDevices, `wantMic` échouerait — d'où deux pistes système successives.
+  // Deux sources (système + micro injecté) → il faut mixer.
   const { mixer: m2, contexts: c2 } = harness();
-  const fakeMic = { getAudioTracks: () => [track('mic')], getTracks: () => [track('mic')] };
-  (m2 as unknown as { micStream: unknown }).micStream = fakeMic;
-
   await m2.build(track('sys'), true);
   assert.equal(c2.length, 1, 'premier mix : un contexte');
   await m2.build(track('sys2'), true);
   assert.equal(c2.length, 1, 'second mix : le contexte est réutilisé, pas recréé');
 });
 
+test('the mic is acquired once, not re-prompted on a source change', async () => {
+  let prompts = 0;
+  const { mixer } = harness(() => {
+    prompts++;
+    return Promise.resolve(micStream());
+  });
+  await mixer.build(track('sys'), true);
+  await mixer.build(track('sys2'), true); // source changed, mic still on
+  assert.equal(prompts, 1, 'getUserMedia n’est appelé qu’au passage micro off→on');
+});
+
+test('a denied mic rejects the build (the host self-heals by retrying without it)', async () => {
+  const { mixer } = harness(() => Promise.reject(new DOMException('denied', 'NotAllowedError')));
+  await assert.rejects(mixer.build(track('sys'), true), /denied/);
+});
+
 test('a rebuild disconnects the previous graph', async () => {
   const { mixer, contexts } = harness();
-  const fakeMic = { getAudioTracks: () => [track('mic')], getTracks: () => [track('mic')] };
-  (mixer as unknown as { micStream: unknown }).micStream = fakeMic;
-
   await mixer.build(track('sys'), true);
   const first = [...contexts[0].nodes];
   assert.equal(first.length, 3, 'une destination + deux sources');
@@ -95,9 +106,6 @@ test('a rebuild disconnects the previous graph', async () => {
 
 test('teardown disconnects the graph and closes the context', async () => {
   const { mixer, contexts } = harness();
-  const fakeMic = { getAudioTracks: () => [track('mic')], getTracks: () => [track('mic')] };
-  (mixer as unknown as { micStream: unknown }).micStream = fakeMic;
-
   await mixer.build(track('sys'), true);
   mixer.teardown();
   assert.equal(contexts[0].closed, 1, 'teardown est le seul endroit qui ferme le contexte');
