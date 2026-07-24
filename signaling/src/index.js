@@ -28,6 +28,7 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
 const MAX_VIEWERS = Number(process.env.MAX_VIEWERS) || 10;
 const MAX_PAYLOAD = 64 * 1024; // SDP/ICE tiennent dans quelques Ko
 const MSG_MAX_PER_SEC = 60; // au-delà, la connexion est fermée
+const HEARTBEAT_MS = 30_000; // ping toutes les 30 s ; une socket sans pong au tour suivant est morte
 
 const here = dirname(fileURLToPath(import.meta.url));
 const OPEN = 1; // WebSocket.OPEN
@@ -263,7 +264,26 @@ export function createSignalingServer(opts = {}) {
     },
   });
 
+  // Heartbeat. A socket dropped at the TCP level (a mobile losing signal — the central case here)
+  // fires neither 'close' nor 'error' until the OS keepalive kicks in (~2 h). Until then cleanup()
+  // never runs: the viewer keeps a slot and a ghost row on the host, and for a departed host the
+  // grace window never even starts. Ping every round; terminate whatever missed the previous pong.
+  const heartbeat = setInterval(() => {
+    for (const ws of wss.clients) {
+      if (ws.isAlive === false) {
+        ws.terminate(); // fires 'close' → cleanup(client) → frees the slot / starts host grace
+        continue;
+      }
+      ws.isAlive = false;
+      ws.ping();
+    }
+  }, HEARTBEAT_MS);
+  heartbeat.unref(); // don't keep the process alive just for the heartbeat (like the rate-limit sweep)
+  wss.on('close', () => clearInterval(heartbeat));
+
   wss.on('connection', (ws, req) => {
+    ws.isAlive = true;
+    ws.on('pong', () => (ws.isAlive = true)); // the client answers our ping automatically
     const ip = clientIp(req);
     const client = { id: genId(), ws, ip, token: '', roomCode: null, role: null };
     clients.set(client.id, client);

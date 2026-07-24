@@ -417,7 +417,7 @@ export class HostController {
     }
 
     const resolutionLabel = resLabel(this.quality.resolution);
-    setText('est-upload', String(estimatedUpload(this.quality, this.viewers.size)));
+    this.refreshUploadEstimate();
     setText('est-res', resolutionLabel);
     setText('est-fps', String(this.quality.fps));
     setText('chip-resolution', resolutionLabel);
@@ -518,6 +518,13 @@ export class HostController {
     const has = this.viewers.size > 0;
     el('viewers-list').hidden = !has;
     el('host-waiting').hidden = has;
+    this.refreshUploadEstimate(); // the estimate scales with viewer count (mesh); keep it live on join/leave
+  }
+
+  // Just the upload estimate, split out of renderSettings so a viewer joining/leaving refreshes it
+  // without re-running the whole panel (which would snap the bitrate slider back mid-drag).
+  private refreshUploadEstimate(): void {
+    setText('est-upload', String(estimatedUpload(this.quality, this.viewers.size)));
   }
 
   private copyLink = async (): Promise<void> => {

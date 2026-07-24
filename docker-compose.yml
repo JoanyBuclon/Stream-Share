@@ -14,6 +14,9 @@ services:
       - 'traefik.http.middlewares.streamshareheader.headers.contentTypeNosniff=true'
       - 'traefik.http.middlewares.streamshareheader.headers.referrerPolicy=strict-origin-when-cross-origin'
       - 'traefik.http.middlewares.streamsharecompress.compress=true'
+      # woff2 already embeds Brotli: recompressing the two largest assets grows them (+61 bytes,
+      # measured) and burns proxy CPU per request. Exclude the type from the middleware.
+      - 'traefik.http.middlewares.streamsharecompress.compress.excludedContentTypes=font/woff2'
       - 'traefik.http.routers.streamshare.middlewares=streamshareheader,streamsharecompress'
     restart: unless-stopped
 
