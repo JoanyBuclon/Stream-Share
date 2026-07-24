@@ -129,8 +129,14 @@ export class HostController {
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia(constraints);
       await this.setStream(stream);
-    } catch {
-      // user dismissed the native picker — nothing to do
+    } catch (e) {
+      // NotAllowedError = the user dismissed the picker or a policy blocked it: intended, stay
+      // silent. The bare catch used to swallow everything, so NotReadableError (source locked by
+      // another app), OverconstrainedError, etc. looked identical to a cancel — a genuine failure
+      // with no feedback reads as a broken button. Surface those in the existing source hint.
+      if (!(e instanceof DOMException) || e.name !== 'NotAllowedError') {
+        setText('settings-source-hint', 'capture failed — try another source');
+      }
     }
   };
 
@@ -504,18 +510,21 @@ export class HostController {
     try {
       await navigator.clipboard.writeText(link);
     } catch {
-      return; // clipboard blocked (insecure context) — the code is still visible on screen
+      // clipboard blocked (insecure context: HTTP on a LAN IP is exactly the local-test case).
+      // A button labelled "Copy room link" that does nothing reads as broken — say it failed.
+      this.flashCopied(false);
+      return;
     }
-    this.flashCopied();
+    this.flashCopied(true);
   };
 
   // Confirm the copy on both entry points: the top-bar chip label and the sidebar button
   // (data-copied drives its green flash). Single timer so rapid re-clicks don't revert early.
-  private flashCopied(): void {
-    setText('copy-label', 'copied ✓');
+  private flashCopied(ok: boolean): void {
+    setText('copy-label', ok ? 'copied ✓' : 'copy failed');
     const waiting = el('btn-copy-link-waiting');
-    waiting.textContent = 'Copied ✓';
-    waiting.dataset.copied = 'true';
+    waiting.textContent = ok ? 'Copied ✓' : 'Copy failed';
+    waiting.dataset.copied = String(ok); // green flash only on success
     if (this.copyTimer !== null) clearTimeout(this.copyTimer);
     this.copyTimer = setTimeout(() => {
       setText('copy-label', 'copy link');

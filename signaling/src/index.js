@@ -96,6 +96,11 @@ function send(ws, type, payload = {}) {
 }
 
 function onCreate(client) {
+  // Une socket ne tient qu'un salon. Sans ce garde, un second `create` écrase `client.roomCode`
+  // et le salon précédent devient orphelin : `cleanup` ne collecte que le dernier, les autres
+  // vivent sans host jusqu'à l'OOM et leur code sort du pool. Le front n'ouvre jamais deux
+  // salons sur une même socket (app.ts).
+  if (client.roomCode) return send(client.ws, 'error', { reason: 'already-in-room' });
   const now = Date.now();
   if (!allow('create', client.ip, now)) {
     rejected.createRateLimited++;

@@ -191,6 +191,18 @@ export class ViewerController {
     this.setState(this.hostPaused ? 'paused' : 'live');
   }
 
+  // The <video> is unmuted (audio is the product), so autoplay policies block playback unless a
+  // recent user gesture is in scope — and the join click has expired by the time ICE completes.
+  // A silent .play() failure leaves a black, muted stream under a "connected" UI, so surface it:
+  // the prompt's own click is a fresh gesture that lets the retry succeed.
+  private playVideo(): void {
+    const video = el<HTMLVideoElement>('viewer-video');
+    void video
+      .play()
+      .then(() => hide(el('viewer-play-prompt')))
+      .catch(() => show(el('viewer-play-prompt')));
+  }
+
   // Rebuild the quality-tier buttons from the received video height (fires on the video 'resize'
   // event, so it tracks host resolution changes). Tiers above the host stream never appear.
   private renderTiers(): void {
@@ -307,6 +319,7 @@ export class ViewerController {
     hide(el('viewer-stats')); // stats overlay only makes sense over a live stream (re-shown below)
     hide(el('viewer-live-badge'));
     hide(el('viewer-reconnecting-badge'));
+    hide(el('viewer-play-prompt')); // only 'live' re-arms it, via playVideo()
 
     this.setWatching(state === 'live'); // gate the UI auto-hide
 
@@ -326,6 +339,7 @@ export class ViewerController {
         if (this.statsOn) show(el('viewer-stats'));
         setText('conn-label', 'connected');
         dot.style.background = DOT.good;
+        this.playVideo(); // shows the play prompt if the browser blocks autoplay
         break;
       case 'paused':
         hide(video);
@@ -394,6 +408,8 @@ export class ViewerController {
       },
       { signal },
     );
+    // The prompt's click is the user gesture that unblocks playback (see playVideo).
+    el('viewer-play-prompt').addEventListener('click', () => this.playVideo(), { signal });
     el<HTMLInputElement>('vol-range').addEventListener(
       'input',
       (e) => {

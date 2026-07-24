@@ -134,6 +134,21 @@
         >
       </div>
     </div>
+
+    <!-- Shown by viewer.ts when autoplay is blocked: the join click is a user gesture, but it has
+         expired by the time ICE finishes, and the video is unmuted (audio is the point). Without an
+         explicit play() we'd sit on a black, silent stream while the UI says "connected". -->
+    <button
+      id="viewer-play-prompt"
+      class="absolute inset-0 flex cursor-pointer flex-col items-center justify-center gap-3 bg-[#060606]/[0.8]"
+      hidden
+    >
+      <span class="flex size-[60px] items-center justify-center rounded-2xl border border-white/10 bg-[#141414]">
+        <span class="ml-1 block size-0 border-y-[11px] border-l-[18px] border-y-transparent border-l-cream"></span>
+      </span>
+      <span class="text-[15px] font-medium text-fg">Click to play</span>
+      <span class="font-mono text-xs text-muted-2">your browser paused the stream</span>
+    </button>
   </div>
 
   <!-- control bar (auto-hides after 3s idle / on mouse leave while watching) -->

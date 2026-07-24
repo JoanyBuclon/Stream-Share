@@ -55,6 +55,11 @@ const hostNext = reader(host);
 host.send(j({ type: 'create' }));
 const { code } = await until(hostNext, 'created');
 
+// S2 — une socket ne tient qu'un salon. Un second `create` est refusé, sinon le premier salon
+// devient orphelin (jamais collecté par cleanup) et son code sort du pool.
+host.send(j({ type: 'create' }));
+assert.equal((await until(hostNext, 'created', 'error')).reason, 'already-in-room', 'pas de 2e salon sur la même socket');
+
 const viewers = [];
 for (let i = 0; i < 10; i++) {
   const v = await open();
