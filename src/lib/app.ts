@@ -34,6 +34,10 @@ function signalingUrl(): string {
 
 function showScreen(name: Screen): void {
   for (const s of SCREENS) el(`screen-${s}`).hidden = s !== name;
+  // Hiding the section that held focus drops it to <body>, so a keyboard user restarts from the
+  // top of the document on every screen change. Move focus onto the new section (tabindex=-1).
+  // Callers that want a specific target (goJoin → pseudo-input) focus it after, and win.
+  el(`screen-${name}`).focus({ preventScroll: true });
 }
 
 function currentCode(): string {

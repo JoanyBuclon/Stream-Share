@@ -98,4 +98,28 @@
     color: var(--color-fg);
     font-family: var(--font-sans);
   }
+
+  /* Keyboard focus ring. The two inputs used focus:outline-none with a 2.1:1 border swap; a single
+     visible ring covers every button/input instead. Cream surfaces (primary buttons) get an ink
+     ring — a cream ring on cream is invisible. focus-visible so pointer clicks stay ring-free. */
+  :focus-visible {
+    outline: 2px solid var(--color-cream);
+    outline-offset: 2px;
+  }
+  .bg-cream:focus-visible {
+    outline-color: var(--color-ink);
+  }
+
+  /* Two of the three animations loop forever (the LIVE dot pulses for the whole session, the
+     reconnect spinner while it lasts): neutralize them for users who ask for less motion. The
+     reconnect overlay/badge keep their text, so the state stays legible without the spin. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
 }

@@ -6,7 +6,7 @@
      server-rendered markup paint before the deferred module runs. showScreen() re-asserts
      exclusivity on the first route() — a #CODE deep-link flashes home for one frame, which is the
      rare path paying for the common one rather than the reverse. -->
-<section id="screen-home" class="flex flex-1 flex-col animate-fade">
+<section id="screen-home" tabindex="-1" class="flex flex-1 flex-col animate-fade focus:outline-none">
   <header class="flex items-center justify-between px-10 py-[26px] max-sm:px-5">
     <a id="brand-home" href="/" class="flex items-center gap-2.5">
       <img src="/favicon.svg" alt="" class="size-[18px]" />
@@ -78,19 +78,22 @@
           <div class="flex gap-2">
             <input
               id="join-input"
-              class="min-w-0 flex-1 rounded-[10px] border border-white/[0.12] bg-ink px-3.5 py-3 font-mono text-[15px] uppercase tracking-[0.16em] text-fg focus:border-white/[0.32] focus:outline-none"
+              class="min-w-0 flex-1 rounded-[10px] border border-white/[0.12] bg-ink px-3.5 py-3 font-mono text-[15px] uppercase tracking-[0.16em] text-fg focus:border-white/[0.32]"
               placeholder="code (e.g. 7K2-QP9)"
+              aria-label="Room code"
               maxlength="9"
               autocomplete="off"
+              autocapitalize="characters"
               spellcheck="false"
             />
             <button
               id="btn-join"
+              aria-label="Join"
               class="cursor-pointer rounded-[10px] border border-white/[0.12] bg-elev-2 px-[18px] text-sm font-medium text-fg hover:bg-[#2c2c2c]"
               >→</button
             >
           </div>
-          <div id="join-error" class="mt-2 font-mono text-[11px] text-live" hidden>
+          <div id="join-error" role="alert" class="mt-2 font-mono text-[11px] text-live" hidden>
             invalid code — 6 characters expected
           </div>
         </div>

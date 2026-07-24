@@ -3,7 +3,7 @@
 // MVP scope — no settings modal / pause / stats yet (see docs/frontend.md).
 ---
 
-<section id="screen-host" class="flex min-h-0 flex-1 flex-col animate-fade" hidden>
+<section id="screen-host" tabindex="-1" class="flex min-h-0 flex-1 flex-col animate-fade focus:outline-none" hidden>
   <!-- top bar -->
   <header class="flex flex-shrink-0 items-center justify-between border-b border-white/[0.07] px-[22px] py-3.5">
     <div class="flex items-center gap-[18px]">
@@ -36,7 +36,7 @@
     >
       <span id="host-code" class="text-[15px] font-medium tracking-[0.18em]">—</span>
       <span class="h-4 w-px bg-white/[0.12]"></span>
-      <span id="copy-label" class="text-xs text-muted-2">copy link</span>
+      <span id="copy-label" aria-live="polite" class="text-xs text-muted-2">copy link</span>
     </button>
   </header>
 
@@ -70,7 +70,7 @@
           >
             <span class="block h-4 w-[22px] rounded border-2 border-muted-2"></span>
           </div>
-          <div class="mb-2 text-[19px] font-semibold">No source selected</div>
+          <h1 class="mb-2 text-[19px] font-semibold">No source selected</h1>
           <div class="mb-[22px] text-sm leading-[1.55] text-muted-2">
             Pick a screen, window or tab to start sharing with your friends.
           </div>
@@ -89,7 +89,7 @@
             <span class="block h-[18px] w-[5px] rounded-[2px] bg-gold"></span>
             <span class="block h-[18px] w-[5px] rounded-[2px] bg-gold"></span>
           </div>
-          <div class="mb-2 text-[19px] font-semibold">Sharing paused</div>
+          <h1 class="mb-2 text-[19px] font-semibold">Sharing paused</h1>
           <div class="mb-[22px] text-sm leading-[1.55] text-muted-2">
             Your friends stay in the room — they see a waiting screen. Resume whenever you want.
           </div>
@@ -161,7 +161,7 @@
     <!-- sidebar: viewers -->
     <aside class="flex w-[300px] flex-shrink-0 flex-col gap-3.5 border-l border-white/[0.07] p-5 max-lg:w-full max-lg:border-l-0 max-lg:border-t">
       <div class="flex items-center justify-between">
-        <div class="text-sm font-semibold">Viewers</div>
+        <h2 class="text-sm font-semibold">Viewers</h2>
         <span class="font-mono text-xs text-muted-2"><span id="viewer-count">0</span> connected</span>
       </div>
 
@@ -207,28 +207,33 @@
         <div data-hook="name" class="text-[13px] font-medium"></div>
         <div class="font-mono text-[10px] text-muted-3">connected</div>
       </div>
-      <div class="flex gap-1">
+      <div class="flex gap-2">
         <button
           data-hook="kick"
-          title="kick"
-          class="cursor-pointer rounded-md border border-white/[0.08] bg-elev-2 px-2 py-[5px] font-mono text-[10px] text-muted hover:bg-[#2c2c2c] hover:text-fg"
+          class="cursor-pointer rounded-md border border-white/[0.08] bg-elev-2 px-3 py-2 font-mono text-[10px] text-muted hover:bg-[#2c2c2c] hover:text-fg"
           >kick</button
         >
         <button
           data-hook="ban"
-          title="ban"
-          class="cursor-pointer rounded-md border border-live/[0.24] bg-live/10 px-2 py-[5px] font-mono text-[10px] text-live-fg hover:bg-live/20"
+          class="cursor-pointer rounded-md border border-live/[0.24] bg-live/10 px-3 py-2 font-mono text-[10px] text-live-fg hover:bg-live/20"
           >ban</button
         >
       </div>
     </div>
   </template>
 
-  <!-- settings modal (source + quality + audio); live-applies, "Done" just closes -->
-  <div
+  <!-- settings modal (source + quality + audio); live-applies, "Done" just closes.
+       Native <dialog> + showModal() (host.ts) for a real focus trap, Escape, aria-modal and an
+       inert background — a plain div gave none of those. It fills the viewport (its own scrim is
+       the /0.9 bg, ::backdrop stays transparent) so a click outside the card still targets the
+       dialog itself. `open:flex` (not a base display): an author `display` would beat the UA
+       `dialog:not([open])` hide rule by origin and leave the closed dialog covering the screen.
+       And it must never carry `hidden` — Preflight's [hidden]{display:none!important} survives
+       showModal() and would keep the open dialog invisible. -->
+  <dialog
     id="settings-modal"
-    class="fixed inset-0 z-[150] flex items-center justify-center bg-[#060606]/[0.9] p-[30px] animate-fade max-lg:p-4"
-    hidden
+    aria-labelledby="settings-title"
+    class="fixed inset-0 z-[150] m-0 h-full max-h-none w-full max-w-none items-center justify-center border-0 bg-[#060606]/[0.9] p-[30px] animate-fade backdrop:bg-transparent open:flex max-lg:p-4"
   >
     <div
       id="settings-card"
@@ -236,11 +241,12 @@
     >
       <div class="flex items-center justify-between border-b border-white/[0.07] px-6 pb-[18px] pt-[22px]">
         <div>
-          <div class="text-[18px] font-semibold">Sharing settings</div>
+          <h2 id="settings-title" class="text-[18px] font-semibold">Sharing settings</h2>
           <div class="mt-[3px] font-mono text-xs text-muted-2">source, quality and audio</div>
         </div>
         <button
           id="btn-settings-close"
+          aria-label="Close settings"
           class="flex size-8 cursor-pointer items-center justify-center rounded-lg border border-white/10 bg-elev text-base text-fg-dim hover:bg-[#262626]"
           >✕</button
         >
@@ -300,7 +306,7 @@
         <div class="flex items-center justify-between gap-4">
           <span class="text-[13px] text-fg-dim">Bitrate</span>
           <div class="flex max-w-[320px] flex-1 items-center gap-3">
-            <input id="bitrate-range" type="range" min="2" max="60" value="20" class="flex-1 cursor-pointer accent-fg" />
+            <input id="bitrate-range" type="range" min="2" max="60" value="20" aria-label="Bitrate (mbps)" class="flex-1 cursor-pointer accent-fg" />
             <span id="bitrate-value" class="w-16 text-right font-mono text-xs text-fg-dim">20 mbps</span>
           </div>
         </div>
@@ -335,5 +341,5 @@
         >
       </div>
     </div>
-  </div>
+  </dialog>
 </section>

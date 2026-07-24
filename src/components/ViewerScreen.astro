@@ -3,7 +3,7 @@
 // MVP scope — no quality tiers / stats overlay yet (see docs/frontend.md).
 ---
 
-<section id="screen-viewer" class="flex min-h-0 flex-1 flex-col bg-black animate-fade" hidden>
+<section id="screen-viewer" tabindex="-1" class="flex min-h-0 flex-1 flex-col bg-black animate-fade focus:outline-none" hidden>
   <!-- top bar (auto-hides with the control bar while watching) -->
   <header id="viewer-topbar" class="flex flex-shrink-0 items-center justify-between px-[22px] py-3.5 transition-opacity duration-300 max-sm:px-3">
     <div class="flex items-center gap-3.5">
@@ -35,7 +35,7 @@
         class="flex items-center gap-[7px] rounded-lg border border-white/[0.08] bg-panel px-[11px] py-1.5 font-mono text-[11px] text-muted-2"
       >
         <span id="conn-dot" class="block size-1.5 rounded-full bg-muted-4"></span>
-        <span id="conn-label">connecting…</span>
+        <span id="conn-label" aria-live="polite">connecting…</span>
       </div>
     </div>
   </header>
@@ -84,7 +84,7 @@
       </div>
       <!-- texte posé par viewer.ts (END_TEXT) : cet écran sert aussi au kick et au ban, qui ne
            doivent pas annoncer que le host a arrêté de partager -->
-      <div id="viewer-ended-title" class="mb-2 text-xl font-semibold">The host stopped sharing</div>
+      <h1 id="viewer-ended-title" class="mb-2 text-xl font-semibold">The host stopped sharing</h1>
       <div id="viewer-ended-body" class="mb-6 text-sm leading-[1.55] text-muted-2">
         The session has ended. Thanks for watching — you can join another room whenever you like.
       </div>
@@ -103,7 +103,7 @@
         <span class="block h-5 w-[5px] rounded-[2px] bg-gold"></span>
         <span class="block h-5 w-[5px] rounded-[2px] bg-gold"></span>
       </div>
-      <div class="mb-2 text-xl font-semibold">The host paused the share</div>
+      <h1 class="mb-2 text-xl font-semibold">The host paused the share</h1>
       <div class="text-sm leading-[1.55] text-muted-2">
         You're still in the room. The stream resumes as soon as the host resumes sharing.
       </div>
@@ -116,7 +116,7 @@
       >
         <span class="text-[26px] leading-none text-live">!</span>
       </div>
-      <div class="mb-2 text-xl font-semibold">Direct connection failed</div>
+      <h1 class="mb-2 text-xl font-semibold">Direct connection failed</h1>
       <div class="mb-6 text-sm leading-[1.55] text-muted-2">
         Your network (or the host's) is too restrictive to establish a direct peer-to-peer connection. Try another
         network, or ask the host to retry.
@@ -156,13 +156,13 @@
     <div
       class="flex flex-wrap items-center gap-3.5 rounded-[14px] border border-white/[0.09] bg-panel/95 px-4 py-[11px]"
     >
-      <button id="btn-mute" class="flex cursor-pointer items-center gap-0.5 p-1 text-fg" title="mute">
+      <button id="btn-mute" class="flex cursor-pointer items-center gap-0.5 p-2.5 text-fg" title="mute" aria-label="Mute" aria-pressed="false">
         <span
           class="block size-0 border-y-[6px] border-r-[9px] border-y-transparent border-r-current"
           aria-hidden="true"></span>
         <span class="block h-[11px] w-[5px] rounded-[2px] bg-current" aria-hidden="true"></span>
       </button>
-      <input id="vol-range" type="range" min="0" max="100" value="100" class="w-[110px] cursor-pointer accent-fg max-sm:w-16" />
+      <input id="vol-range" type="range" min="0" max="100" value="100" aria-label="Volume" class="w-[110px] cursor-pointer accent-fg max-sm:w-16" />
       <span id="vol-label" class="font-mono text-[11px] text-muted-2">100%</span>
 
       <div class="h-6 w-px bg-white/[0.09]"></div>
@@ -175,12 +175,14 @@
       <button
         id="btn-stats"
         data-active="false"
+        aria-pressed="false"
         class="cursor-pointer rounded-lg border border-white/10 bg-elev px-2.5 py-2 font-mono text-[11px] text-fg-dim hover:border-white/[0.24] data-[active=true]:border-good/40 data-[active=true]:bg-good/[0.12] data-[active=true]:text-good"
         >stats</button
       >
       <button
         id="btn-pip"
         title="picture in picture"
+        aria-label="Picture in picture"
         class="flex cursor-pointer items-center justify-center rounded-lg border border-white/10 bg-elev px-2.5 py-2 hover:border-white/[0.24]"
       >
         <span class="relative block h-[13px] w-[17px] rounded-[2px] border-[1.5px] border-fg-dim">
@@ -190,6 +192,7 @@
       <button
         id="btn-fs"
         title="fullscreen"
+        aria-label="Fullscreen"
         class="cursor-pointer rounded-lg border border-white/10 bg-elev px-2.5 py-2 hover:border-white/[0.24]"
       >
         <span class="relative block size-[15px]">

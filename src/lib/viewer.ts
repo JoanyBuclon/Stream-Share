@@ -215,7 +215,9 @@ export class ViewerController {
       // "Source" shows the real ceiling height (e.g. 1440p), like the host settings.
       btn.textContent = tier === 'source' ? `${this.hostHeight}p` : tierLabel(tier);
       btn.dataset.tier = String(tier);
-      btn.dataset.active = String(tier === this.tier);
+      const active = tier === this.tier;
+      btn.dataset.active = String(active);
+      btn.setAttribute('aria-pressed', String(active)); // data-active is visual-only for a screen reader
       container.append(btn); // clicks handled by a single delegated listener (wireControls)
     }
   }
@@ -229,6 +231,7 @@ export class ViewerController {
   private toggleStats(): void {
     this.statsOn = !this.statsOn;
     el('btn-stats').dataset.active = String(this.statsOn);
+    el('btn-stats').setAttribute('aria-pressed', String(this.statsOn));
     if (this.statsOn) {
       show(el('viewer-stats'));
       void this.pollStats();
@@ -405,6 +408,7 @@ export class ViewerController {
       () => {
         video.muted = !video.muted;
         el('btn-mute').style.opacity = video.muted ? '0.4' : '1';
+        el('btn-mute').setAttribute('aria-pressed', String(video.muted));
       },
       { signal },
     );
@@ -413,10 +417,12 @@ export class ViewerController {
     el<HTMLInputElement>('vol-range').addEventListener(
       'input',
       (e) => {
-        const v = Number((e.target as HTMLInputElement).value);
+        const input = e.target as HTMLInputElement;
+        const v = Number(input.value);
         video.volume = v / 100;
         video.muted = v === 0;
         setText('vol-label', `${v}%`);
+        input.setAttribute('aria-valuetext', `${v}%`); // otherwise read as "50 of 100", unitless
       },
       { signal },
     );

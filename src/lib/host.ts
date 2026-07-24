@@ -87,7 +87,11 @@ export class HostController {
     hide(el('host-paused'));
     hide(el('host-paused-badge'));
     hide(el('host-quality-bar'));
-    hide(el('settings-modal'));
+    // A <dialog> hides itself when closed (UA display:none). Never set `hidden` on it: Tailwind's
+    // Preflight `[hidden]{display:none!important}` would then survive showModal() and the modal
+    // could never appear. Just make sure it's closed on a reused screen.
+    const modal = el<HTMLDialogElement>('settings-modal');
+    if (modal.open) modal.close();
     setText('copy-label', 'copy link');
     const waitingCopy = el('btn-copy-link-waiting'); // clear a stale "copied ✓" flash from a prior session
     waitingCopy.textContent = 'Copy room link';
@@ -342,10 +346,14 @@ export class HostController {
   }
 
   private openSettings = (): void => {
-    this.renderSettings();
-    show(el('settings-modal'));
+    this.renderSettings(); // fill state (incl. aria-pressed) before the dialog enters the a11y tree
+    const modal = el<HTMLDialogElement>('settings-modal');
+    if (!modal.open) modal.showModal(); // showModal, not show(): focus trap + Escape + inert background
   };
-  private closeSettings = (): void => hide(el('settings-modal'));
+  private closeSettings = (): void => {
+    const modal = el<HTMLDialogElement>('settings-modal');
+    if (modal.open) modal.close(); // Escape closes it natively too; this covers the buttons/scrim
+  };
 
   private applyPresetChoice(name: PresetName): void {
     this.quality = applyPreset(this.quality, name);
@@ -397,7 +405,9 @@ export class HostController {
     el<HTMLInputElement>('bitrate-range').value = String(this.quality.bitrate);
     setText('bitrate-value', `${this.quality.bitrate} mbps`);
     el('toggle-sysaudio').dataset.active = String(this.quality.systemAudio);
+    el('toggle-sysaudio').setAttribute('aria-pressed', String(this.quality.systemAudio));
     el('toggle-mic').dataset.active = String(this.quality.mic);
+    el('toggle-mic').setAttribute('aria-pressed', String(this.quality.mic));
 
     // Fixed 4K·2K·1080p·720p·480p ladder: hide tiers ABOVE the source (can't upscale); the
     // highest remaining tier is the native resolution.
@@ -474,8 +484,13 @@ export class HostController {
     row.querySelector<HTMLElement>('[data-hook="initials"]')!.textContent = initials(pseudo);
     row.querySelector<HTMLElement>('[data-hook="name"]')!.textContent = pseudo;
     const signal = this.ac.signal;
-    row.querySelector<HTMLElement>('[data-hook="kick"]')!.addEventListener('click', () => this.kick(peerId, false), { signal });
-    row.querySelector<HTMLElement>('[data-hook="ban"]')!.addEventListener('click', () => this.kick(peerId, true), { signal });
+    const kickBtn = row.querySelector<HTMLElement>('[data-hook="kick"]')!;
+    const banBtn = row.querySelector<HTMLElement>('[data-hook="ban"]')!;
+    // Name the target: three identical "kick" buttons in the a11y tree are indistinguishable.
+    kickBtn.setAttribute('aria-label', `Kick ${pseudo}`);
+    banBtn.setAttribute('aria-label', `Ban ${pseudo}`);
+    kickBtn.addEventListener('click', () => this.kick(peerId, false), { signal });
+    banBtn.addEventListener('click', () => this.kick(peerId, true), { signal });
     el('viewers-list').append(row);
     const entry: ViewerEntry = { pseudo, row, peer: null, tier: 'auto' };
     this.viewers.set(peerId, entry);
@@ -540,6 +555,10 @@ export class HostController {
 
   /** Tear down media, peers and subscriptions without navigating. */
   destroy(): void {
+    // A modal <dialog> lives in the top layer: hiding the host section wouldn't dismiss it, so a
+    // stale settings panel would sit over the next screen. (Reachable via Escape mid-teardown.)
+    const modal = el<HTMLDialogElement>('settings-modal');
+    if (modal.open) modal.close();
     this.ac.abort(); // remove all DOM listeners
     if (this.copyTimer !== null) clearTimeout(this.copyTimer);
     this.wakeLock.release();
@@ -573,6 +592,8 @@ function isQualityRequest(data: unknown): data is { quality: ViewerTier } {
 
 function markActive(selector: string, attr: string, value: string | null): void {
   for (const btn of document.querySelectorAll<HTMLElement>(`#settings-modal ${selector}`)) {
-    btn.dataset.active = String(btn.dataset[attr] === value);
+    const active = btn.dataset[attr] === value;
+    btn.dataset.active = String(active); // visual
+    btn.setAttribute('aria-pressed', String(active)); // exposed to a screen reader
   }
 }
