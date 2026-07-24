@@ -74,3 +74,5 @@ Le serveur intervient **uniquement** pendant l'établissement de la connexion
   audio, contrôles.
 - [`frontend.md`](./frontend.md) — pages Astro, script client, UI host vs viewer.
 - [`deployment.md`](./deployment.md) — Docker, Traefik, wss, CSP.
+- [`desktop.md`](./desktop.md) — application desktop host (Electron) : fonctionnalités,
+  archi, distribution.
