@@ -6,49 +6,51 @@
      server-rendered markup paint before the deferred module runs. showScreen() re-asserts
      exclusivity on the first route() — a #CODE deep-link flashes home for one frame, which is the
      rare path paying for the common one rather than the reverse. -->
-<section id="screen-home" tabindex="-1" class="flex flex-1 flex-col animate-fade focus:outline-none">
-  <header class="flex items-center justify-between px-10 py-[26px] max-sm:px-5">
-    <a id="brand-home" href="/" class="flex items-center gap-2.5">
-      <img src="/favicon.svg" alt="" class="size-[18px]" />
-      <span class="font-semibold tracking-[-0.01em]">stream share</span>
+<section id='screen-home' tabindex='-1' class='flex flex-1 flex-col animate-fade focus:outline-none'>
+  <header class='flex items-center justify-between px-10 py-[26px] max-sm:px-5'>
+    <a id='brand-home' href='/' class='flex items-center gap-2.5'>
+      <img src='/favicon.svg' alt='' class='size-[18px]' />
+      <span class='font-semibold tracking-[-0.01em]'>stream share</span>
     </a>
   </header>
 
-  <div class="mx-auto flex w-full max-w-[1180px] flex-1 flex-col justify-center px-10 max-sm:px-5 max-sm:py-8">
-    <div class="mb-14 max-w-[640px] max-sm:mb-8">
-      <div class="mb-5 font-mono text-xs uppercase tracking-[0.14em] text-muted-3">screen sharing, direct</div>
-      <h1 class="text-[64px] font-semibold leading-[1.02] tracking-[-0.03em] text-balance max-lg:text-[46px] max-sm:text-[34px] max-[380px]:text-[28px]">
+  <div class='mx-auto flex w-full max-w-[1180px] flex-1 flex-col justify-center px-10 max-sm:px-5 max-sm:py-8'>
+    <div class='mb-14 max-w-[640px] max-sm:mb-8'>
+      <div class='mb-5 font-mono text-xs uppercase tracking-[0.14em] text-muted-3'>screen sharing, direct</div>
+      <h1
+        class='text-[64px] font-semibold leading-[1.02] tracking-[-0.03em] text-balance max-lg:text-[46px] max-sm:text-[34px] max-[380px]:text-[28px]'
+      >
         Share your screen<br />with a single code.
       </h1>
-      <p class="mt-[22px] max-w-[520px] text-[17px] leading-[1.6] text-muted">
+      <p class='mt-[22px] max-w-[520px] text-[17px] leading-[1.6] text-muted'>
         No install, no account, no server in the middle. Your screen streams straight from your machine to your friends
         — at whatever resolution and framerate you choose.
       </p>
     </div>
 
-    <div class="grid max-w-[840px] grid-cols-2 gap-[18px] max-sm:grid-cols-1">
+    <div class='grid max-w-[840px] grid-cols-2 gap-[18px] max-sm:grid-cols-1'>
       <!-- start -->
       <button
-        id="btn-start"
-        class="flex min-h-[190px] cursor-pointer flex-col gap-3.5 rounded-2xl bg-cream px-7 pb-6 pt-7 text-left text-ink transition-transform hover:-translate-y-[3px] disabled:cursor-default disabled:opacity-45 max-sm:min-h-[150px]"
+        id='btn-start'
+        class='flex min-h-[190px] cursor-pointer flex-col gap-3.5 rounded-2xl bg-cream px-7 pb-6 pt-7 text-left text-ink transition-transform hover:-translate-y-[3px] disabled:cursor-default disabled:opacity-45 max-sm:min-h-[150px]'
       >
-        <div class="flex w-full items-center justify-between">
-          <span class="flex size-8 items-center justify-center rounded-[9px] bg-ink">
-            <span class="block size-3 rounded-[3px] border-2 border-cream"></span>
+        <div class='flex w-full items-center justify-between'>
+          <span class='flex size-8 items-center justify-center rounded-[9px] bg-ink'>
+            <span class='block size-3 rounded-[3px] border-2 border-cream'></span>
           </span>
-          <span class="font-mono text-xs text-muted-3">↗</span>
+          <span class='font-mono text-xs text-muted-3'>↗</span>
         </div>
-        <div class="mt-auto">
-          <div class="text-[22px] font-semibold tracking-[-0.01em]">Start a share</div>
-          <div class="mt-1 text-sm text-muted-4">Create a room and a link to send</div>
+        <div class='mt-auto'>
+          <div class='text-[22px] font-semibold tracking-[-0.01em]'>Start a share</div>
+          <div class='mt-1 text-sm text-muted-4'>Create a room and a link to send</div>
         </div>
       </button>
 
       <!-- shown by app.ts when the browser has no getDisplayMedia (i.e. mobile) — kept outside the
            button so the dimmed disabled card doesn't drag the explanation down with it -->
       <div
-        id="start-unsupported"
-        class="order-first col-span-full rounded-xl border border-gold/[0.16] bg-gold/[0.06] px-4 py-3 text-[13px] leading-[1.5] text-gold"
+        id='start-unsupported'
+        class='order-first col-span-full rounded-xl border border-gold/[0.16] bg-gold/[0.06] px-4 py-3 text-[13px] leading-[1.5] text-gold'
         hidden
       >
         Screen sharing needs a desktop browser — you can still join a share below.
@@ -58,42 +60,44 @@
            #start-unsupported : hors du bouton, en tête de grille. Sans lui, l'échec renvoyait à
            l'accueil sans un mot, sur le seul chemin d'entrée du host. -->
       <div
-        id="start-error"
-        class="order-first col-span-full rounded-xl border border-live/[0.22] bg-live/[0.08] px-4 py-3 text-[13px] leading-[1.5] text-live-fg"
+        id='start-error'
+        class='order-first col-span-full rounded-xl border border-live/[0.22] bg-live/[0.08] px-4 py-3 text-[13px] leading-[1.5] text-live-fg'
         hidden
       >
         Could not reach the server — check your connection and try again.
       </div>
 
       <!-- join -->
-      <div class="flex min-h-[190px] flex-col gap-3.5 rounded-2xl border border-white/[0.09] bg-panel p-7 max-sm:min-h-0">
-        <div class="flex items-center justify-between">
-          <span class="flex size-8 items-center justify-center rounded-[9px] bg-[#1e1e1e]">
-            <span class="block h-2.5 w-3.5 rounded-[3px] border-2 border-muted"></span>
+      <div
+        class='flex min-h-[190px] flex-col gap-3.5 rounded-2xl border border-white/[0.09] bg-panel p-7 max-sm:min-h-0'
+      >
+        <div class='flex items-center justify-between'>
+          <span class='flex size-8 items-center justify-center rounded-[9px] bg-[#1e1e1e]'>
+            <span class='block h-2.5 w-3.5 rounded-[3px] border-2 border-muted'></span>
           </span>
-          <span class="font-mono text-xs text-muted-3">join</span>
+          <span class='font-mono text-xs text-muted-3'>join</span>
         </div>
-        <div class="mt-auto">
-          <div class="mb-3.5 text-[22px] font-semibold tracking-[-0.01em]">Join a share</div>
-          <div class="flex gap-2">
+        <div class='mt-auto'>
+          <div class='mb-3.5 text-[22px] font-semibold tracking-[-0.01em]'>Join a share</div>
+          <div class='flex gap-2'>
             <input
-              id="join-input"
-              class="min-w-0 flex-1 rounded-[10px] border border-white/[0.12] bg-ink px-3.5 py-3 font-mono text-[15px] uppercase tracking-[0.16em] text-fg focus:border-white/[0.32]"
-              placeholder="code (e.g. 7K2-QP9)"
-              aria-label="Room code"
-              maxlength="9"
-              autocomplete="off"
-              autocapitalize="characters"
-              spellcheck="false"
+              id='join-input'
+              class='min-w-0 flex-1 rounded-[10px] border border-white/[0.12] bg-ink px-3.5 py-3 font-mono text-[15px] uppercase tracking-[0.16em] text-fg focus:border-white/[0.32]'
+              placeholder='code (e.g. 7K2-QP9)'
+              aria-label='Room code'
+              maxlength='9'
+              autocomplete='off'
+              autocapitalize='characters'
+              spellcheck='false'
             />
             <button
-              id="btn-join"
-              aria-label="Join"
-              class="cursor-pointer rounded-[10px] border border-white/[0.12] bg-elev-2 px-[18px] text-sm font-medium text-fg hover:bg-elev-hover"
+              id='btn-join'
+              aria-label='Join'
+              class='cursor-pointer rounded-[10px] border border-white/[0.12] bg-elev-2 px-[18px] text-sm font-medium text-fg hover:bg-elev-hover'
               >→</button
             >
           </div>
-          <div id="join-error" role="alert" class="mt-2 font-mono text-[11px] text-live" hidden>
+          <div id='join-error' role='alert' class='mt-2 font-mono text-[11px] text-live' hidden>
             invalid code — check the 6 characters (no I, L, O or U)
           </div>
         </div>
@@ -102,9 +106,9 @@
   </div>
 
   <footer
-    class="flex items-center justify-between border-t border-white/[0.05] px-10 py-[22px] font-mono text-[11px] text-muted-4 max-sm:px-5"
+    class='flex items-center justify-between border-t border-white/[0.05] px-10 py-[22px] font-mono text-[11px] text-muted-4 max-sm:px-5'
   >
     <span>webRTC · direct connection</span>
-    <span>stream share — v0.1</span>
+    <span>stream share — v0.2</span>
   </footer>
 </section>
