@@ -580,7 +580,7 @@ export class HostController {
   }
 }
 
-function parseRes(v: string): ResolutionTarget {
+export function parseRes(v: string): ResolutionTarget {
   return Number(v) as ResolutionTarget;
 }
 
@@ -588,7 +588,7 @@ function parseRes(v: string): ResolutionTarget {
 // The value comes from an untrusted peer → validate against the allowed set (a bad value would
 // otherwise reach scaleResolutionDownBy as Infinity/NaN and break that viewer's sender).
 const QUALITY_TIERS = new Set<ViewerTier>(['auto', 'source', 1440, 1080, 720, 480]);
-function isQualityRequest(data: unknown): data is { quality: ViewerTier } {
+export function isQualityRequest(data: unknown): data is { quality: ViewerTier } {
   return (
     typeof data === 'object' &&
     data !== null &&

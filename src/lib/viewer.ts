@@ -32,7 +32,7 @@ export function isControl(data: unknown): data is PeerControl {
 }
 
 // The host announces its cap height (tier ceiling) over the same relay. Validate the value.
-function isHeight(data: unknown): data is { height: number } {
+export function isHeight(data: unknown): data is { height: number } {
   return (
     typeof data === 'object' &&
     data !== null &&
@@ -64,7 +64,7 @@ function tierLabel(tier: ViewerTier): string {
   return tier === 'auto' ? 'Auto' : tier === 'source' ? 'Source' : `${tier}p`;
 }
 
-function parseTier(v: string): ViewerTier {
+export function parseTier(v: string): ViewerTier {
   return v === 'auto' ? 'auto' : v === 'source' ? 'source' : (Number(v) as 1440 | 1080 | 720 | 480);
 }
 

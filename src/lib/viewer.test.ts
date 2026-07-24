@@ -2,7 +2,7 @@
 // recopié tel quel), donc ces gardes sont la seule frontière de confiance côté viewer.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isControl } from './viewer.ts';
+import { isControl, isHeight, parseTier } from './viewer.ts';
 
 test('isControl accepts the two known verbs', () => {
   assert.equal(isControl({ control: 'pause' }), true);
@@ -26,4 +26,21 @@ test('isControl rejects anything that is not a control payload', () => {
   assert.equal(isControl(undefined), false);
   assert.equal(isControl('pause'), false);
   assert.equal(isControl({ height: 1080 }), false);
+});
+
+test('isHeight accepts a positive number and rejects the rest', () => {
+  assert.equal(isHeight({ height: 1080 }), true);
+  assert.equal(isHeight({ height: 0 }), false, 'a cap of 0 is not a real height');
+  assert.equal(isHeight({ height: -720 }), false);
+  assert.equal(isHeight({ height: '1080' }), false, 'string, not number');
+  assert.equal(isHeight({ height: NaN }), false);
+  assert.equal(isHeight({}), false);
+  assert.equal(isHeight(null), false);
+});
+
+test('parseTier maps the dataset string back to a tier', () => {
+  assert.equal(parseTier('auto'), 'auto');
+  assert.equal(parseTier('source'), 'source');
+  assert.equal(parseTier('1080'), 1080);
+  assert.equal(parseTier('480'), 480);
 });

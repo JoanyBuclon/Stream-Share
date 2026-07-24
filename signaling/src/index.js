@@ -61,6 +61,18 @@ function allow(kind, ip, now) {
   return true;
 }
 
+// Test-only: the room/client maps and rate-limit logs are module-global, so test files sharing
+// this module inherit each other's state (used codes, consumed create/join budget). A file can
+// bracket itself with this to stay isolated — never called in production.
+export function _resetState() {
+  rooms.clear();
+  clients.clear();
+  RATE.create.log.clear();
+  RATE.join.log.clear();
+  for (const k of Object.keys(rejected)) rejected[k] = 0;
+  seq = 0;
+}
+
 // Sans ceci, une clé par IP jamais revue reste à vie (les timestamps sont filtrés à la
 // lecture, mais la lecture n'arrive plus). Balayage à la fréquence de la fenêtre.
 setInterval(() => {

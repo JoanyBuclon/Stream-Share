@@ -31,6 +31,19 @@ test('host shares a source and a viewer connects to a live stream', async ({ bro
   await expect(viewerPage.locator('#viewer-video')).toBeVisible();
   await expect(viewerPage.locator('#viewer-live-badge')).toBeVisible();
 
+  // "visible" + "connected" both hold on a black or frozen stream — the checks above would pass on
+  // a dead link. Assert frames actually arrive: the element decoded at least one (videoWidth > 0),
+  // and the viewer's own getStats overlay reports real decoded dimensions and a live framerate
+  // (frozen → 0 fps). This exercises the real inbound-rtp path, not just the UI state.
+  await expect
+    .poll(() => viewerPage.evaluate(() => (document.getElementById('viewer-video') as HTMLVideoElement).videoWidth))
+    .toBeGreaterThan(0);
+  await viewerPage.click('#btn-stats');
+  await expect(viewerPage.locator('#stat-res')).toHaveText(/^\d+×\d+$/);
+  await expect
+    .poll(() => viewerPage.locator('#stat-fps').textContent().then((t) => parseInt(t ?? '0', 10)))
+    .toBeGreaterThan(0);
+
   // --- host sees the viewer in its sidebar ---
   await expect(hostPage.locator('#viewer-count')).toHaveText('1');
 
