@@ -29,15 +29,30 @@ test('resume after a pause returns to live', () => {
   assert.equal(s.hostPaused, false);
 });
 
-test('a joiner paused before connecting shows paused, then live on resume', () => {
+test('a joiner paused before connecting stays connecting, then paused on connect, then live on resume', () => {
   // The host relays pause to a late joiner BEFORE the offer (pause-join path), so pause lands while
-  // still connecting; the viewer must show paused, then live once the host resumes.
+  // still connecting. It must NOT jump to the paused screen before there's anything to show — it
+  // remembers the pause and stays connecting, then resolves to paused once connected.
   let s = run({ type: 'pause', paused: true });
-  assert.equal(s.ui, 'paused');
+  assert.equal(s.ui, 'connecting', 'pause before connecting is remembered, not painted');
+  assert.equal(s.hostPaused, true);
   s = run({ type: 'pause', paused: true }, { type: 'connected' });
-  assert.equal(s.ui, 'paused', 'connected while paused stays paused');
+  assert.equal(s.ui, 'paused', 'connected while paused resolves to paused');
   s = run({ type: 'pause', paused: true }, { type: 'connected' }, { type: 'pause', paused: false });
   assert.equal(s.ui, 'live');
+});
+
+test('a host pause/resume during reconnecting does not paint over the dead transport or cancel the give-up timer', () => {
+  // V1: pause/resume arrives on the signaling channel while the ICE is reconnecting (give-up timer
+  // armed). It must NOT flip the UI to live/paused (the media is dead) and must NOT cancel the timer
+  // — otherwise the viewer is stranded on a frozen frame with no error screen if ICE never recovers.
+  const reconnecting = run({ type: 'connected' }, { type: 'disconnected' });
+  assert.equal(reconnecting.ui, 'reconnecting');
+  const t = reduce(reconnecting, { type: 'pause', paused: false });
+  assert.equal(t.session.ui, 'reconnecting', 'stays reconnecting — the transport is still down');
+  assert.equal(t.timer, null, 'the give-up deadline is untouched');
+  assert.equal(t.session.hostPaused, false, 'the pause state is still remembered');
+  assert.equal(reduce(t.session, { type: 'connected' }).session.ui, 'live', 'honored once ICE recovers');
 });
 
 test('failed before ever connecting is a hard error; after connecting it is reconnecting', () => {

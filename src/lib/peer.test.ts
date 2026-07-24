@@ -10,7 +10,6 @@ class FakePC {
   localDescription: RTCSessionDescriptionInit | null = null;
   remoteDescription: RTCSessionDescriptionInit | null = null;
   onicecandidate: ((e: { candidate: unknown }) => void) | null = null;
-  onconnectionstatechange: (() => void) | null = null;
   oniceconnectionstatechange: (() => void) | null = null;
   ontrack: ((e: { streams: unknown[] }) => void) | null = null;
   addedTracks: Array<{ track: unknown; stream: unknown }> = [];
@@ -81,10 +80,6 @@ class FakePC {
   }
   fireIce(candidate: unknown) {
     this.onicecandidate?.({ candidate });
-  }
-  fireState(s: RTCPeerConnectionState) {
-    this.connectionState = s;
-    this.onconnectionstatechange?.();
   }
   fireIceState(s: RTCIceConnectionState) {
     this.iceConnectionState = s;
@@ -254,23 +249,18 @@ test('onicecandidate émet un signal ICE (toJSON), null en fin de gathering est 
   assert.deepEqual(signals, [{ ice: { candidate: 'cand' } }]);
 });
 
-test('ontrack transmet le premier flux; onState transmet l état', () => {
+test('ontrack transmet le premier flux', () => {
   const pc = new FakePC();
   let stream: MediaStream | null = null;
-  let state: RTCPeerConnectionState | null = null;
-  const peer = makePeer(pc, {
+  makePeer(pc, {
     onSignal: () => {},
     onTrack: (s) => (stream = s),
-    onState: (st) => (state = st),
   });
   const s = { id: 's1' } as unknown as MediaStream;
   pc.fireTrack([s]);
   assert.equal(stream, s);
   pc.fireTrack([]); // pas de flux → pas d'appel
   assert.equal(stream, s);
-  pc.fireState('connected');
-  assert.equal(state, 'connected');
-  assert.equal(peer.connectionState, 'connected');
 });
 
 test('restartIce (host) émet une offre iceRestart', async () => {

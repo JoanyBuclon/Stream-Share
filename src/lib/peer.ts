@@ -10,8 +10,6 @@ export interface PeerCallbacks {
   onSignal: (data: PeerSignal) => void;
   /** Remote stream received (viewer side). */
   onTrack?: (stream: MediaStream) => void;
-  /** Connection state change. */
-  onState?: (state: RTCPeerConnectionState) => void;
   /** ICE (transport) state change — the app can show "reconnecting…" / "unreachable". */
   onIceState?: (state: RTCIceConnectionState) => void;
 }
@@ -48,7 +46,6 @@ export class Peer {
     pc.onicecandidate = (e) => {
       if (e.candidate) this.cb.onSignal({ ice: e.candidate.toJSON() });
     };
-    pc.onconnectionstatechange = () => this.cb.onState?.(pc.connectionState);
     pc.oniceconnectionstatechange = () => this.onIceChange();
     pc.ontrack = (e) => {
       const stream = e.streams[0];
@@ -156,10 +153,6 @@ export class Peer {
       // we swallow it. Any other error (invalid SDP…) is still thrown.
       if (!this.closed) throw err;
     }
-  }
-
-  get connectionState(): RTCPeerConnectionState {
-    return this.pc.connectionState;
   }
 
   /** Snapshot of the connection's WebRTC stats (viewer overlay). Null once closed. */

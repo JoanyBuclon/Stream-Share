@@ -66,7 +66,16 @@ function next(s: ViewerSession, e: ViewerEvent): ViewerSession {
     case 'failed':
       return { ...s, ui: s.everConnected ? 'reconnecting' : 'error' };
     case 'pause':
-      return { ...s, hostPaused: e.paused, ui: whenStreaming(e.paused) };
+      // Pause/resume travels over the signaling channel, independent of the peer's ICE. Only move
+      // the visible state when a stream is actually up (live/paused): moving from `reconnecting`
+      // would paint `live` over a dead transport AND make reduce() cancel the give-up timer,
+      // stranding the viewer with no error screen. In any other state, just remember the pause —
+      // a later `connected` reads it back through whenStreaming().
+      return {
+        ...s,
+        hostPaused: e.paused,
+        ui: s.ui === 'live' || s.ui === 'paused' ? whenStreaming(e.paused) : s.ui,
+      };
     case 'give-up':
       return { ...s, ui: 'error' };
     case 'terminate':

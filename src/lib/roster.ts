@@ -2,15 +2,12 @@
 // diff it against what the host currently tracks to decide who to add (joined during the outage) and
 // who to drop (left during it). Kept DOM-free so the set logic is unit-tested without a controller.
 
-export interface RosterMember {
-  peerId: string;
-  pseudo: string;
-}
+import type { RoomViewer } from './signaling.ts'; // the server's roster shape { peerId, pseudo }
 
 export function reconcileRoster(
   current: Iterable<string>,
-  incoming: readonly RosterMember[],
-): { toRemove: string[]; toAdd: RosterMember[] } {
+  incoming: readonly RoomViewer[],
+): { toRemove: string[]; toAdd: RoomViewer[] } {
   const currentIds = new Set(current);
   const present = new Set(incoming.map((m) => m.peerId));
   return {
