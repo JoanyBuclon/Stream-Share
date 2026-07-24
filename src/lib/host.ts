@@ -8,6 +8,7 @@ import { Peer, type PeerSignal } from './peer.ts';
 import { AudioMixer } from './audio.ts';
 import { serial } from './serial.ts';
 import { WakeLock } from './wakelock.ts';
+import { reconcileRoster } from './roster.ts';
 import { el, show, hide, setText, initials } from './dom.ts';
 import {
   applyPreset,
@@ -463,9 +464,9 @@ export class HostController {
   // still present kept their direct P2P link (media survives a signaling blip).
   private reconcile(iceServers: RTCIceServer[], viewers: RoomViewer[]): void {
     this.config = { iceServers };
-    const present = new Set(viewers.map((v) => v.peerId));
-    for (const peerId of [...this.viewers.keys()]) if (!present.has(peerId)) this.removeViewer(peerId);
-    for (const v of viewers) if (!this.viewers.has(v.peerId)) this.addViewer(v.peerId, v.pseudo);
+    const { toRemove, toAdd } = reconcileRoster(this.viewers.keys(), viewers);
+    for (const peerId of toRemove) this.removeViewer(peerId);
+    for (const v of toAdd) this.addViewer(v.peerId, v.pseudo);
   }
 
   private onStatus = (status: ConnectionStatus): void => {

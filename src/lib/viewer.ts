@@ -9,13 +9,19 @@ import { formatCode } from './code.ts';
 import { viewerTiers, type ViewerTier } from './settings.ts';
 import { readStats, rateStats, type RtcStat, type Sample } from './stats.ts';
 import { WakeLock } from './wakelock.ts';
+import {
+  reduce,
+  initialSession,
+  type ViewerSession,
+  type ViewerEvent,
+  type ViewerUiState,
+  type EndReason,
+} from './viewer-state.ts';
 
 export interface ViewerInit {
   hostId: string;
   iceServers: RTCIceServer[];
 }
-
-type ViewerState = 'connecting' | 'live' | 'reconnecting' | 'paused' | 'ended' | 'error';
 
 // Connection-dot colors reference the @theme tokens (single source of truth, cf. app.css).
 const DOT = { good: 'var(--color-good)', gold: 'var(--color-gold)', muted: 'var(--color-muted-4)', red: 'var(--color-live)' };
@@ -43,8 +49,7 @@ export function isHeight(data: unknown): data is { height: number } {
 }
 
 // Les trois sorties terminales partagent l'écran `#viewer-ended`, mais pas le message : le
-// texte par défaut du markup est celui de 'host-left'.
-type EndReason = 'host-left' | 'kicked' | 'banned';
+// texte par défaut du markup est celui de 'host-left'. (EndReason vient du domaine viewer-state.)
 const END_TEXT: Record<EndReason, { title: string; body: string }> = {
   'host-left': {
     title: 'The host stopped sharing',
@@ -89,10 +94,8 @@ export class ViewerController {
   private config: RTCConfiguration;
   private hostId: string;
   private peer: Peer | null = null;
-  private everConnected = false;
+  private session: ViewerSession = initialSession; // UI state machine (transitions live in viewer-state.ts)
   private wasReconnecting = false;
-  private terminated = false;
-  private hostPaused = false; // remembered so an ICE blip during a pause doesn't flip back to 'live'
   private tier: ViewerTier = 'auto'; // requested quality; re-sent on (re)connect so the host stays in sync
   private hostHeight = 0; // host cap height (tier ceiling), announced by the host — NOT inferred from the ramping received video
   private statsOn = false;
@@ -122,7 +125,7 @@ export class ViewerController {
     this.offMessage = sig.onMessage(this.onMessage);
     this.offStatus = sig.onStatus(this.onStatus);
 
-    this.setState('connecting');
+    this.render(); // paint the initial 'connecting' state (session starts there)
     this.buildPeer(init.hostId);
     void this.wakeLock.request();
   }
@@ -135,26 +138,20 @@ export class ViewerController {
       onSignal: (data) => this.sig.signal(this.hostId, data),
       onTrack: (stream) => {
         el<HTMLVideoElement>('viewer-video').srcObject = stream;
-        this.everConnected = true;
         if (this.tier !== 'auto') this.sig.signal(this.hostId, { quality: this.tier }); // resync after (re)connect
-        this.showStream();
+        this.dispatch({ type: 'connected' });
+        this.playVideo(); // media is ready now — the reliable moment to (re)start playback
       },
       onIceState: (state) => this.onIceState(state),
     });
   }
 
+  // ICE transitions map straight to domain events; the machine owns the terminated guard, the
+  // everConnected → error-vs-reconnecting decision, and the give-up timer.
   private onIceState(state: RTCIceConnectionState): void {
-    if (this.terminated) return; // session finie (kick / host-left) — ignorer les transitions ICE tardives
-    if (state === 'connected' || state === 'completed') {
-      this.everConnected = true;
-      this.showStream();
-    } else if (state === 'disconnected') {
-      this.setState('reconnecting'); // transient; the host restarts ICE on 'failed'
-    } else if (state === 'failed') {
-      // Never connected → the direct P2P path is impossible (e.g. symmetric NAT, no TURN).
-      // Was connected → the host will attempt an ICE restart, so stay optimistic.
-      this.setState(this.everConnected ? 'reconnecting' : 'error');
-    }
+    if (state === 'connected' || state === 'completed') this.dispatch({ type: 'connected' });
+    else if (state === 'disconnected') this.dispatch({ type: 'disconnected' });
+    else if (state === 'failed') this.dispatch({ type: 'failed' });
   }
 
   private onMessage = (msg: ServerMessage): void => {
@@ -182,13 +179,7 @@ export class ViewerController {
   };
 
   private onControl(control: 'pause' | 'resume'): void {
-    this.hostPaused = control === 'pause';
-    this.showStream();
-  }
-
-  // Show the stream — but honor a host pause (an ICE (re)connect during a pause stays 'paused').
-  private showStream(): void {
-    this.setState(this.hostPaused ? 'paused' : 'live');
+    this.dispatch({ type: 'pause', paused: control === 'pause' });
   }
 
   // The <video> is unmuted (audio is the product), so autoplay policies block playback unless a
@@ -249,7 +240,7 @@ export class ViewerController {
   }
 
   private async pollStats(): Promise<void> {
-    // setState masque #viewer-stats sur paused/reconnecting/ended/error mais laisse le timer
+    // render() masque #viewer-stats sur paused/reconnecting/ended/error mais laisse le timer
     // tourner : sans ce garde on paie un getStats() + 5 setText par seconde dans un overlay
     // que personne ne voit. stopStats() n'est atteint que par toggleStats / destroy.
     if (!this.watching) return;
@@ -280,13 +271,13 @@ export class ViewerController {
   }
 
   private endSession(reason: EndReason): void {
-    this.terminated = true; // keep the 'ended' UI; ignore the 'closed' status that sig.close() will fire
     // Le même écran sert aux trois sorties. Sans ce texte, un viewer expulsé ou banni lisait
     // « The host stopped sharing » — puis « you have been banned » s'il retapait le code, deux
-    // messages contradictoires dont aucun ne décrivait ce qui venait de se passer.
+    // messages contradictoires dont aucun ne décrivait ce qui venait de se passer. Poser le texte
+    // avant le dispatch qui rend l'écran 'ended'. Le domaine marque la session terminée (absorbante).
     setText('viewer-ended-title', END_TEXT[reason].title);
     setText('viewer-ended-body', END_TEXT[reason].body);
-    this.setState('ended');
+    this.dispatch({ type: 'terminate', reason });
     this.peer?.close();
     this.peer = null;
     // Terminal: kick closes our socket server-side — mark the close intentional so the
@@ -297,23 +288,35 @@ export class ViewerController {
   private onStatus = (status: ConnectionStatus): void => {
     if (status === 'reconnecting') {
       this.wasReconnecting = true;
-      this.setState('reconnecting');
+      this.dispatch({ type: 'disconnected' }); // signaling blip → same 'reconnecting' UI as an ICE blip
     } else if (status === 'open' && this.wasReconnecting) {
       this.wasReconnecting = false;
       this.sig.join(this.code, this.pseudo, this.token); // re-enter → new 'joined' rebuilds the Peer
-    } else if (status === 'closed' && !this.terminated) {
+    } else if (status === 'closed' && !this.session.terminated) {
       setText('conn-label', 'disconnected');
       el('conn-dot').style.background = DOT.muted;
     }
   };
 
-  private setState(state: ViewerState): void {
-    const video = el<HTMLVideoElement>('viewer-video');
-    // Leaving 'reconnecting' (recovered or terminal) cancels the give-up timer.
-    if (state !== 'reconnecting' && this.reconnectTimer !== null) {
+  // Feed an event to the state machine, apply the timer command it returns, and repaint only if the
+  // visible state moved. The reconnect give-up timer lives here (not in render): the domain says
+  // 'arm' exactly on entering reconnecting and 'cancel' on leaving, so a flapping link never resets
+  // the deadline. The timeout dispatches 'give-up', which the machine turns into 'error'.
+  private dispatch(event: ViewerEvent): void {
+    const { session, uiChanged, timer } = reduce(this.session, event);
+    this.session = session;
+    if (timer === 'arm' && this.reconnectTimer === null) {
+      this.reconnectTimer = setTimeout(() => this.dispatch({ type: 'give-up' }), RECONNECT_TIMEOUT_MS);
+    } else if (timer === 'cancel' && this.reconnectTimer !== null) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    if (uiChanged) this.render();
+  }
+
+  private render(): void {
+    const state: ViewerUiState = this.session.ui;
+    const video = el<HTMLVideoElement>('viewer-video');
     // reset transient surfaces
     hide(el('viewer-reconnect-overlay'));
     hide(el('viewer-ended'));
@@ -356,10 +359,6 @@ export class ViewerController {
         show(el('viewer-reconnecting-badge'));
         setText('conn-label', 'reconnecting…');
         dot.style.background = DOT.gold;
-        // Arm the give-up timer on the first reconnecting tick; keep the same deadline across
-        // repeated ticks (don't reset it), so a flapping-but-dead link still fails over.
-        if (this.reconnectTimer === null)
-          this.reconnectTimer = setTimeout(() => this.setState('error'), RECONNECT_TIMEOUT_MS);
         break;
       case 'ended':
         hide(video);
@@ -398,7 +397,7 @@ export class ViewerController {
     el('btn-retry').addEventListener(
       'click',
       () => {
-        this.setState('connecting');
+        this.dispatch({ type: 'connecting' });
         this.sig.join(this.code, this.pseudo, this.token);
       },
       { signal },
@@ -505,7 +504,7 @@ export class ViewerController {
     el('screen-viewer').style.cursor = shown ? '' : 'none';
   }
 
-  // Called from setState: arm the idle-hide when a stream goes live, disarm (and reveal) otherwise.
+  // Called from render(): arm the idle-hide when a stream goes live, disarm (and reveal) otherwise.
   private setWatching(watching: boolean): void {
     this.watching = watching;
     if (this.uiHideTimer !== null) {
@@ -532,7 +531,7 @@ export class ViewerController {
     this.offStatus();
     this.peer?.close();
     this.peer = null;
-    this.closePip(); // covers the paths that never reach setState('ended'): leave, hash change, teardown
+    this.closePip(); // covers the paths that never reach the 'ended' render: leave, hash change, teardown
     const video = el<HTMLVideoElement>('viewer-video');
     video.srcObject = null;
     el('viewer-quality').replaceChildren(); // don't leave stale tier buttons for the next session
