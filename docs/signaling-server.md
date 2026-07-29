@@ -35,7 +35,7 @@ connexion (envoyé dans `hello`) et ne route que par salon.
 | `signal`  | `{ to, data }`            | Relaie `data` (SDP offer/answer ou ICE candidate) au pair `to`. Sert aussi à l'ICE restart.                               |
 | `kick`    | `{ peerId }`              | **(host)** éjecte un viewer → `kicked` au viewer + fermeture de sa connexion.                                             |
 | `ban`     | `{ peerId }`              | **(host)** éjecte **et** bannit (IP + token, cf. [`rooms-and-codes.md`](./rooms-and-codes.md)) pour la durée du salon.    |
-| `leave`   | —                         | **Départ volontaire** (Stop/Quitter) : fin **immédiate**. Host → salon détruit + viewers notifiés (`peer-left`) sur-le-champ ; viewer → retiré, host notifié. **Pas de grâce** (contrairement à une coupure de socket, qui elle laisse la fenêtre de reclaim). |
+| `leave`   | —                         | **Départ volontaire** (host : retour à l'accueil via le logo ; viewer : « quitter ») : fin **immédiate**. Host → salon détruit + viewers notifiés (`peer-left`) sur-le-champ ; viewer → retiré, host notifié. **Pas de grâce** (contrairement à une coupure de socket, qui elle laisse la fenêtre de reclaim). Note : le bouton **Stop** de l'host ne quitte **pas** — il coupe la source et garde le salon (cf. [`webrtc-media.md`](./webrtc-media.md#contrôles)). |
 
 ### Serveur → client
 
@@ -79,8 +79,8 @@ n'attend pas de les avoir toutes) — connexion plus rapide à s'établir.
 Nettoyage : à la fermeture **inattendue** d'une socket, on applique les règles de
 cycle de vie des salons — viewer retiré (host notifié `peer-left`), ou, si c'était
 l'host, **délai de grâce de 30 s** avant destruction (fenêtre de reclaim, cf.
-[`rooms-and-codes.md`](./rooms-and-codes.md)). Un **`leave` explicite** (Stop/Quitter)
-court-circuite la grâce : fin immédiate.
+[`rooms-and-codes.md`](./rooms-and-codes.md)). Un **`leave` explicite** (retour à
+l'accueil) court-circuite la grâce : fin immédiate.
 
 ## Reconnexion (blip réseau)
 

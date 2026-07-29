@@ -188,7 +188,8 @@ Toggle dans le menu source. Upload ~128 kbps (négligeable devant la vidéo).
 | Host   | Micro                         | `getUserMedia` + mix WebAudio (cf. § Audio).                                         |
 | Host   | Pause                         | `replaceTrack(null)` (ou piste noire) sur chaque sender — session maintenue.         |
 | Host   | Kick / ban viewer             | Ferme la `RTCPeerConnection` du viewer + message `kick`/`ban` (cf. signaling).       |
-| Host   | Fin du partage                | Ferme les `RTCPeerConnection` + `leave`.                                             |
+| Host   | Couper la source              | Stoppe la capture, **garde le salon + les peers** : viewers → écran « en pause », host → retour au choix de source (`stopSource`). Bouton Stop, « Stop sharing » du navigateur, ou fenêtre partagée fermée (piste `ended`). |
+| Host   | Fin de session                | Retour accueil (logo) → ferme les `RTCPeerConnection` + `leave`. Onglet/navigateur fermé = coupure socket (fenêtre de grâce, cf. reclaim).                                              |
 | Viewer | Volume / mute                 | `<video>.volume` / `.muted` — **purement local**, aucun aller-retour réseau.         |
 | Viewer | Qualité                       | Demande un palier → l'host applique sur **son** sender (cf. § Qualité par-viewer).   |
 | Viewer | Picture-in-picture            | `video.requestPictureInPicture()` (API native).                                      |
@@ -211,6 +212,15 @@ du SDP/ICE — le viewer le filtre par un type guard). C'est ce message, pas la
 détection de piste muette (peu fiable selon les navigateurs), qui pilote l'écran
 « en pause » côté viewer. Un viewer qui rejoint/reconnecte pendant une pause est
 notifié **avant** l'offre (pas de flash « live »).
+
+**Pas de source = même écran.** Tant que l'host n'a choisi **aucune** source (à
+l'ouverture du salon **ou** après un « couper la source »), les viewers voient ce même
+écran « en pause ». L'host leur offre malgré tout un peer — flux **vide**, les m-lines
+vidéo/audio étant pré-négociées (cf. plus haut) — et envoie `control: 'pause'` : le
+viewer **établit** la connexion puis se pose « en pause », au lieu de rester bloqué sur
+« connexion ». Choisir une source fait alors `replaceTrack` + `resume` : la vidéo arrive
+**sans** que le viewer rejoigne. C'est aussi ce qui distingue « en pause » (host présent,
+salon vivant) de l'écran « host a arrêté », réservé au **départ** de l'host (`peer-left`).
 
 ## Reconnexion
 

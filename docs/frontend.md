@@ -97,11 +97,13 @@ puis `render()`, testable sans DOM.
   résolution / FPS (`10/30/60/120`) / bitrate.
 - Audio : toggles **son système** + **micro**.
 - Session : **copier le lien**, **liste des viewers** (avatar + pseudo + état « connected »)
-  avec **kick / ban** par ligne, **pause**, **stop**, estimation d'upload.
+  avec **kick / ban** par ligne, **pause**, **stop** (coupe la source, garde le salon),
+  estimation d'upload.
 
 **Viewer**
 
-- Vidéo : `<video>` du flux (placeholder « en pause » / écran « host a arrêté »).
+- Vidéo : `<video>` du flux (placeholder « en pause » — host en pause **ou** aucune
+  source active / écran « host a arrêté » — réservé au départ de l'host).
 - Qualité : paliers **`Auto · Source · 1440p · 1080p · 720p · 480p`** (dynamiques,
   plafonnés au flux host — les paliers au-dessus n'apparaissent pas).
 - Audio : **volume** + **mute**.
@@ -137,7 +139,7 @@ Voir [`deployment.md`](./deployment.md) pour les en-têtes complets.
 Ce qui est **câblé et testé en réel** (host ↔ viewer direct) :
 
 - Routage (landing / join par hash / host / viewer), **création + `reclaim`** host,
-  re-join viewer, **kick / ban**, **Stop immédiat**.
+  re-join viewer, **kick / ban**, **couper la source** (salon maintenu).
 - Host : capture `getDisplayMedia`, aperçu local, **changement de source à chaud**
   (`replaceTrack`), copier le lien, liste des viewers.
 - Host — **modal Réglages** appliquée en direct : source, **presets** (Gaming /
@@ -148,7 +150,8 @@ Ce qui est **câblé et testé en réel** (host ↔ viewer direct) :
 - Host — **pause / reprise** (vidéo coupée, audio maintenu ; message de contrôle
   `pause`/`resume` relayé aux viewers).
 - Viewer : lecture du flux, volume/mute, plein écran, PiP, états
-  live / **pause** / reconnexion / terminé / échec (avec **timeout de reconnexion**).
+  live / **pause** (host en pause **ou** pas de source) / reconnexion / terminé / échec
+  (avec **timeout de reconnexion**).
 - Viewer — **qualité par-viewer** : paliers `Auto / …p` (dynamiques, plafonnés au
   flux host, cap annoncé par l'host) ; la demande est relayée à l'host, qui applique
   `scaleResolutionDownBy` sur **le sender de ce viewer** (`effectiveScale`).

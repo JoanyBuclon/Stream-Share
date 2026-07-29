@@ -71,7 +71,7 @@ const normalize = (input: string) => String(input ?? '').toUpperCase().replace(/
 | Viewer envoie code + pseudo  | Lookup `rooms.get(code)`. Absent → `join-error`. **Banni** (`isBanned`) → `join-error`. Sinon on ajoute `{ id, pseudo }` et on notifie l'host.                                                      |
 | Host kicke un viewer         | Sa `RTCPeerConnection` se ferme, il sort de `viewers`. Si **ban** : son IP → `bannedIps`, son token → `bannedTokens`.                                                                               |
 | Viewer se déconnecte         | Retiré de `room.viewers` ; l'host est notifié (`peer-left`).                                                                                                                                        |
-| Host **arrête** (Stop / `leave`) | Arrêt volontaire : salon **détruit immédiatement**, viewers notifiés `peer-left { reason: 'host-left' }`, code libéré. **Pas de grâce.**                                                        |
+| Host **quitte** (retour accueil → `leave`) | Départ volontaire : salon **détruit immédiatement**, viewers notifiés `peer-left { reason: 'host-left' }`, code libéré. **Pas de grâce.** *(Le bouton **Stop** ne quitte pas : il coupe la source et garde le salon.)* |
 | Host se déconnecte (coupure) | **Délai de grâce 30 s** : on arme `graceTimer`, le salon reste, les viewers **ne sont pas** notifiés. Expiration → destruction (viewers notifiés `peer-left { reason: 'host-left' }`, code libéré). |
 | Host se reconnecte (reclaim) | Dans la fenêtre de grâce, `reclaim { code, hostToken }` : on annule `graceTimer`, le host **reprend son ancien `hostId`** (continuité du routage `signal`) et récupère la liste des viewers.        |
 
