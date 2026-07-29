@@ -77,17 +77,7 @@ export class HostController {
 
     // The host screen DOM is shared and reused across sessions — reset it to the initial
     // "no source" state so a previous share's preview/badges don't linger.
-    const preview = el<HTMLVideoElement>('host-video');
-    preview.srcObject = null;
-    hide(preview);
-    show(el('host-empty'));
-    hide(el('host-stage-meta'));
-    hide(el('host-live-badge'));
-    hide(el('btn-stop'));
-    hide(el('btn-pause'));
-    hide(el('host-paused'));
-    hide(el('host-paused-badge'));
-    hide(el('host-quality-bar'));
+    this.resetStage();
     // A <dialog> hides itself when closed (UA display:none). Never set `hidden` on it: Tailwind's
     // Preflight `[hidden]{display:none!important}` would then survive showModal() and the modal
     // could never appear. Just make sure it's closed on a reused screen.
@@ -108,7 +98,7 @@ export class HostController {
     el('btn-resume').addEventListener('click', () => void this.togglePause(), { signal });
     // Once the preview knows its real dimensions: clamp the cap, re-apply, announce to viewers.
     el('host-video').addEventListener('loadedmetadata', this.onSourceReady, { signal });
-    el('btn-stop').addEventListener('click', this.stop, { signal });
+    el('btn-stop').addEventListener('click', this.stopSource, { signal });
     el('btn-copy-link').addEventListener('click', this.copyLink, { signal });
     el('btn-copy-link-waiting').addEventListener('click', this.copyLink, { signal });
     this.wireSettings();
@@ -155,7 +145,7 @@ export class HostController {
     if (video) {
       video.contentHint = contentHintFor(this.quality);
       // `once`: a new track per source change would otherwise stack a `stop` listener each time.
-      video.addEventListener('ended', this.stop, { once: true, signal: this.ac.signal }); // "Stop sharing" from the browser chrome
+      video.addEventListener('ended', this.stopSource, { once: true, signal: this.ac.signal }); // "Stop sharing" from the browser chrome, or the shared window closing
     }
     this.applyFps();
     const preview = el<HTMLVideoElement>('host-video');
@@ -171,6 +161,9 @@ export class HostController {
 
     try {
       await this.pushOutgoing(); // build outgoing + hot-swap existing viewers (serialized)
+      // A source arriving after stopSource / a no-source join: wake every viewer held on the paused
+      // screen. Emitted after pushOutgoing so the video track is swapped in before they flip to live.
+      if (!this.paused) for (const peerId of this.viewers.keys()) this.sig.signal(peerId, { control: 'resume' });
       for (const [peerId, entry] of this.viewers) if (!entry.peer) this.offerTo(peerId, entry);
       this.applyVideoQualityAll(); // existing viewers: re-apply with the new source's height
     } finally {
@@ -181,9 +174,16 @@ export class HostController {
   };
 
   // Build the stream peers receive: capture video + processed audio (system / mic / mixed / none).
-  private async buildOutgoing(): Promise<MediaStream | null> {
-    if (!this.stream) return null;
+  private async buildOutgoing(): Promise<MediaStream> {
     const out = new MediaStream();
+    if (!this.stream) {
+      // No source → empty stream; viewers are held on the paused screen. Release the mic capture and
+      // disconnect the graph (the system track it fed is now stopped) so no "mic on" light lingers on
+      // the choose-source screen. The mic *preference* persists — re-acquired on the next source.
+      await this.mixer.build(null, false);
+      this.outgoing = out;
+      return out;
+    }
     const video = this.paused ? null : this.stream.getVideoTracks()[0];
     if (video) out.addTrack(video);
     const systemTrack = this.quality.systemAudio ? (this.stream.getAudioTracks()[0] ?? null) : null;
@@ -221,19 +221,25 @@ export class HostController {
   }
 
   private offerTo(peerId: string, entry: ViewerEntry): void {
-    if (!this.outgoing) return;
+    const out = this.outgoing ?? new MediaStream(); // no source yet → offer an empty (paused) stream
     const peer = new Peer(this.config, { onSignal: (data) => this.sig.signal(peerId, data) });
     entry.peer = peer;
-    // Late joiner during a pause: tell them BEFORE the offer so they never flash 'live'.
-    if (this.paused) this.sig.signal(peerId, { control: 'pause' });
+    // No live video (no source chosen yet, or paused): tell them BEFORE the offer so they land on
+    // the paused screen instead of flashing 'live'.
+    if (!this.videoLive()) this.sig.signal(peerId, { control: 'pause' });
     void peer
-      .offer(this.outgoing, { maxBitrateKbps: this.quality.bitrate * 1000 }) // raises the SDP start/min-bitrate
+      .offer(out, { maxBitrateKbps: this.quality.bitrate * 1000 }) // raises the SDP start/min-bitrate
       .then(() => {
         this.applyVideoQualityTo(entry);
         const h = this.capHeight();
         if (h) this.sig.signal(peerId, { height: h }); // announce the tier ceiling to the new viewer
       })
       .catch(() => {});
+  }
+
+  /** Are viewers currently receiving live video? False with no source or while paused. */
+  private videoLive(): boolean {
+    return !!this.stream && !this.paused;
   }
 
   private togglePause = async (): Promise<void> => {
@@ -503,7 +509,7 @@ export class HostController {
     el('viewers-list').append(row);
     const entry: ViewerEntry = { pseudo, row, peer: null, tier: 'auto' };
     this.viewers.set(peerId, entry);
-    if (this.outgoing) this.offerTo(peerId, entry);
+    this.offerTo(peerId, entry); // always offer — no source yet just means a paused (waiting) viewer
     this.refreshSidebar();
   }
 
@@ -562,6 +568,39 @@ export class HostController {
       waiting.textContent = 'Copy room link';
       waiting.dataset.copied = 'false';
     }, 1600);
+  }
+
+  // Stop the current source but KEEP the room and peers alive: viewers fall back to the paused
+  // (waiting) screen and the host returns to "choose source", able to pick a new source without
+  // recreating the room. Wired to the Stop button and the track's `ended` (browser "Stop sharing",
+  // or the shared window closing). Leaving the room for good goes through the brand logo (goHome).
+  private stopSource = (): void => {
+    if (!this.stream) return; // already sourceless
+    this.stream.getTracks().forEach((t) => t.stop());
+    this.stream = null;
+    this.paused = false; // a fresh source starts live, not paused
+    // Pause the viewers now (synchronous); the rebuild's replaceTrack(null) that drops their video +
+    // audio can follow async — unlike togglePause we don't await it, the paused screen is immediate.
+    void this.pushOutgoing();
+    for (const peerId of this.viewers.keys()) this.sig.signal(peerId, { control: 'pause' });
+    this.resetStage();
+    this.renderSettings(); // "Choose source" label + "no source selected" hint
+  };
+
+  // Reset only the stage to the "no source" empty state (preview, badges, control buttons).
+  // NOT the roster / code / copy / modal — stopSource reuses this and must keep viewers + room alive.
+  private resetStage(): void {
+    const preview = el<HTMLVideoElement>('host-video');
+    preview.srcObject = null;
+    hide(preview);
+    show(el('host-empty'));
+    hide(el('host-stage-meta'));
+    hide(el('host-live-badge'));
+    hide(el('host-paused'));
+    hide(el('host-paused-badge'));
+    hide(el('btn-stop'));
+    hide(el('btn-pause'));
+    hide(el('host-quality-bar'));
   }
 
   private stop = (): void => {

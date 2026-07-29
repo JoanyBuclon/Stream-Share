@@ -140,7 +140,12 @@ export class ViewerController {
         el<HTMLVideoElement>('viewer-video').srcObject = stream;
         if (this.tier !== 'auto') this.sig.signal(this.hostId, { quality: this.tier }); // resync after (re)connect
         this.dispatch({ type: 'connected' });
-        this.playVideo(); // media is ready now — the reliable moment to (re)start playback
+        // Only autoplay when actually live. A viewer that connects during a pause / no-source window
+        // resolves to 'paused'; calling play() on that muted, track-less stream just gets blocked and
+        // surfaces the "click to play" prompt on top of the paused screen. render() drives playback
+        // for the live case (incl. the resume that follows), so this only covers "already live, media
+        // re-arrived" (a renegotiation that doesn't move the UI state, hence no render).
+        if (this.session.ui === 'live') this.playVideo();
       },
       onIceState: (state) => this.onIceState(state),
     });
