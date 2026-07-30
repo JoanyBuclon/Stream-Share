@@ -67,6 +67,23 @@
         Could not reach the server — check your connection and try again.
       </div>
 
+      <!-- Desktop app nudge: revealed by app.ts on desktop browsers only, and hidden inside the
+           desktop app itself (window.native). `order-last` puts it in the grid's second row, first
+           column — the mockup's placement, one column wide so it wraps under the Start card.
+           The whole sentence is the link (the mockup only links the arrow, which would leave the
+           anchor without an accessible name). -->
+      <a
+        id='start-desktop-cta'
+        href='/download'
+        class='order-last text-[13px] leading-[1.55] text-muted-3 transition-colors hover:text-muted-2'
+        hidden
+      >
+        <!-- &#32;: Astro trims the whitespace between text and the element, gluing the arrow. -->
+        On Windows, the desktop app adds per-app audio and its own source picker&#32;<span
+          class='text-muted underline'>→</span
+        >
+      </a>
+
       <!-- join -->
       <div
         class='flex min-h-[190px] flex-col gap-3.5 rounded-2xl border border-white/[0.09] bg-panel p-7 max-sm:min-h-0'
@@ -109,6 +126,6 @@
     class='flex items-center justify-between border-t border-white/[0.05] px-10 py-[22px] font-mono text-[11px] text-muted-4 max-sm:px-5'
   >
     <span>webRTC · direct connection</span>
-    <span>stream share — v0.2.1</span>
+    <span>stream share — v0.3.0</span>
   </footer>
 </section>
