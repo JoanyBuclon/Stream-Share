@@ -543,7 +543,9 @@ export class HostController {
   }
 
   private copyLink = async (): Promise<void> => {
-    const link = `${location.origin}/#${this.code}`;
+    // Desktop shell: share the real web origin, not the app:// one (window.native absent in a browser).
+    const origin = window.native?.appOrigin ?? location.origin;
+    const link = `${origin}/#${this.code}`;
     try {
       await navigator.clipboard.writeText(link);
     } catch {

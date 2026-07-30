@@ -1,13 +1,14 @@
 {
   "name": "stream-share",
   "type": "module",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "engines": {
     "node": ">=22.12.0"
   },
   "scripts": {
     "dev": "astro dev",
     "back": "node --watch signaling/src/index.js",
+    "desktop": "pnpm --ignore-workspace --dir electron start",
     "build": "astro build",
     "preview": "astro preview",
     "astro": "astro",

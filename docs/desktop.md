@@ -51,7 +51,7 @@ d'ensemble, puis le détail des trois qui portent le produit.
 | Fonctionnalité                  | Plafond web levé                                                   | Phase        |
 | ------------------------------- | ------------------------------------------------------------------ | ------------ |
 | **Audio par application**       | `getDisplayMedia` capture le mix système entier, ou rien           | 2 — MVP      |
-| **Sélecteur de source natif**   | Picker Chrome imposé, aucune API web ne liste les fenêtres         | 2 — MVP      |
+| **Sélecteur de source natif**   | Picker Chrome imposé, aucune API web ne liste les fenêtres         | 2 — MVP¹     |
 | **Avertissement HDR**           | Aucune API web ne connaît l'_état_ HDR du compositeur              | 2 — MVP      |
 | **Raccourcis globaux**          | Sandbox navigateur : rien hors de la fenêtre                       | 2 — MVP      |
 | **Réglages mémorisés**          | Rien ne survit proprement d'une session à l'autre                  | 2 — MVP      |
@@ -63,7 +63,10 @@ d'ensemble, puis le détail des trois qui portent le produit.
 | **Contrôle du curseur**         | La contrainte `cursor` est ignorée par les navigateurs             | 3 — natif    |
 
 La **phase 1** n'apporte aucune de ces fonctionnalités : elle emballe l'app web
-actuelle dans Electron (parité stricte) + page `/download` + auto-update. Les
+actuelle dans Electron + page `/download` + auto-update. ¹ En phase 1, faute de
+picker Electron sur Windows, la source est **imposée à l'écran principal** — une
+béquille temporaire levée par le vrai sélecteur en phase 2 (cf.
+[Contraintes Electron](#contraintes-electron-découvertes-au-test-phase-1)). Les
 quatre dernières lignes partagent le prérequis lourd de la **phase 3** —
 **reprendre la main sur les frames vidéo** (cf.
 [Capture native](#capture-native-fps-hdr-encodage-curseur)). Détail des phases :
@@ -303,13 +306,22 @@ L'app charge le build web existant dans une fenêtre Electron. Une **seule
 frontière** avec le natif : `window.native`.
 
 ```
-electron/
-  main.ts        # BrowserWindow, globalShortcut, powerSaveBlocker, auto-update
-  preload.ts     # contextBridge → window.native
-  audio/         # addon N-API : WASAPI process loopback   ← le seul code natif du MVP
-src/             # INCHANGÉ. astro build → dist/, chargé par la fenêtre Electron
-  lib/host.ts    #   → utilise window.native si présent, getDisplayMedia sinon
+electron/                     # sous-projet autonome (lockfile propre, hors workspace, cf. signaling/)
+  src/main.ts                 # BrowserWindow, scheme app://, CSP, nav-lock, auto-update
+  src/preload.ts              # contextBridge → window.native
+  src/config.ts               # PUR (sans import electron) : origine, CSP, nav — testé
+  src/audio/                  # (phase 2) addon N-API : WASAPI process loopback
+  electron-builder.yml        # NSIS + publish GitHub Releases
+src/                          # INCHANGÉ. astro build → dist/, servi par la fenêtre Electron
+  lib/host.ts                 #   → utilise window.native si présent, getDisplayMedia sinon
 ```
+
+**Le front seul est embarqué.** Le paquet ne contient que le build Astro
+(`extraResources: ../dist`) + `out/` ; la seule dépendance runtime est
+`electron-updater`. **Le serveur de signaling n'est pas embarqué** et ne le sera
+jamais : l'app est un client qui parle au signaling déployé (par défaut
+`https://stream.joanybuclon.com`, surchargeable via `SS_APP_ORIGIN` pour viser un
+dev/staging).
 
 **Un seul test, partout : `window.native` présent ou non.** Absent →
 comportement web actuel à l'identique. Présent → sources natives, audio par
@@ -325,10 +337,45 @@ Deux points de friction connus :
 
 1. **Injecter un flux natif dans la `RTCPeerConnection`** (audio PCM en MVP, frames
    vidéo plus tard). Chemin audio confirmé et standard (cf.
-   [Audio § Technique](#technique)). C'est l'objet du spike phase 0.
+   [Audio § Technique](#technique)). C'est l'objet du spike de la phase 2.
 2. **`host.ts` (~565 lignes)** entremêle capture, qualité et DOM. Le coût du port
    n'est pas le WebRTC (`peer.ts`, `signaling.ts`, `settings.ts`, `stats.ts` sont
    purs, sans DOM), c'est cette couche. À dégraisser avant, ou à assumer.
+
+### Contraintes Electron découvertes au test (phase 1)
+
+Trois points ne se devinent pas depuis la doc et conditionnent la coquille. Tous
+sont dans `electron/src/main.ts`, commentés sur place.
+
+- **Le renderer doit tourner sur une origine sûre, pas `file://`.** Le build est
+  servi par un scheme `app://` déclaré *privileged* (`standard: true, secure:
+  true`) **avant** `app.ready`. Sur `file://` l'origine est opaque et
+  `getDisplayMedia`, le presse-papier et `localStorage` cassent tous les trois.
+- **Origine réécrite pour le socket signaling.** Le signaling refuse les upgrades
+  WebSocket dont l'`Origin` n'est pas dans son allow-list anti-CSWSH
+  (`ALLOWED_ORIGINS`, `signaling/src/index.js`). Sous `app://` le navigateur
+  envoie `Origin: app://…` → **401**. La coquille présente donc l'origine web
+  canonique pour ce seul socket. Vérifié : `Origin: app://bundle` → 401,
+  `Origin: https://stream.joanybuclon.com` → 101. Ce n'est pas un vecteur CSWSH :
+  la navigation interne est verrouillée sur `app://` et les liens externes
+  s'ouvrent dans le navigateur système.
+- **`getDisplayMedia` n'a aucun picker sur Windows.** Sans
+  `setDisplayMediaRequestHandler`, l'appel échoue : Electron ne fournit pas de
+  sélecteur, contrairement à Chromium. (`useSystemPicker` existe mais est
+  **macOS 15+ uniquement** — quand il s'applique, le handler n'est pas appelé.)
+  D'où la source imposée en phase 1, ci-dessous.
+
+```
+// ponytail: la source forcée n'est PAS un choix produit, c'est le strict minimum
+// pour que la phase 1 capture quelque chose sans construire la feature n°2.
+```
+
+**Source imposée — phase 1 uniquement.** La coquille capture **l'écran principal**
+(+ audio système via `audio: 'loopback'` quand la page le demande), sans aucun
+choix possible. C'est une **béquille temporaire, pas le comportement cible** : le
+sélecteur visuel (grille écrans **et** fenêtres, vignettes live, icônes d'app)
+est la fonctionnalité n°2, livrée en **phase 2** via `desktopCapturer.getSources`
+sur ce même handler. Le jour où il arrive, cette béquille disparaît.
 
 ## Distribution
 
@@ -426,7 +473,7 @@ moment-là :
 
 | Phase                    | Contenu                                                                                                                                                                    | Sortie                                                                                                                     |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
-| **1 — coquille Electron** | L'app web **actuelle** emballée dans Electron (parité stricte, `window.native` encore absent), **page `/download`**, **auto-update** (`electron-updater`), packaging + job CI, distribution GitHub Releases. Aucune fonctionnalité native. | Un `.exe` qui fait exactement ce que fait le web, se met à jour seul, et se télécharge. Le socle. |
+| **1 — coquille Electron** ✅ | L'app web emballée dans Electron : scheme `app://`, CSP mirrorée, nav-lock, close = quit, **page `/download`** + CTA accueil, **auto-update** (`electron-updater`), packaging NSIS + job CI sur tag `v*`. `window.native` ne porte que `appOrigin`. **Source imposée à l'écran principal** (béquille, cf. ci-dessus). | Un `.exe` qui partage comme le web, se met à jour seul, se télécharge. Le socle. **Validé** : host desktop → viewer Chrome, écran principal + audio système. |
 | **2 — MVP**              | Audio par app (exclusion), grille de sources native, raccourcis globaux, réglages mémorisés, wake lock, notifications rejoint/quitte, avertissement HDR.                  | La version qui « récompense ». **Précédée d'un spike** : prouver que l'audio par process (Discord exclu) entre bien dans la peer connection — sinon la feature n°1 tombe, à réévaluer avant d'écrire le reste. |
 | **3 — capture native**   | WGC/DXGI → injection : FPS garanti, tone-map HDR, encodage hardware, contrôle curseur. Fork architectural, **le vrai gain différentiel avec le web**.                     | Ouvert seulement si une de ces features est réellement demandée.                                                          |
 
