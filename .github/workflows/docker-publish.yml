@@ -183,16 +183,35 @@ jobs:
       - name: Show built artefacts
         run: Get-ChildItem electron/release | Select-Object Name, Length | Format-Table -AutoSize
 
-      # `gh` is preinstalled on the runner. --clobber replaces assets left by an earlier run on
-      # the same tag. The three files are exactly what electron-updater needs.
+      # `gh` is preinstalled on the runner. Since electron-builder no longer publishes, nothing
+      # creates the GitHub Release either — a tag alone doesn't make one — so create it when the
+      # tag has none yet. --clobber replaces assets left by an earlier run on the same tag.
+      # The three files are exactly what electron-updater needs.
       - name: Upload installer to the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Drive control flow with $LASTEXITCODE only: `gh release view` is *expected* to fail
+          # when the release doesn't exist yet, and pwsh 7.4+ would otherwise turn that into a
+          # terminating error before we can react.
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
+
+          $tag = $env:GITHUB_REF_NAME
           $exe = Get-ChildItem electron/release/*.exe -ErrorAction SilentlyContinue
           $map = Get-ChildItem electron/release/*.blockmap -ErrorAction SilentlyContinue
           $yml = Get-ChildItem electron/release/latest.yml -ErrorAction SilentlyContinue
-          if (-not $exe) { throw "no installer in electron/release — nothing to publish" }
-          if (-not $yml) { throw "no latest.yml — the auto-updater would be blind" }
-          gh release upload $env:GITHUB_REF_NAME $exe.FullName $map.FullName $yml.FullName --clobber
+          if (-not $exe) { throw "no installer in electron/release - nothing to publish" }
+          if (-not $yml) { throw "no latest.yml - the auto-updater would be blind" }
+
+          gh release view $tag 1>$null 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "no release for $tag yet - creating it"
+            $notes = (git tag -l --format='%(contents)' $tag | Out-String).Trim()
+            if ($notes) { gh release create $tag --title $tag --notes $notes }
+            else { gh release create $tag --title $tag --generate-notes }
+            if ($LASTEXITCODE -ne 0) { throw "gh release create failed ($LASTEXITCODE)" }
+          }
+
+          gh release upload $tag $exe.FullName $map.FullName $yml.FullName --clobber
           if ($LASTEXITCODE -ne 0) { throw "gh release upload failed ($LASTEXITCODE)" }
