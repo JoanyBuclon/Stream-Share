@@ -1,4 +1,4 @@
-import { app, BrowserWindow, protocol, session, shell, ipcMain, desktopCapturer } from 'electron';
+import { app, BrowserWindow, Menu, protocol, session, shell, ipcMain, desktopCapturer } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -54,6 +54,10 @@ function createWindow(): void {
     width: 1280,
     height: 800,
     backgroundColor: '#0a0a0a', // --color-ink, avoids a white flash before first paint
+    // Packaged, the window and taskbar icons come from the .exe resource (electron-builder embeds
+    // build/icon.png). Unpackaged (`pnpm desktop`) there is no such resource, so point at the same
+    // source file or the run shows Electron's default icon.
+    ...(app.isPackaged ? {} : { icon: path.join(__dirname, '..', 'build', 'icon.png') }),
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -120,6 +124,17 @@ app.whenReady().then(() => {
     },
     { useSystemPicker: true },
   );
+
+  // Windows identity for taskbar grouping — and a hard requirement for toast notifications to
+  // show under the app's name rather than being dropped (phase 2 announces viewers joining).
+  // Must match electron-builder's appId. No-op on other platforms.
+  app.setAppUserModelId('com.joanybuclon.streamshare');
+
+  // No File/Edit/View/Window bar: it's Electron's default menu, not something the product uses.
+  // Windows/Linux keep the native editing shortcuts (Chromium handles Ctrl+C/V/X/A in inputs on
+  // its own). macOS is the exception — those accelerators come FROM the menu there, so shipping
+  // macOS later means restoring a minimal menu with the `editMenu` role rather than null.
+  Menu.setApplicationMenu(null);
 
   createWindow();
 

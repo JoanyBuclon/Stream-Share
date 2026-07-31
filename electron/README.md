@@ -20,6 +20,12 @@ See [`../docs/desktop.md`](../docs/desktop.md) for the full plan.
   source. The real screens/windows picker is phase 2 — see `docs/desktop.md`.
 - Window close quits the app. No tray.
 
+## Icon
+
+`build/icon.png` (512×512, the `public/favicon.svg` mark on an ink background). `build/` is
+electron-builder's default `buildResources` directory, so the icon is picked up with no config
+entry; it converts the PNG to `.ico` for the window and the NSIS installer.
+
 ## Standalone sub-project
 
 Like `signaling/`, this has its own lockfile and is **not** part of the root pnpm workspace.
