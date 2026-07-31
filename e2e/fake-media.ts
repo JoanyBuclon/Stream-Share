@@ -26,6 +26,9 @@ export async function fakeDisplayMedia(page: Page): Promise<void> {
 const FAKE_SOURCES = [
   { id: 'screen:0:0', name: 'Screen 1', kind: 'screen', meta: '2560×1440' },
   { id: 'screen:1:0', name: 'Screen 2', kind: 'screen', meta: '1920×1080' },
+  // 4242 is the one whose owning process resolves (see setAudioCapture); the others stand in for
+  // a window that is not its process's main window, where app-only sound is impossible.
+  { id: 'window:4242:0', name: 'Elden Ring', kind: 'window', meta: '' },
   { id: 'window:11:0', name: 'Google Chrome', kind: 'window', meta: '' },
   { id: 'window:12:0', name: 'Discord', kind: 'window', meta: '' },
 ];
@@ -65,6 +68,29 @@ export async function fakeNative(page: Page, opts: { delaysMs?: number[]; fail?:
           selectSource: async (id: string) => {
             (window as unknown as { __picked?: string }).__picked = id;
           },
+          // Per-app audio. The PCM stream itself isn't faked — there is nothing to assert about
+          // it in a browser — but the exclusion handshake drives the whole settings UI.
+          listAudioApps: async () => [
+            { pid: 4001, name: 'Discord', title: '@someone - Discord' },
+            { pid: 4002, name: 'Spotify', title: 'Spotify Premium' },
+            // Quits between the listing and the click — the shell then answers null.
+            { pid: 4003, name: 'Ghost', title: 'about to exit' },
+          ],
+          setAudioCapture: async (spec: { sourceId?: string; exclude?: string } | null) => {
+            const w = window as unknown as { __audio?: { mode: string; name: string } | null };
+            if (!spec) { w.__audio = null; return null; }
+            if (spec.sourceId) {
+              // Only window:4242:* resolves to an owner — the others stand in for a window that
+              // is not its process's main window, where app-only sound is impossible.
+              if (!spec.sourceId.startsWith('window:4242:')) { w.__audio = null; return null; }
+              w.__audio = { mode: 'include', name: 'Elden Ring' };
+              return { pid: 4444, name: 'Elden Ring' };
+            }
+            if (spec.exclude === 'Ghost') { w.__audio = null; return null; }
+            w.__audio = { mode: 'exclude', name: spec.exclude! };
+            return { pid: spec.exclude === 'Discord' ? 4001 : 4002, name: spec.exclude! };
+          },
+          onAudioChunk: () => () => {},
         },
         configurable: true,
       });

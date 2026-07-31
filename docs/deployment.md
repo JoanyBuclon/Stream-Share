@@ -150,6 +150,7 @@ le réseau `web` (port 8080). Le client se connecte en `wss://` — pas de certi
 | `TRUST_PROXY`     | _(off)_                        | `=1` → lire `X-Forwarded-For` (dernier hop). **Uniquement derrière le proxy.** |
 | `ALLOWED_ORIGINS` | _(vide)_                       | Allow-list d'`Origin` (anti-CSWSH). Vide = pas de contrôle (dev).     |
 | `MAX_VIEWERS`     | `10`                           | Plafond de viewers par salon (au-delà → `join-error: full`).          |
+| `MAX_ROOMS_PER_MIN` | `10`                         | Créations de salon par minute et par IP (anti-abus). Relevé par la suite e2e, qui en ouvre une douzaine depuis une seule IP. |
 
 ```
 // ponytail: pas de secret, pas de base, pas de volume. Deux conteneurs

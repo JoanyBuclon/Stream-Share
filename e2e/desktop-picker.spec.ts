@@ -26,7 +26,7 @@ test('the picker lists screens and windows, filters them, and shares the one pic
   await expect(page.locator('#source-modal')).toBeVisible();
   await expect(page.locator('#settings-modal')).toBeHidden();
   await expect(page.locator('#source-count-screen')).toHaveText('2 available');
-  await expect(page.locator('#source-count-window')).toHaveText('2 available');
+  await expect(page.locator('#source-count-window')).toHaveText('3 available');
   await expect(page.locator('#source-status')).toBeHidden();
 
   // Search filters in place and empties whole groups; the count follows.

@@ -43,8 +43,11 @@ const genId = () => `p${++seq}`;
 // Per-IP rate limit: in-memory sliding window (ponytail: no lib, no Redis).
 // `join` is throttled to make code scanning impractical (32⁶ codes / 30 attempts
 // per minute per IP). IPs come from `clientIp`, so they are real behind the proxy.
+// MAX_ROOMS_PER_MIN exists for the e2e suite, which opens a dozen rooms from one IP in under a
+// minute and would otherwise trip this limit — a green-to-red flake that says nothing about the
+// code under test. Production keeps the default (same pattern as MAX_VIEWERS above).
 const RATE = {
-  create: { log: new Map(), max: 10, window: 60_000 },
+  create: { log: new Map(), max: Number(process.env.MAX_ROOMS_PER_MIN) || 10, window: 60_000 },
   join: { log: new Map(), max: 30, window: 60_000 },
 };
 // Cumulative counters since startup, exposed by /health. The rejections are what tell whether

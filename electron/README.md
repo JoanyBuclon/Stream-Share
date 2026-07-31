@@ -1,8 +1,8 @@
 # StreamShare — desktop shell (Electron)
 
 Wraps the existing web build in an Electron window, adds auto-update and a downloadable
-installer (phase 1), plus the custom source picker (phase 2). Per-app audio is the next
-phase-2 feature. See [`../docs/desktop.md`](../docs/desktop.md) for the full plan.
+installer (phase 1), plus the custom source picker and per-app audio (phase 2).
+See [`../docs/desktop.md`](../docs/desktop.md) for the full plan.
 
 ## How it works
 
@@ -22,6 +22,18 @@ phase-2 feature. See [`../docs/desktop.md`](../docs/desktop.md) for the full pla
   explicitly picked. No "nothing selected" fallback: an unanswered request fails. See
   `docs/desktop.md`.
 - Window close quits the app. No tray.
+
+## The native audio addon
+
+Per-app audio uses `loopback-capture`'s prebuilt `.node` (WASAPI process loopback). It is loaded
+**by absolute path**, not via `require('loopback-capture')`: the package's `dist/index.cjs` finds
+the same file through the `bindings` package, so importing it normally would mean shipping a
+`node_modules` tree — and `electron-builder.yml`'s `files: ['!node_modules/**']` would silently
+drop it, producing a green build and an installer that crashes on first use. `extraResources`
+copies the bare binary next to `dist/` instead, so `app.asar` stays at our own three files.
+
+The version is **pinned exactly** (no caret): it is an unsandboxed native binary running in the
+privileged main process and ending up signed inside the installer.
 
 ## Icon
 

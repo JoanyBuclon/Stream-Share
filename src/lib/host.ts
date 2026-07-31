@@ -11,6 +11,7 @@ import { WakeLock } from './wakelock.ts';
 import { reconcileRoster } from './roster.ts';
 import { el, hook, show, hide, setText, initials } from './dom.ts';
 import { pickSource } from './source-picker.ts';
+import { NativeAudio } from './native-audio.ts';
 import {
   applyPreset,
   effectiveScale,
@@ -54,6 +55,18 @@ export class HostController {
   private outgoing: MediaStream | null = null; // what peers receive (video + processed audio)
   private paused = false; // when true, buildOutgoing drops the video track
   private sourceId: string | null = null; // desktop only: last pick, preselected in the picker
+  // Desktop only, session state — deliberately NOT in `Quality`: that is pure quality math the
+  // presets spread over, and an app name has no business being persisted with a bitrate.
+  // The single native capture, if any. One object rather than loose fields: the epoch guard has
+  // to reconcile the whole thing across an await, and WASAPI allows one mode at a time anyway.
+  private audio: { mode: 'include' | 'exclude'; name: string; pid: number } | null = null;
+  private audioSeq = 0; // guards the round trip against a faster second click
+  // Sticky: the shared window has no owning process, so app-only sound is impossible for it. Kept
+  // as state, not just as text — the pick happens before the panel opens, and opening it resets
+  // the hint line.
+  private audioNoOwner = false;
+  private readonly nativeAudio = new NativeAudio();
+  private offAudioChunk: (() => void) | null = null;
   private quality: Quality = { ...DEFAULT_QUALITY };
   private readonly mixer = new AudioMixer();
   private readonly audioQueue = serial(); // serializes outgoing rebuilds — no interleaving
@@ -133,7 +146,15 @@ export class HostController {
         console.error('stream-share: the source picker failed to open', e);
         setText('settings-source-hint', 'capture failed — try another source');
       }
-      if (picked) this.sourceId = picked; // dismissed → keep the previous pick preselected
+      if (picked) {
+        this.sourceId = picked; // dismissed → keep the previous pick preselected
+        // The audio follows the source. Done HERE and not in setStream: `this.sourceId` is only
+        // committed once pickSource resolves, so anything under setStream still sees the previous
+        // window and would capture the wrong app's sound on every change after the first.
+        // A window shares that app alone; a screen drops back to the system mix (any mute the
+        // user had set is re-picked from the panel, rather than silently re-armed).
+        void this.setAudio(picked.startsWith('window:') ? { sourceId: picked } : null);
+      }
       // Cancelled: put back the panel the picker replaced, or the user lands on a bare stage with
       // no way back to the quality settings. Not after teardown — that resolves null too, and a
       // dialog opened then would sit over the next screen (see destroy()).
@@ -220,7 +241,15 @@ export class HostController {
     }
     const video = this.paused ? null : this.stream.getVideoTracks()[0];
     if (video) out.addTrack(video);
-    const systemTrack = this.quality.systemAudio ? (this.stream.getAudioTracks()[0] ?? null) : null;
+    // Excluding an app swaps the source of "system audio": the shell's WASAPI capture (the whole
+    // mix minus that app's process tree) instead of the loopback track getDisplayMedia handed us.
+    // The loopback track stays alive and simply isn't used — exactly what turning systemAudio off
+    // already does — so toggling exclusion never re-runs capture() and never disturbs viewers.
+    const systemTrack = !this.quality.systemAudio
+      ? null
+      : this.audio
+        ? this.nativeAudio.track()
+        : (this.stream.getAudioTracks()[0] ?? null);
     let mixed: MediaStreamTrack | null;
     try {
       mixed = await this.mixer.build(systemTrack, this.quality.mic);
@@ -394,10 +423,14 @@ export class HostController {
     this.renderSettings(); // fill state (incl. aria-pressed) before the dialog enters the a11y tree
     const modal = el<HTMLDialogElement>('settings-modal');
     if (!modal.open) modal.showModal(); // showModal, not show(): focus trap + Escape + inert background
+    void this.renderAudioApps(); // async (a ~240 ms process listing) — the panel opens without it
   };
   private closeSettings = (): void => {
     const modal = el<HTMLDialogElement>('settings-modal');
     if (modal.open) modal.close(); // Escape closes it natively too; this covers the buttons/scrim
+    // Window titles are documents and chat subjects, painted on a screen that is being shared
+    // full-screen. They have no reason to outlive the panel.
+    el('audio-apps-list').replaceChildren();
   };
 
   private applyPresetChoice(name: PresetName): void {
@@ -433,9 +466,149 @@ export class HostController {
 
   private toggleSystemAudio = async (): Promise<void> => {
     this.quality = { ...this.quality, systemAudio: !this.quality.systemAudio };
+    // No point running a WASAPI client for audio nobody receives; setAudio finishes the job.
+    if (!this.quality.systemAudio && this.audio) return void (await this.setAudio(null));
     await this.pushOutgoing();
     this.renderSettings();
   };
+
+  // --- per-app audio (desktop only) ---
+
+  /** Point the native capture at something, or stop it with `null`.
+   *
+   *  `{ sourceId }` — the shared window's app alone. `{ exclude }` — everything but that app.
+   *  Only one can be live: WASAPI takes a single process tree, include OR exclude. */
+  private setAudio = async (spec: { sourceId: string } | { exclude: string } | null): Promise<void> => {
+    const native = window.native;
+    if (!native) return;
+    // Rows stay clickable during the round trip. Without this, a first call that resolves to
+    // nothing (app quit) can land AFTER a second that succeeded and wipe its state: the panel
+    // would say nothing is muted while the shell is actively excluding.
+    const mine = ++this.audioSeq;
+    let got: { pid: number; name: string } | null;
+    try {
+      got = await native.setAudioCapture(spec);
+    } catch {
+      got = null; // the shell couldn't start the capture — fall back to the ordinary loopback
+    }
+    if (mine !== this.audioSeq || this.ac.signal.aborted) return;
+    this.audio = spec && got ? { mode: 'sourceId' in spec ? 'include' : 'exclude', ...got } : null;
+    // Asking for "this app alone" and silently getting everything is the worst outcome here, so
+    // say it. MainWindowHandle names one window per process: a second top-level window (a Chrome
+    // popout, a second editor) has no owner to resolve.
+    this.audioNoOwner = !!spec && 'sourceId' in spec && !got;
+    if (this.audioNoOwner) setText('audio-apps-hint', AUDIO_NO_OWNER);
+
+    if (this.audio && !this.offAudioChunk) {
+      this.offAudioChunk = native.onAudioChunk((chunk) => this.nativeAudio.push(chunk));
+    } else if (!this.audio && this.offAudioChunk) {
+      this.offAudioChunk();
+      this.offAudioChunk = null;
+      this.nativeAudio.teardown();
+    }
+    this.markAudioRows(); // in place: re-listing would cost a ~240 ms process spawn per click
+    await this.pushOutgoing(); // rebuild with the other system track + hot-swap every viewer
+    this.renderSettings();
+  };
+
+  /** Reflect the current capture onto the rows already in the DOM, and lock them when native
+   *  audio would do nothing — with system audio off, or before a source exists, buildOutgoing
+   *  never reaches the native track, so a live capture would be pure waste behind a UI claiming
+   *  otherwise. */
+  private markAudioRows(): void {
+    const usable = this.quality.systemAudio && !!this.stream;
+    const current = this.audio;
+    for (const row of document.querySelectorAll<HTMLButtonElement>('#audio-apps-list [data-mode]')) {
+      const mode = row.dataset.mode;
+      const active = current
+        ? mode === current.mode && (mode === 'include' || row.dataset.app === current.name)
+        : mode === 'none';
+      row.dataset.active = String(active);
+      row.setAttribute('aria-pressed', String(active));
+      row.disabled = !usable;
+      row.classList.toggle('pointer-events-none', !usable);
+      row.classList.toggle('opacity-40', !usable);
+    }
+    if (!usable) {
+      setText('audio-apps-hint', this.stream ? 'turn system audio on to change this' : 'pick a source first');
+    }
+  }
+
+  /** (Re)draw the audio rows. Refreshed on every panel open, which is also how a restarted app
+   *  (Discord auto-updates) gets its new pid picked up — exclusion is keyed on the name. */
+  private async renderAudioApps(): Promise<void> {
+    const native = window.native;
+    if (!native) return;
+    show(el('audio-apps-section'));
+    // The host DOM is reused across sessions and openings: without this, the previous list stays
+    // on screen for the ~240 ms of the listing, with its old selection highlighted and its click
+    // listeners already dead (they went with the previous AbortController).
+    el('audio-apps-list').replaceChildren();
+    setText('audio-apps-hint', this.audioNoOwner ? AUDIO_NO_OWNER : AUDIO_HINT);
+    let apps: NativeAudioApp[];
+    try {
+      apps = await native.listAudioApps();
+    } catch {
+      setText('audio-apps-hint', 'could not list running apps');
+      return;
+    }
+    if (this.ac.signal.aborted) return;
+
+    // Re-arm if the muted app restarted (Discord auto-updates itself): its pid moved, and the
+    // shell would go on excluding a dead one — the echo would come back with nothing to show for
+    // it. Only when the pid actually changed, so opening the panel doesn't churn every viewer.
+    const muted = this.audio?.mode === 'exclude' ? this.audio : null;
+    if (muted) {
+      const still = apps.find((a) => a.name === muted.name);
+      if (still?.pid !== muted.pid) void this.setAudio(still ? { exclude: muted.name } : null);
+    }
+
+    const tpl = el<HTMLTemplateElement>('tpl-audio-app').content.firstElementChild;
+    if (!tpl) throw new Error('stream-share: empty #tpl-audio-app');
+    const sourceId = this.sourceId;
+    const rows: Array<{ mode: 'include' | 'none' | 'exclude'; app: string; label: string; note: string }> = [];
+    // Sharing a window: offer "that app alone". One more row rather than a toggle — the section is
+    // already a single-select list, which is exactly the shape of the one-tree API constraint.
+    if (sourceId?.startsWith('window:')) {
+      rows.push({
+        mode: 'include',
+        app: '',
+        label: this.audio?.mode === 'include' ? `Only ${this.audio.name}'s sound` : "Only the shared app's sound",
+        note: 'viewers hear this app alone',
+      });
+    }
+    rows.push({ mode: 'none', app: '', label: 'No app muted', note: 'viewers hear everything' });
+    for (const a of apps) rows.push({ mode: 'exclude', app: a.name, label: a.name, note: a.title || 'running' });
+
+    el('audio-apps-list').replaceChildren(
+      ...rows.map((row) => {
+        const node = tpl.cloneNode(true) as HTMLElement;
+        node.dataset.mode = row.mode; // the keys markAudioRows compares against
+        node.dataset.app = row.app;
+        node.setAttribute(
+          'aria-label',
+          row.mode === 'include' ? row.label : row.mode === 'exclude' ? `Mute ${row.app} for viewers` : 'Mute no app',
+        );
+        hook(node, 'icon').textContent = row.mode === 'exclude' ? initials(row.app) : row.mode === 'include' ? '►' : '—';
+        hook(node, 'name').textContent = row.label;
+        hook(node, 'note').textContent = row.note;
+        node.addEventListener(
+          'click',
+          () =>
+            void this.setAudio(
+              row.mode === 'include' && sourceId
+                ? { sourceId }
+                : row.mode === 'exclude'
+                  ? { exclude: row.app }
+                  : null,
+            ),
+          { signal: this.ac.signal },
+        );
+        return node;
+      }),
+    );
+    this.markAudioRows();
+  }
 
   private toggleMic = async (): Promise<void> => {
     this.quality = { ...this.quality, mic: !this.quality.mic };
@@ -615,6 +788,10 @@ export class HostController {
     this.stream.getTracks().forEach((t) => t.stop());
     this.stream = null;
     this.paused = false; // a fresh source starts live, not paused
+    // Same rule as turning system audio off: no WASAPI client for audio nobody receives. With no
+    // source, buildOutgoing drops the audio entirely, so the capture would just burn a native
+    // thread and ~100 IPC messages a second for nothing.
+    if (this.audio) void this.setAudio(null);
     // Pause the viewers now (synchronous); the rebuild's replaceTrack(null) that drops their video +
     // audio can follow async — unlike togglePause we don't await it, the paused screen is immediate.
     void this.pushOutgoing();
@@ -658,11 +835,24 @@ export class HostController {
     for (const entry of this.viewers.values()) entry.peer?.close();
     this.viewers.clear();
     this.mixer.teardown();
+    // A native capture keeps a WASAPI client and an IPC listener alive across sessions; the
+    // AbortController above doesn't reach either.
+    this.offAudioChunk?.();
+    this.offAudioChunk = null;
+    this.nativeAudio.teardown();
+    if (this.audio) void window.native?.setAudioCapture(null);
+    this.audio = null;
     this.stream?.getTracks().forEach((t) => t.stop());
     this.stream = null;
     this.outgoing = null;
   }
 }
+
+/** Default text under "Per-app audio" — restored on each open so one transient listing failure
+ *  doesn't leave its error sitting above a perfectly good list for the rest of the session. */
+const AUDIO_HINT = 'only apps with an open window are listed';
+/** Shown when a shared window has no resolvable owning process — see setAudio. */
+const AUDIO_NO_OWNER = "this window has no app audio of its own — sharing all system sound";
 
 export function parseRes(v: string): ResolutionTarget {
   return Number(v) as ResolutionTarget;

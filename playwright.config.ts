@@ -30,12 +30,19 @@ export default defineConfig({
     // merges in, so the fake-media flags still apply.
     { name: 'mobile', use: { ...devices['Pixel 7'] }, testMatch: /mobile\.spec\.ts/ },
   ],
-  // Locally these reuse the already-running dev/signaling servers; in CI Playwright starts them.
+  // Playwright starts these; locally the astro one reuses an already-running dev server.
   webServer: [
     {
       command: 'node signaling/src/index.js',
       port: 8080,
-      reuseExistingServer: !process.env.CI,
+      // The suite creates more rooms per minute from one IP than the production anti-abuse limit
+      // allows, so the run must raise it — otherwise later specs fail on a missing room code and
+      // look like a regression in whatever they were testing.
+      env: { MAX_ROOMS_PER_MIN: '100' },
+      // Never reused, unlike astro below: a signaling already started by `pnpm back` would keep
+      // the default 10 and bring the flake back. Owning it here means a stray one fails loudly on
+      // the port instead of quietly at the limit.
+      reuseExistingServer: false,
     },
     {
       command: 'pnpm exec astro dev --port 4321',

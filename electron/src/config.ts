@@ -6,6 +6,58 @@
 /** Production web origin the shell points at when no override is set. */
 export const PROD_ORIGIN = 'https://stream.joanybuclon.com';
 
+/** An app the user could exclude from the shared audio. `pid` is the ROOT process — WASAPI
+ *  excludes a process *tree*, and a Chromium app renders its audio in a child service process. */
+export interface AudioApp {
+  pid: number;
+  name: string;
+  title: string;
+}
+
+/** The window handle inside a `desktopCapturer` window id (`window:<HWND>:<n>`), or null for a
+ *  screen source or anything unparseable. Verified: that middle segment matches a process's
+ *  `MainWindowHandle`, which is how a captured window is traced back to the app that plays its
+ *  sound (6/6 open windows). Only the format is parsed here — the lookup lives in main.ts, which
+ *  is the side that holds the authoritative source id. */
+export function hwndFromSourceId(id: string): number | null {
+  const [kind, handle] = id.split(':');
+  if (kind !== 'window') return null;
+  const n = Number(handle);
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
+}
+
+/** Parse the process list PowerShell hands back (see listAudioApps in main.ts).
+ *
+ *  Everything here is defensive on purpose: the payload is whatever a shell produced, and
+ *  `ConvertTo-Json` collapses a single result to an object instead of a one-element array. Our
+ *  own process is dropped — excluding StreamShare's own tree would mute the very thing that
+ *  cannot be making noise, and picking it is only ever a mistake. */
+export function parseAudioApps(json: string, ownPid: number): AudioApp[] {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(json);
+  } catch {
+    return [];
+  }
+  const rows: unknown[] = Array.isArray(raw) ? raw : raw && typeof raw === 'object' ? [raw] : [];
+  const apps: AudioApp[] = [];
+  // Two windows of the same app (two Chrome profiles, two Notepads) are two root pids under one
+  // name. The selection is keyed on the name and WASAPI excludes ONE tree, so a second row would
+  // be a lie: picking it would mute only the first instance while the UI claimed otherwise.
+  // Documented as a real limitation rather than papered over.
+  const seen = new Set<string>();
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') continue;
+    const { Id, ProcessName, MainWindowTitle } = row as Record<string, unknown>;
+    if (typeof Id !== 'number' || !Number.isInteger(Id) || Id <= 0 || Id === ownPid) continue;
+    if (typeof ProcessName !== 'string' || !ProcessName || seen.has(ProcessName)) continue;
+    seen.add(ProcessName);
+    apps.push({ pid: Id, name: ProcessName, title: typeof MainWindowTitle === 'string' ? MainWindowTitle : '' });
+  }
+  // Stable, name-ordered so the list doesn't reshuffle between two openings of the panel.
+  return apps.sort((a, b) => a.name.localeCompare(b.name));
+}
+
 /** Web origin to target: env override (dev/staging) else production. */
 export function resolveAppOrigin(env: NodeJS.ProcessEnv = process.env): string {
   return env.SS_APP_ORIGIN?.trim() || PROD_ORIGIN;

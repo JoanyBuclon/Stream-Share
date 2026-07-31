@@ -17,7 +17,7 @@
   },
   "dependencies": {
     "electron-updater": "^6.3.9",
-    "loopback-capture": "^2.0.0"
+    "loopback-capture": "2.0.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

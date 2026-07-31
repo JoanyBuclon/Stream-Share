@@ -50,7 +50,7 @@ d'ensemble, puis le détail des trois qui portent le produit.
 
 | Fonctionnalité                  | Plafond web levé                                                   | Phase        |
 | ------------------------------- | ------------------------------------------------------------------ | ------------ |
-| **Audio par application**       | `getDisplayMedia` capture le mix système entier, ou rien           | 2 — MVP      |
+| **Audio par application** ✅     | `getDisplayMedia` capture le mix système entier, ou rien           | 2 — livré    |
 | **Sélecteur de source natif** ✅ | Picker Chrome imposé, aucune API web ne liste les fenêtres         | 2 — livré¹   |
 | **Avertissement HDR**           | Aucune API web ne connaît l'_état_ HDR du compositeur              | 2 — MVP      |
 | **Raccourcis globaux**          | Sandbox navigateur : rien hors de la fenêtre                       | 2 — MVP      |
@@ -87,34 +87,57 @@ muter Discord, donc en vocal les viewers s'entendent en double.
 En web, les trois modes de partage ont trois comportements audio incohérents,
 dont un cassé :
 
-| Source partagée   | Web aujourd'hui                   | Desktop                                             |
-| ----------------- | --------------------------------- | --------------------------------------------------- |
-| Onglet navigateur | audio de l'onglet seul            | ⚠️ **régression** — voir plus bas                   |
-| Écran             | tout le son système, sans recours | tout le son système **moins les apps décochées** ✅ |
-| **Fenêtre / app** | **rien, ou tout le système** ❌   | **le son de cette app, et rien d'autre** ✅         |
+| Source partagée   | Web aujourd'hui                   | Desktop                                            |
+| ----------------- | --------------------------------- | -------------------------------------------------- |
+| Onglet navigateur | audio de l'onglet seul            | ⚠️ **régression** — voir plus bas                  |
+| Écran             | tout le son système, sans recours | tout le son système **moins une app choisie** ✅   |
+| **Fenêtre / app** | **rien, ou tout le système** ❌   | **le son de cette app, et rien d'autre** ✅        |
 
-Le desktop lie l'audio à la source vidéo :
+**L'audio suit la source vidéo**, automatiquement :
 
-- **Source = une app / fenêtre** → on capture le loopback de **ce process** et de
-  ses enfants. Un seul son, le bon, sans rien configurer.
-- **Source = un écran** → tout le système, **moins une liste d'exclusion**.
+- **Source = une fenêtre** → on capture l'arbre de processus de cette app **et
+  rien d'autre**, sans rien configurer. C'est appliqué au moment du choix de la
+  source, pas au moment d'ouvrir les réglages.
+- **Source = un écran** → tout le système, **moins une app** qu'on désigne.
 
-C'est **le même panneau** dans les deux cas — la liste des apps qui émettent du
-son, avec des cases — seule la pré-sélection change selon la source. On peut
-toujours rattraper à la main : partager la fenêtre du jeu **et** cocher Spotify,
-ou partager l'écran **et** décocher Discord.
+Un repli existe dans les deux sens : le panneau liste « uniquement le son de
+&lt;app&gt; », « aucune app coupée », puis les apps à couper — une seule ligne
+active à la fois, ce qui est exactement la forme de la contrainte WASAPI (un seul
+arbre de processus, en inclusion **ou** en exclusion). Partager le jeu **et**
+couper Spotify reste donc impossible.
+
+**Le lien fenêtre → process est gratuit** : l'identifiant `desktopCapturer` d'une
+fenêtre est `window:<HWND>:<n>`, et ce HWND est celui que `MainWindowHandle`
+expose — vérifié sur 6 fenêtres sur 6, Discord compris. La résolution vit dans le
+main process, seul endroit qui détient l'identifiant à jour au moment du besoin.
 
 #### Le modèle : liste d'exclusion
 
-En mode écran, **tout le son système part par défaut** (comportement web actuel,
-rien de nouveau à comprendre), et on **décoche ce qu'on veut taire**. Les clients
-vocaux connus (`Discord`, `TeamSpeak`, `Mumble`…) sont **pré-décochés** : le cas
-qui a motivé toute l'app se règle sans toucher à quoi que ce soit.
+**Un seul arbre de processus à la fois**, en inclusion ou en exclusion : c'est ce
+que l'API autorise, et c'est ce qui décide de l'UI. Pas de cases à cocher
+multiples comme dans la maquette, ni de pré-décochage des clients vocaux — une
+liste à choix unique.
 
-La liste d'inclusion (rien ne part tant qu'on n'a pas choisi) évite la fuite
-accidentelle d'une notification, mais impose un clic à chaque session pour un
-risque que le web nous fait déjà courir. On ne dégrade pas l'ergonomie pour un
-problème qu'on n'a jamais eu.
+Limites assumées, toutes constatées :
+
+- **Une seule app à la fois.** L'API ne sait pas faire plus.
+- **Une app par nom d'exécutable.** Deux fenêtres de la même app (deux profils
+  Chrome, deux Notepad) sont deux PID racines sous un même nom ; la liste n'en
+  montre qu'un, et c'est cette instance-là qui est tue. Afficher les deux serait
+  mentir, puisqu'on ne peut en exclure qu'une.
+- **Seules les apps avec une fenêtre visible sont listées** — c'est ce qui donne
+  le PID racine gratuitement (voir Technique). Discord réduit dans la barre des
+  tâches en sort donc, ce qui est son état le plus courant. L'UI le dit.
+- **Toutes les fenêtres n'ont pas de process propriétaire résoluble.**
+  `MainWindowHandle` ne nomme **qu'une** fenêtre par process : une deuxième
+  fenêtre de haut niveau (un pop-out Chrome, un second éditeur) n'a aucune
+  correspondance. Partager celle-là bascule sur le son système complet, et l'UI
+  l'annonce plutôt que de prétendre isoler l'app.
+- **Si l'app exclue redémarre** (Discord se met à jour tout seul), son PID change.
+  Rouvrir le panneau ré-arme l'exclusion sur le nouveau PID ; entre les deux, elle
+  redevient audible. Pas de surveillance de process : mesuré, la capture **survit**
+  à la mort de la cible et le reste du son continue de passer — les viewers ne
+  tombent jamais dans le silence.
 
 ```
 // ponytail: liste d'exclusion, pas de mixer par app. Des sliders de volume par
@@ -125,15 +148,33 @@ problème qu'on n'a jamais eu.
 #### Technique
 
 - **Capture** : WASAPI process loopback
-  (`AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`, Windows 10 build 20348+). Le
-  paquet npm `application-loopback` (C++ N-API, maintenu) fait déjà l'include /
-  exclude **par PID et sa descendance** — ce qui couvre Discord, dont le rendu
-  audio vit dans un process enfant.
-- **Injection dans WebRTC** : addon → `AudioWorklet` →
-  `MediaStreamAudioDestinationNode` → `addTrack`, mixé par l'`audio.ts` existant
-  qui sait déjà mélanger système + micro. **Ne pas** passer par
-  `MediaStreamTrackGenerator` (breakout box) : non-standard, Chromium seul, refusé
-  par Mozilla — et il n'existe pas d'`AudioTrackGenerator`.
+  (`AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`, Windows 10 build 20348+), via
+  `loopback-capture` (C++ N-API — successeur de `application-loopback`, déprécié).
+  `start(pid, includeProcessTree, cb)` : le booléen à `false` sélectionne
+  l'exclusion. Format figé dans le C++ : **PCM 48 kHz, 16 bits, stéréo,
+  entrelacé**, par paquets de 1920 octets = 10 ms (~100 callbacks/s). Le 48 kHz
+  tombe pile sur l'`AudioContext` d'`audio.ts` : **aucun rééchantillonnage** nulle
+  part. L'addon **jette les buffers silencieux** (seuil −70 dB) : le flux n'est
+  pas continu, un consommateur qui attend des données en permanence se fige.
+- **Énumération** : `Get-Process | Where MainWindowHandle -ne 0` (PowerShell, un
+  spawn de ~240 ms à l'ouverture du panneau). Le filtre sur la fenêtre visible
+  donne **exactement le PID racine** — vérifié : le Discord fenêtré est le parent
+  de ses cinq autres process. `tasklist /V` ferait pareil mais met **15 s** (il
+  résout les comptes utilisateur).
+- **Injection dans WebRTC** : chaque paquet de 10 ms est ordonnancé comme un
+  `AudioBufferSourceNode` dans un `MediaStreamAudioDestinationNode`, puis mixé par
+  l'`audio.ts` existant, qui le reçoit comme une piste système ordinaire — **il
+  n'a pas été touché**. Pas d'`AudioWorklet` : il faudrait un fichier séparé dans
+  `public/` que Vite ne bundle pas (donc non testable), et l'abandon des buffers
+  silencieux rend l'ordonnancement *plus* simple qu'un worklet, qui devrait
+  synthétiser du silence. **Ne pas** passer par `MediaStreamTrackGenerator`
+  (breakout box) : non-standard, Chromium seul, refusé par Mozilla — et il
+  n'existe pas d'`AudioTrackGenerator`.
+- **Packaging** : `extraResources` copie le **`.node` nu**, requis par chemin
+  absolu. Surtout pas `require('loopback-capture')` : son `dist/index.cjs` passe
+  par le paquet `bindings`, donc l'embarquer traînerait un `node_modules` dans
+  l'installeur — et une CI verte livrerait un binaire qui plante. `app.asar` reste
+  à trois fichiers.
 
 #### La régression à assumer : les onglets de navigateur
 
@@ -141,20 +182,24 @@ Le loopback WASAPI capture un **process**, or un navigateur rend l'audio de tous
 ses onglets dans un même process de service audio. Donc **partager un onglet
 Chrome depuis l'app donnera le son de tout Chrome**, là où le web isole l'onglet.
 C'est le seul point où le navigateur fait mieux, et aucun framework n'y change
-rien. Mitigation : quand la source est une fenêtre de navigateur connu, **l'UI le
-dit** au lieu de laisser découvrir.
+rien. **Pas encore mitigé** : l'UI ne signale pas qu'une source est une fenêtre de
+navigateur. À faire si ça mord.
 
-#### À valider au spike (phase 0)
+#### Spike (phase 0) — répondu, mesuré
 
-- l'exclusion porte sur un PID + descendance : il faut résoudre « l'app Discord »
-  → le bon PID racine, **et tenir le cas où l'app redémarre** en cours de session
-  (le PID change, l'exclusion doit suivre le nom d'exécutable) ;
-- **lister en temps réel** les apps qui émettent du son pour peupler le panneau :
-  énumération WASAPI distincte de la capture, que `application-loopback` ne fournit
-  pas forcément ;
-- capture-t-on quelque chose en ciblant le PID d'une fenêtre de navigateur, vu que
-  le rendu audio vit dans un process de service séparé (lié à la régression
-  ci-dessus).
+- **Le risque n°1 n'existe pas.** On craignait qu'en ciblant le PID racine d'une
+  app multi-process (Discord, Chrome), le son rendu par son process de service
+  audio séparé échappe à l'exclusion. Mesuré sur une vraie app Chromium :
+  INCLURE l'arbre du racine = 396 paquets, l'EXCLURE = **0**. La sémantique
+  d'arbre couvre bien le service audio. Discord étant une app Electron, le cas
+  motivant est couvert.
+- **Résoudre l'app → PID racine est gratuit** : le filtre « a une fenêtre
+  visible » le donne (voir Technique). Le redémarrage est absorbé à la réouverture
+  du panneau.
+- **Pas d'énumération WASAPI des apps qui émettent** : on liste les apps avec une
+  fenêtre, pas celles qui jouent du son. Suffisant — on cherche Discord, pas un
+  VU-mètre.
+- L'addon **tourne sous Electron**, pas seulement sous Node.
 
 ### Sélecteur de source natif
 
@@ -559,7 +604,7 @@ moment-là :
 | Phase                    | Contenu                                                                                                                                                                    | Sortie                                                                                                                     |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
 | **1 — coquille Electron** ✅ **livrée** | L'app web emballée dans Electron : scheme `app://`, CSP mirrorée, nav-lock, pas de menu, icône, close = quit, **page `/download`** + CTA accueil, **auto-update** câblé, packaging NSIS + job CI sur tag `v*.*.*`. `window.native` ne porte que `appOrigin`. **Source imposée à l'écran principal** (béquille, cf. ci-dessus). | **Validé de bout en bout** : installeur téléchargé depuis la Release, app installée, partage host desktop → viewer Chrome. Reste non prouvé : la mise à jour automatique (deux versions nécessaires). |
-| **2 — MVP**              | Audio par app (exclusion), **grille de sources native ✅**, raccourcis globaux, réglages mémorisés, wake lock, notifications rejoint/quitte, avertissement HDR.            | La version qui « récompense ». Livrée par morceaux, le sélecteur en premier. Le spike audio est passé : `loopback-capture@2.0.0` sort du PCM 48 kHz / 16 bits / stéréo par paquets de 10 ms, et expose bien le mode **exclusion** — donc la feature n°1 tient. |
+| **2 — MVP**              | **Audio par app (exclusion) ✅**, **grille de sources native ✅**, raccourcis globaux, réglages mémorisés, wake lock, notifications rejoint/quitte, avertissement HDR.            | La version qui « récompense ». Livrée par morceaux, le sélecteur en premier. Le spike audio est passé : `loopback-capture@2.0.0` sort du PCM 48 kHz / 16 bits / stéréo par paquets de 10 ms, et expose bien le mode **exclusion** — donc la feature n°1 tient. |
 | **3 — capture native**   | WGC/DXGI → injection : FPS garanti, tone-map HDR, encodage hardware, contrôle curseur. Fork architectural, **le vrai gain différentiel avec le web**.                     | Ouvert seulement si une de ces features est réellement demandée.                                                          |
 
 **À dire franchement : au sortir de la phase 1, l'app n'apporte rien qu'un

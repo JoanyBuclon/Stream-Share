@@ -313,6 +313,25 @@
 
         <div class="h-px bg-white/[0.07]"></div>
 
+        <!-- per-app audio — desktop only (revealed by host.ts when window.native exists).
+             The mockup draws one on/off checkbox per app; WASAPI process loopback excludes a
+             single process tree, so this is a single-select "which app to mute" instead, styled
+             like the source picker's tiles for consistency. -->
+        <div id="audio-apps-section" class="flex flex-col gap-3" hidden>
+          <div class="flex flex-wrap items-start justify-between gap-4 gap-y-1">
+            <div>
+              <div class="text-[13px] text-fg-dim">Per-app audio</div>
+              <div class="mt-0.5 font-mono text-[10.5px] text-muted-3">mute one app for your viewers</div>
+            </div>
+            <span
+              id="audio-apps-hint"
+              class="max-w-[330px] text-right font-mono text-[10.5px] leading-[1.5] text-muted-3"
+              >only apps with an open window are listed</span
+            >
+          </div>
+          <div id="audio-apps-list" class="flex flex-col gap-[5px]"></div>
+        </div>
+
         <!-- audio -->
         <div class="flex flex-wrap items-center justify-between gap-4 gap-y-2">
           <span class="text-[13px] text-fg-dim">Audio</span>
@@ -416,6 +435,29 @@
       </div>
     </div>
   </dialog>
+
+  <!-- template: one per-app audio row (cloned by src/lib/host.ts) -->
+  <template id="tpl-audio-app">
+    <button
+      data-active="false"
+      aria-pressed="false"
+      class="group flex w-full cursor-pointer items-center gap-[11px] rounded-[10px] border border-white/[0.06] bg-[#101010] px-[11px] py-[9px] text-left data-[active=true]:border-cream/40 data-[active=true]:bg-[#181818]"
+    >
+      <span
+        class="flex size-[17px] flex-shrink-0 items-center justify-center rounded-[5px] border border-white/20 text-[11px] text-transparent group-data-[active=true]:border-transparent group-data-[active=true]:bg-cream group-data-[active=true]:text-ink"
+        >✓</span
+      >
+      <span
+        data-hook="icon"
+        class="flex size-7 flex-shrink-0 items-center justify-center rounded-[7px] bg-[#222] font-mono text-[10px] text-fg-dim"
+      ></span>
+      <span class="min-w-0 flex-1">
+        <span data-hook="name" class="block truncate text-[12.5px] font-medium text-[#7a7a7a] group-data-[active=true]:text-fg"
+        ></span>
+        <span data-hook="note" class="block truncate font-mono text-[10px] text-muted-3"></span>
+      </span>
+    </button>
+  </template>
 
   <!-- template: one source tile (cloned by src/lib/source-picker.ts) -->
   <template id="tpl-source-tile">

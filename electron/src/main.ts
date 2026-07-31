@@ -2,7 +2,19 @@ import { app, BrowserWindow, Menu, protocol, screen, session, shell, ipcMain, de
 import { autoUpdater } from 'electron-updater';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { resolveAppOrigin, contentSecurityPolicy, isInternalUrl, wsOrigin } from './config.ts';
+import { execFile as execFileCb } from 'node:child_process';
+import { promisify } from 'node:util';
+import {
+  resolveAppOrigin,
+  contentSecurityPolicy,
+  isInternalUrl,
+  wsOrigin,
+  parseAudioApps,
+  hwndFromSourceId,
+  type AudioApp,
+} from './config.ts';
+
+const execFile = promisify(execFileCb);
 
 const APP_SCHEME = 'app';
 const appOrigin = resolveAppOrigin();
@@ -209,6 +221,191 @@ ipcMain.handle('ss:sources', async (event) => {
       };
     });
 });
+
+// --- per-app audio (WASAPI process loopback) ---
+
+// The bare .node, loaded by absolute path. NOT `require('loopback-capture')`: its dist/index.cjs
+// goes through the `bindings` package to find this same file, which would mean shipping a
+// node_modules tree into the installer. electron-builder copies the single binary via
+// extraResources instead (electron-builder.yml), keeping app.asar down to our own three files.
+interface LoopbackAddon {
+  LoopbackCapture: new () => {
+    start(processId: number, includeProcessTree: boolean, cb: (chunk: Buffer) => void): void;
+    startSystemAudio(cb: (chunk: Buffer) => void): void;
+    stop(): void;
+  };
+}
+type Capture = InstanceType<LoopbackAddon['LoopbackCapture']>;
+
+const ADDON_FILE = 'loopback_capture_addon.node';
+let addon: LoopbackAddon | null = null;
+function loadAddon(): LoopbackAddon {
+  // A .node binary can only be loaded by require, and esbuild emits this file as CJS anyway —
+  // an import would be rewritten and lose the runtime path.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  addon ??= require(
+    app.isPackaged
+      ? path.join(process.resourcesPath, ADDON_FILE)
+      : path.join(__dirname, '..', 'node_modules', 'loopback-capture', 'build', 'Release', ADDON_FILE),
+  ) as LoopbackAddon;
+  return addon;
+}
+
+let capture: Capture | null = null;
+
+function stopCapture(): void {
+  try {
+    capture?.stop();
+  } catch {
+    // Already stopped, or the device went away. Nothing to recover — just don't take the app down.
+  }
+  capture = null;
+}
+
+/** Apps the user could exclude, with their ROOT pid.
+ *
+ *  `MainWindowHandle -ne 0` is what makes this correct AND cheap: only the process owning a
+ *  visible top-level window matches, which for a multi-process app is exactly the root — verified
+ *  on Discord, whose windowed pid is the parent of its five other processes. No parent-walking.
+ *  `tasklist /V` would do the same job but takes ~15 s (it resolves account names); this is
+ *  ~240 ms. OutputEncoding is forced or non-ASCII window titles come back mojibake. */
+/** Absolute path, never the bare name: CreateProcess searches the executable's directory and the
+ *  CWD before PATH, so a planted powershell.exe would run from this privileged process. */
+function powershellPath(): string {
+  return path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+}
+
+async function listAudioApps(): Promise<AudioApp[]> {
+  if (process.platform !== 'win32') return []; // WASAPI-only feature; don't spawn a shell for nothing
+  const script =
+    '[Console]::OutputEncoding=[Text.Encoding]::UTF8; ' +
+    '$p = Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle }; ' +
+    'ConvertTo-Json -Compress -InputObject @($p | Select-Object Id,ProcessName,MainWindowTitle)';
+  try {
+    const { stdout } = await execFile(powershellPath(), ['-NoProfile', '-NonInteractive', '-Command', script], {
+      windowsHide: true,
+      encoding: 'utf8',
+      timeout: 10_000,
+    });
+    return parseAudioApps(stdout, process.pid);
+  } catch (err) {
+    console.error('stream-share: listing audio apps failed', err);
+    return [];
+  }
+}
+
+ipcMain.handle('ss:audio-apps', async (event): Promise<AudioApp[]> => {
+  if (!isInternalUrl(event.senderFrame?.url ?? '')) return []; // window titles leak documents, chats…
+  return listAudioApps();
+});
+
+/** The app owning a captured window, found by its window handle.
+ *
+ *  Queried directly rather than looked up in `listAudioApps()`: that list is deduplicated by
+ *  process name (one row per app), so a second window of an already-listed app would be missing
+ *  from it — and a name-keyed lookup would then resolve the WRONG instance's tree.
+ *  Null when the window isn't a process's main window, which is common: `MainWindowHandle` names
+ *  one window per process, so a second top-level window (a Chrome popout, a second VS Code) has
+ *  no match. Callers must fall back to full system audio and say so. */
+async function appForWindow(hwnd: number): Promise<{ pid: number; name: string } | null> {
+  if (process.platform !== 'win32') return null;
+  const script =
+    '[Console]::OutputEncoding=[Text.Encoding]::UTF8; ' +
+    `$p = Get-Process | Where-Object { [int64]$_.MainWindowHandle -eq ${hwnd} } | Select-Object -First 1; ` +
+    'ConvertTo-Json -Compress -InputObject @($p | Select-Object Id,ProcessName)';
+  try {
+    const { stdout } = await execFile(powershellPath(), ['-NoProfile', '-NonInteractive', '-Command', script], {
+      windowsHide: true,
+      encoding: 'utf8',
+      timeout: 10_000,
+    });
+    const [app] = parseAudioApps(stdout, process.pid);
+    return app ? { pid: app.pid, name: app.name } : null;
+  } catch (err) {
+    console.error('stream-share: resolving the window owner failed', err);
+    return null;
+  }
+}
+
+/** Start the per-app capture, or stop it with `null`.
+ *
+ *  `{ sourceId }` — the window being shared: capture **only** that app's tree, so viewers hear
+ *  the game and nothing else. `{ exclude }` — a screen is being shared: capture everything the
+ *  machine plays **except** that app, by process NAME.
+ *
+ *  Name for exclude, handle for include, and that asymmetry is deliberate. Exclusion targets an
+ *  app the user named (Discord), which auto-updates and restarts under a new pid — the name is
+ *  what survives, and the panel re-arms on reopen. Inclusion targets the exact window being
+ *  shared, where a name would resolve the first instance and could silence the wrong one.
+ *
+ *  ponytail: no process-death watcher. Measured what happens when the target dies mid-capture:
+ *  the WASAPI session survives and the rest of the system audio keeps flowing, so viewers never
+ *  fall silent. Add polling only if that turns out to bite.
+ *  Returns the app actually captured, or null. */
+let captureEpoch = 0;
+ipcMain.handle('ss:audio-capture', async (event, spec: unknown): Promise<{ pid: number; name: string } | null> => {
+  if (!isInternalUrl(event.senderFrame?.url ?? '')) return null;
+  // ipcMain.handle does NOT serialize, and there is a ~240 ms lookup below. Two quick clicks
+  // would otherwise both reach start(), and `capture` would only remember the second — the first
+  // WASAPI session would stream on unstoppably, summing into the renderer and making an excluded
+  // app audible again, which is the one outcome this feature exists to prevent.
+  const mine = ++captureEpoch;
+  stopCapture();
+  if (!spec || typeof spec !== 'object') return null;
+  const { sourceId, exclude } = spec as { sourceId?: unknown; exclude?: unknown };
+
+  let target: { pid: number; name: string } | null;
+  let includeTree: boolean;
+  if (typeof sourceId === 'string') {
+    const hwnd = hwndFromSourceId(sourceId);
+    target = hwnd === null ? null : await appForWindow(hwnd);
+    includeTree = true;
+  } else if (typeof exclude === 'string' && exclude) {
+    const app = (await listAudioApps()).find((a) => a.name === exclude);
+    target = app ? { pid: app.pid, name: app.name } : null;
+    includeTree = false;
+  } else {
+    return null;
+  }
+  if (!target || mine !== captureEpoch) return null;
+
+  const sender = event.sender;
+  let instance: Capture;
+  try {
+    // Inside the try: a missing/incompatible .node throws here, and the handler must answer null
+    // rather than reject — the renderer's catch can't tell the two apart.
+    instance = new (loadAddon().LoopbackCapture)();
+    // true = INCLUDE_TARGET_PROCESS_TREE (that app alone), false = EXCLUDE (everything but it).
+    // Tree either way, which is what covers a Chromium app's separate audio-service child.
+    instance.start(target.pid, includeTree, (chunk) => {
+      // Delivered on the JS loop via a threadsafe function (not the native thread itself), ~100×/s.
+      // The window can still go away mid-stream — a reload is handled by the listeners below.
+      if (!sender.isDestroyed()) sender.send('ss:audio-chunk', chunk);
+    });
+  } catch (err) {
+    console.error('stream-share: starting the per-app capture failed', err);
+    return null;
+  }
+  // Superseded while we were listing (another click, or teardown): this session must not become
+  // the orphan described above.
+  if (mine !== captureEpoch) {
+    try {
+      instance.stop();
+    } catch {
+      /* nothing to recover */
+    }
+    return null;
+  }
+  capture = instance;
+  // A reload keeps the SAME WebContents, so isDestroyed() stays false and the capture would go on
+  // feeding a page that has lost its listener and its state.
+  sender.once('destroyed', stopCapture);
+  sender.once('did-start-navigation', stopCapture);
+  return target;
+});
+
+// A native capture thread would outlive the window and hold the audio device.
+app.on('before-quit', stopCapture);
 
 // handle (awaited), not send: the id and the getDisplayMedia call travel on different IPC pipes,
 // so nothing orders them — fire-and-forget would capture the previous source now and then.

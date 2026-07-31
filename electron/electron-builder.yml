@@ -18,6 +18,12 @@ files:
 extraResources:
   - from: ../dist
     to: dist
+  # WASAPI process-loopback addon, for per-app audio. The bare .node only: the package's own
+  # dist/index.cjs finds this same file through the `bindings` package, so requiring it the normal
+  # way would drag a node_modules tree into the installer and break the `files:` rule above.
+  # main.ts requires this path directly instead — no asar, no asarUnpack, no pnpm symlinks.
+  - from: node_modules/loopback-capture/build/Release/loopback_capture_addon.node
+    to: loopback_capture_addon.node
 
 win:
   target: nsis
