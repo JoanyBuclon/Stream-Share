@@ -11,10 +11,10 @@ type Screen = 'home' | 'join' | 'host' | 'viewer';
 const SCREENS: Screen[] = ['home', 'join', 'host', 'viewer'];
 // Per-screen tab title, so several open tabs (a host and a viewer) are distinguishable.
 const TITLES: Record<Screen, string> = {
-  home: 'stream share',
-  join: 'Join a share — stream share',
-  host: 'Sharing — stream share',
-  viewer: 'Watching — stream share',
+  home: 'StreamShare',
+  join: 'Join a share — StreamShare',
+  host: 'Sharing — StreamShare',
+  viewer: 'Watching — StreamShare',
 };
 const TOKEN_KEY = 'ss-token';
 
