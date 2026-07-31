@@ -1,19 +1,18 @@
 name: CI & Publish
 
+# Release-only pipeline: rien ne tourne sur un push de branche ni sur une PR — tout part d'un
+# tag de version. Un tag exécute `quality`, puis `publish` (images web + signaling) et `desktop`
+# (installeur Windows) en parallèle.
+#
+# La forme `*.*.*` est délibérée : `v*` déclencherait aussi sur `v1` ou `vnext`, dont
+# electron-builder ne peut pas faire une version valide.
+#
+# Contrepartie assumée : plus aucune validation avant le tag. Le lint, les tests et l'e2e ne
+# tournent plus sur master ni sur les PR, donc une régression ne se découvre qu'au moment de
+# publier. À exécuter en local avant de tagger : `pnpm lint && pnpm typecheck && pnpm test && pnpm e2e`.
 on:
   push:
-    branches: [master]
-    # Semver tags (`v1.0.0`) trigger the desktop packaging job — build + publish the .exe to the
-    # matching GitHub Release. The `*.*.*` shape is deliberate: `v*` would also fire on a `v1`
-    # or `vnext` tag, which electron-builder can't turn into a valid release version.
-    # `publish` (Docker images) is ref-guarded to master pushes, so a tag runs `quality` +
-    # `desktop` but never rebuilds the web/signaling images.
     tags: ["v*.*.*"]
-  # Sans ceci, `quality` ne tourne qu'APRÈS le merge : une PR ne peut pas être validée par la
-  # CI et la casse se découvre déjà sur master. `publish` reste sur push (needs: quality), donc
-  # une PR exécute les tests sans jamais publier d'image.
-  pull_request:
-    branches: [master]
 
 env:
   REGISTRY: ghcr.io
@@ -73,10 +72,9 @@ jobs:
 
   publish:
     needs: quality
-    # `needs` ne suffit pas : sans ce garde, l'ajout du trigger pull_request publierait une
-    # image à chaque PR (et échouerait sur les forks, qui n'ont pas packages: write). Le garde
-    # de ref exclut aussi les tags `v*` : ceux-ci ne republient pas les images web/signaling.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    # Plus de garde de ref : le workflow ne se déclenche que sur un tag de version, donc les
+    # images web/signaling se publient avec la release desktop — les trois artefacts d'une
+    # version sortent ensemble.
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -130,9 +128,8 @@ jobs:
   # the auto-updater) to the matching GitHub Release.
   desktop:
     needs: quality
-    # Matches the `v*.*.*` trigger; the step below asserts the tag equals the package version.
-    if: startsWith(github.ref, 'refs/tags/v')
-    # Note: the trigger already filters the shape — this guard only excludes branch pushes/PRs.
+    # Pas de garde : seul un tag déclenche le workflow. L'étape ci-dessous vérifie en revanche
+    # que ce tag correspond bien à la version de electron/package.json.
     runs-on: windows-latest
     permissions:
       contents: write
