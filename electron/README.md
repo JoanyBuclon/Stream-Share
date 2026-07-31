@@ -26,6 +26,19 @@ See [`../docs/desktop.md`](../docs/desktop.md) for the full plan.
 electron-builder's default `buildResources` directory, so the icon is picked up with no config
 entry; it converts the PNG to `.ico` for the window and the NSIS installer.
 
+## Why `esbuild-wasm` and not `esbuild`
+
+`esbuild` ships a native binary installed by a lifecycle script. pnpm 11 blocks those unless the
+package is listed under `allowBuilds`, which it reads **only** from `pnpm-workspace.yaml` — and
+this project is installed with `--ignore-workspace`, so neither the root file nor a local one is
+read (`package.json` settings aren't honoured either). CI would then fail with
+`ERR_PNPM_IGNORED_BUILDS`. `esbuild-wasm` is pure JS/WASM with no lifecycle script, same CLI:
+building these two files takes ~150 ms instead of ~10 ms, which is irrelevant here.
+
+```
+// ponytail: don't "upgrade" back to native esbuild — it re-breaks the CI install.
+```
+
 ## Standalone sub-project
 
 Like `signaling/`, this has its own lockfile and is **not** part of the root pnpm workspace.

@@ -1,6 +1,6 @@
 {
   "name": "stream-share-desktop",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Desktop host shell for Stream-Share (Electron).",
   "private": true,
   "type": "module",
@@ -20,7 +20,7 @@
     "@types/node": "^24.0.0",
     "electron": "^43.1.1",
     "electron-builder": "^25.1.8",
-    "esbuild": "^0.24.2",
+    "esbuild-wasm": "^0.24.2",
     "typescript": "^6.0.3"
   }
 }

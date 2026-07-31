@@ -3,7 +3,7 @@ name: CI & Publish
 on:
   push:
     branches: [master]
-    # Semver tags (`v0.3.0`) trigger the desktop packaging job — build + publish the .exe to the
+    # Semver tags (`v1.0.0`) trigger the desktop packaging job — build + publish the .exe to the
     # matching GitHub Release. The `*.*.*` shape is deliberate: `v*` would also fire on a `v1`
     # or `vnext` tag, which electron-builder can't turn into a valid release version.
     # `publish` (Docker images) is ref-guarded to master pushes, so a tag runs `quality` +
