@@ -16,7 +16,8 @@
     "release": "pnpm build && electron-builder --publish always"
   },
   "dependencies": {
-    "electron-updater": "^6.3.9"
+    "electron-updater": "^6.3.9",
+    "loopback-capture": "^2.0.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

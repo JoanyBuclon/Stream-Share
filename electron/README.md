@@ -1,4 +1,4 @@
-# Stream Share — desktop shell (Electron)
+# StreamShare — desktop shell (Electron)
 
 Phase 1 "coquille": wraps the existing web build in an Electron window, adds auto-update and
 a downloadable installer. No native features yet (`window.native` carries only the web origin).

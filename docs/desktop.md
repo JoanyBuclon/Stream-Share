@@ -178,7 +178,7 @@ d'équivalent `desktopCapturer` (cf. [Techno](#techno--electron)).
 ### HDR
 
 Une source HDR partagée arrive **surexposée, hautes lumières cramées** chez le
-viewer (cf. captures `cap1` = source, `cap2` = viewer).
+viewer : ciel et zones claires écrasés à blanc, irrécupérables.
 
 **Cause, structurelle.** Le capteur `getDisplayMedia` de Chromium capture dans un
 buffer **8 bits BGRA SDR** et écrase le HDR par un simple **clamp à [0,1]**, sans
@@ -311,17 +311,20 @@ electron/                     # sous-projet autonome (lockfile propre, hors work
   src/preload.ts              # contextBridge → window.native
   src/config.ts               # PUR (sans import electron) : origine, CSP, nav — testé
   src/audio/                  # (phase 2) addon N-API : WASAPI process loopback
-  electron-builder.yml        # NSIS + publish GitHub Releases
+  build/icon.png              # 512×512, converti en .ico par electron-builder
+  electron-builder.yml        # NSIS + GitHub Releases
 src/                          # INCHANGÉ. astro build → dist/, servi par la fenêtre Electron
   lib/host.ts                 #   → utilise window.native si présent, getDisplayMedia sinon
 ```
 
-**Le front seul est embarqué.** Le paquet ne contient que le build Astro
-(`extraResources: ../dist`) + `out/` ; la seule dépendance runtime est
-`electron-updater`. **Le serveur de signaling n'est pas embarqué** et ne le sera
-jamais : l'app est un client qui parle au signaling déployé (par défaut
-`https://stream.joanybuclon.com`, surchargeable via `SS_APP_ORIGIN` pour viser un
-dev/staging).
+**Le front seul est embarqué.** L'`app.asar` ne contient que **trois fichiers** —
+`out/main.cjs`, `out/preload.cjs`, `package.json` — le build Astro arrivant à côté
+via `extraResources: ../dist`. Aucun `node_modules` n'est packagé : `electron-updater`,
+seule dépendance runtime, est bundlé dans `main.cjs` (cf.
+[CI / packaging](#ci--packaging), où cette exclusion n'est pas cosmétique).
+**Le serveur de signaling n'est pas embarqué** et ne le sera jamais : l'app est un
+client qui parle au signaling déployé (par défaut `https://stream.joanybuclon.com`,
+surchargeable via `SS_APP_ORIGIN` pour viser un dev/staging).
 
 **Un seul test, partout : `window.native` présent ou non.** Absent →
 comportement web actuel à l'identique. Présent → sources natives, audio par
@@ -344,7 +347,7 @@ Deux points de friction connus :
 
 ### Contraintes Electron découvertes au test (phase 1)
 
-Trois points ne se devinent pas depuis la doc et conditionnent la coquille. Tous
+Ces points ne se devinent pas depuis la doc et conditionnent la coquille. Tous
 sont dans `electron/src/main.ts`, commentés sur place.
 
 - **Le renderer doit tourner sur une origine sûre, pas `file://`.** Le build est
@@ -364,6 +367,20 @@ sont dans `electron/src/main.ts`, commentés sur place.
   sélecteur, contrairement à Chromium. (`useSystemPicker` existe mais est
   **macOS 15+ uniquement** — quand il s'applique, le handler n'est pas appelé.)
   D'où la source imposée en phase 1, ci-dessous.
+- **Le menu par défaut est retiré** (`Menu.setApplicationMenu(null)`) : la barre
+  File / Edit / View / Window d'Electron n'a aucun usage ici. Sur Windows et Linux
+  les raccourcis d'édition (Ctrl+C/V/X/A) continuent de fonctionner, Chromium les
+  gérant nativement dans les champs. **macOS est l'exception** — ils viennent *du*
+  menu là-bas : y livrer un jour imposera un menu minimal avec le rôle `editMenu`
+  plutôt que `null`.
+- **L'icône a deux chemins distincts.** Packagée, elle vient de la ressource de
+  l'exe (electron-builder embarque `build/icon.png`) ; **non packagée il n'y a pas
+  de ressource**, donc `pnpm desktop` doit la passer explicitement à la
+  `BrowserWindow` sinon on voit celle d'Electron. En dev, la barre des tâches peut
+  malgré tout rester celle d'Electron : Windows la rattache à l'exécutable lancé.
+- **`app.setAppUserModelId` doit correspondre à l'`appId`.** Sans identité Windows,
+  les notifications toast sont muettes — ce qui compte dès la phase 2 (annonce des
+  viewers), et pas seulement pour le regroupement dans la barre des tâches.
 
 ```
 // ponytail: la source forcée n'est PAS un choix produit, c'est le strict minimum
@@ -387,7 +404,10 @@ sur ce même handler. Le jour où il arrive, cette béquille disparaît.
   prématuré. Option future si besoin : **Azure Artifact Signing** (~120 $/an, sans
   token, intégrable en CI).
 - **GitHub Releases + `electron-updater`.** L'app se met à jour seule ; sinon elle
-  devient vite une dette face à un web toujours à jour.
+  devient vite une dette face à un web toujours à jour. ⚠️ **Non encore prouvé** :
+  il faut deux versions publiées pour vérifier qu'une mise à jour est bien
+  détectée et appliquée. À valider à la première release de la phase 2 — la page
+  `/download` promet « updates automatically ».
 - **Fenêtre fermée = app quittée.** Pas de persistance en arrière-plan.
 
 ### Découvrabilité
@@ -415,18 +435,42 @@ sur ce même handler. Le jour où il arrive, cette béquille disparaît.
 
 ## CI / packaging
 
-Le workflow actuel (`.github/workflows/docker-publish.yml`, cf.
+Le workflow (`.github/workflows/docker-publish.yml`, cf.
 [`deployment.md`](./deployment.md)) a un job `quality` puis une matrice `publish`
-à deux images (`web`, `signaling`). On ajoute **un troisième job de packaging
-desktop, en parallèle des deux publish**, une fois `quality` passé :
+à deux images (`web`, `signaling`). Un **troisième job `desktop`** tourne en
+parallèle des deux publish, après `quality` :
 
+- déclenché uniquement sur un tag **`v*.*.*`** (`v*` accepterait `vnext`, dont
+  electron-builder ne peut pas faire une version) ; une garde vérifie que le tag
+  **égale** `electron/package.json`, sinon les artefacts partiraient sur la
+  mauvaise release ;
 - runner `windows-latest` (build natif, pas une image Docker) ;
-- `electron-builder` → artefact `.exe` (NSIS) ;
-- publication en **GitHub Release** (consommée par `electron-updater`).
+- `electron-builder --publish never` → `.exe` NSIS + `.blockmap` + `latest.yml` ;
+- upload explicite via `gh` vers la **GitHub Release** (consommée par
+  `electron-updater`).
 
 ```
 // ponytail: job desktop en parallèle des publish, PAS avant quality. Un binaire
 // qui n'a pas passé lint/typecheck/tests n'a rien à faire en release.
+```
+
+### Les cinq pièges de la chaîne de release
+
+Chacun a coûté une release ratée. Ils sont détaillés dans
+[`electron/README.md`](../electron/README.md) ; résumé de ce qu'il ne faut pas
+défaire :
+
+| Piège                                                                                                                                                                                                            | Correctif                                                            |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| **electron-builder < 26.12 produit un installeur qui meurt au double-clic** (`0xc0000005` dans `System.dll`) : dépassement de lecture dans son propre `multiUser.nsh`, déclenché par notre combinaison `oneClick: false` + `perMachine: false`. Le NSIS embarqué est identique en 25 et 26 — ce n'est pas lui. | plancher **≥ 26.12**                                                 |
+| **pnpm 11 refuse les scripts d'install** : `allowBuilds` ne vit que dans `pnpm-workspace.yaml`, que `--ignore-workspace` ignore. `esbuild` échouait ; `electron-winstaller` (tiré par electron-builder 26) aussi.  | `esbuild-wasm` + `--ignore-scripts` à l'install                      |
+| **L'`app.asar` embarquait 7 315 fichiers / 118 Mo** : electron-builder remonte à la racine du dépôt et empaquette **ses** dépendances de production (astro, tailwind, vite, sharp…).                              | `!node_modules/**` + `electron-updater` bundlé → asar de 608 Ko      |
+| **La publication d'electron-builder rapportait « succès » en ne déposant que le `.blockmap`** — ni installeur ni `latest.yml`, deux fois de suite.                                                                | build et upload séparés, avec gardes qui **font échouer le job**     |
+| **`gh release upload` exige une release existante**, or plus rien ne la créait après le passage en `--publish never`.                                                                                            | `gh release view` → `create` si absente, puis `upload --clobber`     |
+
+```
+// ponytail: ces cinq points ne sont pas des préférences. Chacun est un mode de
+// panne vérifié — dont trois SILENCIEUX (job vert, release inutilisable).
 ```
 
 ## Décisions
@@ -473,9 +517,15 @@ moment-là :
 
 | Phase                    | Contenu                                                                                                                                                                    | Sortie                                                                                                                     |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
-| **1 — coquille Electron** ✅ | L'app web emballée dans Electron : scheme `app://`, CSP mirrorée, nav-lock, close = quit, **page `/download`** + CTA accueil, **auto-update** (`electron-updater`), packaging NSIS + job CI sur tag `v*`. `window.native` ne porte que `appOrigin`. **Source imposée à l'écran principal** (béquille, cf. ci-dessus). | Un `.exe` qui partage comme le web, se met à jour seul, se télécharge. Le socle. **Validé** : host desktop → viewer Chrome, écran principal + audio système. |
+| **1 — coquille Electron** ✅ **livrée** | L'app web emballée dans Electron : scheme `app://`, CSP mirrorée, nav-lock, pas de menu, icône, close = quit, **page `/download`** + CTA accueil, **auto-update** câblé, packaging NSIS + job CI sur tag `v*.*.*`. `window.native` ne porte que `appOrigin`. **Source imposée à l'écran principal** (béquille, cf. ci-dessus). | **Validé de bout en bout** : installeur téléchargé depuis la Release, app installée, partage host desktop → viewer Chrome. Reste non prouvé : la mise à jour automatique (deux versions nécessaires). |
 | **2 — MVP**              | Audio par app (exclusion), grille de sources native, raccourcis globaux, réglages mémorisés, wake lock, notifications rejoint/quitte, avertissement HDR.                  | La version qui « récompense ». **Précédée d'un spike** : prouver que l'audio par process (Discord exclu) entre bien dans la peer connection — sinon la feature n°1 tombe, à réévaluer avant d'écrire le reste. |
 | **3 — capture native**   | WGC/DXGI → injection : FPS garanti, tone-map HDR, encodage hardware, contrôle curseur. Fork architectural, **le vrai gain différentiel avec le web**.                     | Ouvert seulement si une de ces features est réellement demandée.                                                          |
+
+**À dire franchement : au sortir de la phase 1, l'app n'apporte rien qu'un
+navigateur ne fasse déjà** — elle fait même moins, la source étant imposée. C'est
+un socle technique (distribution, mise à jour, pont natif), pas un produit. Le
+critère « la récompense justifie le téléchargement » n'est rempli qu'à la
+**phase 2**, et c'est pour ça qu'elle commence par le spike qui la conditionne.
 
 ## Reste à trancher
 
