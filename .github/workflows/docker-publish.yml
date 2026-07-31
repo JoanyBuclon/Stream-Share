@@ -165,8 +165,12 @@ jobs:
         run: pnpm run build
 
       # Standalone sub-project with its own lockfile (like signaling) — --ignore-workspace.
+      # --ignore-scripts: electron-builder pulls electron-winstaller, whose install script pnpm
+      # refuses to run (allowBuilds only lives in pnpm-workspace.yaml, which --ignore-workspace
+      # ignores) — it would fail the job. Nothing here needs a lifecycle script: Electron fetches
+      # its binary on first run and electron-builder downloads its own toolchain.
       - name: Install dependencies (desktop)
-        run: pnpm install --frozen-lockfile --ignore-workspace --dir electron
+        run: pnpm install --frozen-lockfile --ignore-workspace --ignore-scripts --dir electron
 
       - name: Build & publish desktop installer
         run: pnpm --ignore-workspace --dir electron release

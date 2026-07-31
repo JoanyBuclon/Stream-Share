@@ -26,6 +26,38 @@ See [`../docs/desktop.md`](../docs/desktop.md) for the full plan.
 electron-builder's default `buildResources` directory, so the icon is picked up with no config
 entry; it converts the PNG to `.ico` for the window and the NSIS installer.
 
+## electron-builder must stay ≥ 26.12
+
+On 25.x the installer **dies the moment you double-click it** — no window, no error:
+`0xc0000005` in `%TEMP%\nspXXXX.tmp\System.dll`, fault offset `0x1581`.
+
+It is **not** the bundled NSIS (25.x and 26.x both ship NSIS 3.04). The bug is in
+electron-builder's own `multiUser.nsh` template: `setInstallModePerUser` reads
+`NSIS_MAX_STRLEN` (8192 wide chars = 16 KB) out of the ~60-byte `CoTaskMemAlloc` buffer returned
+by `SHGetKnownFolderPath`, in vestigial Windows 7 support. Whether that over-read hits an
+unmapped page depends on heap layout — hence "random" for some, always for others.
+
+**It only triggers on our exact config**: `oneClick: false` + `perMachine: false` + no prior
+per-user install. Fixed properly in **app-builder-lib 26.12.0** ([PR #9769]; 26.9.0 only fixed it
+on Win 8+). Reproduced here with both a CI-built and a locally built installer at the same fault
+offset, and confirmed fixed on 26.15.3.
+
+[PR #9769]: https://github.com/electron-userland/electron-builder/pull/9769
+
+```
+// ponytail: don't pin electron-builder below 26.12 — the installer silently stops launching.
+// Workarounds exist (oneClick: true, selectPerMachineByDefault: true) but both change the UX;
+// the version bump is the fix. See electron-builder issue #8536.
+```
+
+## Why installs pass `--ignore-scripts`
+
+electron-builder 26 depends on `electron-winstaller` (Squirrel target, unused here), whose install
+script pnpm refuses to run for the same reason as esbuild below — so the install *errors out*.
+Nothing in this project needs a lifecycle script: Electron downloads its binary on first run, and
+electron-builder fetches its own toolchain at build time. A `.npmrc` with `ignore-scripts=true`
+does **not** work: pnpm still raises `ERR_PNPM_IGNORED_BUILDS`; only the CLI flag suppresses it.
+
 ## Why `esbuild-wasm` and not `esbuild`
 
 `esbuild` ships a native binary installed by a lifecycle script. pnpm 11 blocks those unless the
@@ -45,7 +77,7 @@ Like `signaling/`, this has its own lockfile and is **not** part of the root pnp
 Always pass `--ignore-workspace`:
 
 ```sh
-pnpm install --ignore-workspace --dir electron      # install
+pnpm install --ignore-workspace --ignore-scripts --dir electron   # install
 pnpm --dir electron test                            # pure config tests (no electron needed)
 pnpm --dir electron typecheck                       # tsc --noEmit
 

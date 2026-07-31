@@ -21,7 +21,7 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "electron": "^43.1.1",
-    "electron-builder": "^25.1.8",
+    "electron-builder": "^26.15.3",
     "esbuild-wasm": "^0.24.2",
     "typescript": "^6.0.3"
   }
