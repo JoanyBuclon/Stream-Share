@@ -342,4 +342,105 @@
       </div>
     </div>
   </dialog>
+
+  <!-- desktop source picker (src/lib/source-picker.ts). Present in the web build but never opened
+       there: browsers have their own getDisplayMedia prompt, Windows has none — which is why the
+       Electron shell owns this grid. Same <dialog> conventions as the settings modal above. -->
+  <dialog
+    id="source-modal"
+    aria-labelledby="source-title"
+    class="fixed inset-0 z-[150] m-0 h-full max-h-none w-full max-w-none items-center justify-center border-0 bg-[#060606]/[0.9] p-[30px] animate-fade backdrop:bg-transparent open:flex max-lg:p-4"
+  >
+    <div
+      class="flex max-h-[88dvh] w-full max-w-[880px] flex-col overflow-hidden rounded-[18px] border border-white/[0.11] bg-[#121212]"
+    >
+      <div
+        class="flex flex-shrink-0 flex-wrap items-center justify-between gap-5 gap-y-3 border-b border-white/[0.07] px-6 pb-[18px] pt-[22px]"
+      >
+        <div>
+          <h2 id="source-title" class="text-[18px] font-semibold">Choose what to share</h2>
+          <div class="mt-[3px] font-mono text-[11.5px] text-muted-2">switching source is instant — no prompt</div>
+        </div>
+        <div class="flex items-center gap-2.5">
+          <input
+            id="source-search"
+            type="text"
+            placeholder="Search screens and apps"
+            autocomplete="off"
+            aria-label="Search screens and apps"
+            class="w-[220px] rounded-[9px] border border-white/[0.12] bg-ink px-[13px] py-[9px] text-[13px] text-fg focus:border-white/30 focus:outline-none max-sm:w-[150px]"
+          />
+          <button
+            id="btn-source-close"
+            aria-label="Close the source picker"
+            class="flex size-8 flex-shrink-0 cursor-pointer items-center justify-center rounded-lg border border-white/10 bg-elev text-base text-fg-dim hover:bg-elev-hover"
+            >✕</button
+          >
+        </div>
+      </div>
+
+      <div class="flex flex-1 flex-col gap-6 overflow-auto px-6 py-5">
+        <!-- the search can empty either group, so both collapse when they have no visible tile -->
+        <div id="source-group-screen" class="flex flex-col gap-3">
+          <div class="flex items-baseline gap-2.5">
+            <span class="font-mono text-[10px] uppercase tracking-[0.12em] text-muted-2">Screens</span>
+            <span id="source-count-screen" class="font-mono text-[10px] text-[#5a5a5a]"></span>
+          </div>
+          <div id="source-grid-screen" class="grid grid-cols-3 gap-3 max-sm:grid-cols-2"></div>
+        </div>
+
+        <div id="source-group-window" class="flex flex-col gap-3">
+          <div class="flex items-baseline gap-2.5">
+            <span class="font-mono text-[10px] uppercase tracking-[0.12em] text-muted-2">Windows / Apps</span>
+            <span id="source-count-window" class="font-mono text-[10px] text-[#5a5a5a]"></span>
+          </div>
+          <div id="source-grid-window" class="grid grid-cols-3 gap-3 max-sm:grid-cols-2"></div>
+        </div>
+
+        <!-- one line for all three transient states: loading, no match, capture failure -->
+        <div id="source-status" aria-live="polite" class="py-10 text-center font-mono text-xs text-muted-3"></div>
+      </div>
+
+      <div
+        class="flex flex-shrink-0 flex-wrap items-center justify-between gap-4 gap-y-2 border-t border-white/[0.07] px-6 pb-[22px] pt-[18px]"
+      >
+        <div id="source-selection" class="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-3">
+          no source selected
+        </div>
+        <button
+          id="btn-source-confirm"
+          class="cursor-pointer rounded-[9px] bg-cream px-[22px] py-[11px] text-[13px] font-semibold text-ink hover:bg-white disabled:cursor-default disabled:opacity-40"
+          disabled
+          >Share this source</button
+        >
+      </div>
+    </div>
+  </dialog>
+
+  <!-- template: one source tile (cloned by src/lib/source-picker.ts) -->
+  <template id="tpl-source-tile">
+    <button
+      data-active="false"
+      aria-pressed="false"
+      class="group flex cursor-pointer flex-col rounded-xl border border-white/[0.07] bg-[#131313] p-2 text-left data-[active=true]:border-cream/50 data-[active=true]:bg-[#1d1d1d]"
+    >
+      <span class="relative flex h-[92px] items-center justify-center overflow-hidden rounded-lg bg-[#151515]">
+        <img data-hook="thumb" alt="" class="size-full object-contain" />
+        <span
+          class="absolute right-1.5 top-1.5 flex size-[17px] items-center justify-center rounded-full bg-cream text-[10px] text-ink opacity-0 group-data-[active=true]:opacity-100"
+          >✓</span
+        >
+      </span>
+      <span class="flex items-center gap-[9px] px-1 pb-0.5 pt-2.5">
+        <span
+          data-hook="icon"
+          class="flex size-[26px] flex-shrink-0 items-center justify-center overflow-hidden rounded-[7px] bg-[#242424] font-mono text-[9.5px] text-fg-dim"
+        ></span>
+        <span class="min-w-0 flex-1">
+          <span data-hook="name" class="block truncate text-[12.5px] font-medium text-fg"></span>
+          <span data-hook="meta" class="block font-mono text-[10px] text-muted-3"></span>
+        </span>
+      </span>
+    </button>
+  </template>
 </section>

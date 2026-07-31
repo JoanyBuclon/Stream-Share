@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, protocol, session, shell, ipcMain, desktopCapturer } from 'electron';
+import { app, BrowserWindow, Menu, protocol, screen, session, shell, ipcMain, desktopCapturer } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -6,6 +6,14 @@ import { resolveAppOrigin, contentSecurityPolicy, isInternalUrl, wsOrigin } from
 
 const APP_SCHEME = 'app';
 const appOrigin = resolveAppOrigin();
+
+// --- source picker (renderer-side UI, main-side capture routing) ---
+
+const SOURCE_TYPES: Array<'screen' | 'window'> = ['screen', 'window'];
+const kindOf = (id: string): 'screen' | 'window' => (id.startsWith('screen:') ? 'screen' : 'window');
+// Single-window app: one selection for the whole process is enough. Per-webContents state would
+// be required the day a second window can capture.
+let selectedSourceId: string | null = null;
 // The local build carries no CSP (nginx sets it in prod), so we attach the mirrored policy to
 // every app:// response — more robust than a webRequest listener, which doesn't reliably see
 // protocol.handle responses across Electron versions.
@@ -108,22 +116,34 @@ app.whenReady().then(() => {
   });
 
   // Windows has no built-in getDisplayMedia picker (useSystemPicker is macOS-15+ only), so the
-  // shell must supply the source. Phase 1: capture the primary screen (+ system audio if the page
-  // asked for it). The visual source picker — screens AND windows, feature #2 — is phase 2
-  // (docs/desktop.md). On macOS 15+ the OS picker is used instead and this handler isn't called.
-  session.defaultSession.setDisplayMediaRequestHandler(
-    (request, callback) => {
-      desktopCapturer
-        .getSources({ types: ['screen'] })
-        .then((sources) => {
-          const screen = sources[0];
-          if (!screen) return callback({}); // no capturable screen → getDisplayMedia rejects
-          callback({ video: screen, audio: request.audioRequested ? 'loopback' : undefined });
-        })
-        .catch(() => callback({}));
-    },
-    { useSystemPicker: true },
-  );
+  // shell supplies the source: the renderer's own picker names it through `ss:select-source` just
+  // before capturing. No `useSystemPicker` — now that we own a picker, every platform gets the
+  // same one instead of macOS 15+ diverging to the OS sheet.
+  //
+  // This handler IS the consent gate: whatever it hands back is shared with no OS prompt. So it
+  // only ever answers a source the user explicitly picked. There is deliberately no
+  // "nothing selected → primary screen" fallback: nothing in the app can reach it (capture()
+  // always runs behind the picker), which leaves it useful only to code that isn't ours, and its
+  // outcome would be the largest possible share. `request.userGesture` is NOT used as a second
+  // gate — measured on Electron 43, it reports true even for a call with no user activation.
+  session.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
+    const wanted = selectedSourceId;
+    if (!wanted) return callback({}); // → getDisplayMedia rejects; the picker surfaces it
+    // Fresh lookup rather than reusing the objects `ss:sources` returned: a window can close
+    // between listing and confirming, and a stale DesktopCapturerSource yields a dead track.
+    // thumbnailSize 0×0 makes Electron skip the (expensive) image capture entirely, and the id
+    // already says which kind to enumerate — no need to walk every window to find a screen.
+    desktopCapturer
+      .getSources({ types: [kindOf(wanted)], thumbnailSize: { width: 0, height: 0 } })
+      .then((sources) => {
+        const picked = sources.find((s) => s.id === wanted);
+        // The chosen source vanished. Failing is the point: falling back to the whole desktop
+        // would share far more than the user asked for.
+        if (!picked) return callback({});
+        callback({ video: picked, audio: request.audioRequested ? 'loopback' : undefined });
+      })
+      .catch(() => callback({}));
+  });
 
   // Windows identity for taskbar grouping — and a hard requirement for toast notifications to
   // show under the app's name rather than being dropped (phase 2 announces viewers joining).
@@ -149,6 +169,54 @@ app.whenReady().then(() => {
 // The renderer asks (synchronously, once, from the preload) for the web origin it should target.
 ipcMain.on('ss:config', (event) => {
   event.returnValue = { appOrigin };
+});
+
+// Everything the picker grid needs, already serialisable (NativeImage doesn't cross IPC).
+ipcMain.handle('ss:sources', async (event) => {
+  // Defence in depth: only our own bundle may enumerate windows. A thumbnail of every open
+  // window is exactly the kind of thing that must not become reachable from foreign content.
+  if (!isInternalUrl(event.senderFrame?.url ?? '')) return [];
+  // Our own window is capturable and picking it is an infinite mirror. getMediaSourceId() gives
+  // the exact id desktopCapturer will report, so no name heuristic.
+  const own = BrowserWindow.fromWebContents(event.sender)?.getMediaSourceId();
+  const displays = screen.getAllDisplays();
+  const sources = await desktopCapturer.getSources({
+    types: SOURCE_TYPES,
+    thumbnailSize: { width: 320, height: 180 },
+    fetchWindowIcons: true,
+  });
+  return sources
+    .filter((s) => s.id !== own)
+    .map((s) => {
+      // display_id is documented as possibly empty — no match just means no resolution label.
+      const display = displays.find((d) => String(d.id) === s.display_id);
+      return {
+        id: s.id,
+        name: s.name,
+        kind: kindOf(s.id),
+        // getAllDisplays() reports DIP: a 2560×1440 monitor at 150% would read 1707×960, a
+        // resolution the user has never seen. scaleFactor brings it back to physical pixels.
+        meta: display
+          ? `${Math.round(display.size.width * display.scaleFactor)}×${Math.round(display.size.height * display.scaleFactor)}`
+          : '',
+        // JPEG, not toDataURL()'s lossless PNG: a real Windows session has 30-60 windows, and
+        // each one is a synchronous encode on the main thread plus base64 through IPC. The tile
+        // is a lossy preview anyway. The icon keeps PNG — it needs the alpha channel.
+        thumbnail: `data:image/jpeg;base64,${s.thumbnail.toJPEG(70).toString('base64')}`,
+        // appIcon is null for screens, and can be a non-null EMPTY image for some windows —
+        // whose data URL would render as a broken <img>.
+        icon: s.appIcon && !s.appIcon.isEmpty() ? s.appIcon.toDataURL() : null,
+      };
+    });
+});
+
+// handle (awaited), not send: the id and the getDisplayMedia call travel on different IPC pipes,
+// so nothing orders them — fire-and-forget would capture the previous source now and then.
+ipcMain.handle('ss:select-source', (_event, id: unknown) => {
+  // Shape-checked, not just typed: the empty string is a string AND falsy, so a bare
+  // `typeof id === 'string'` would let `selectSource('')` through as "nothing selected".
+  selectedSourceId =
+    typeof id === 'string' && (id.startsWith('screen:') || id.startsWith('window:')) ? id : null;
 });
 
 // Decision: close = quit. No tray, no background — including on macOS, against its usual

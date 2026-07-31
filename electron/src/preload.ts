@@ -1,8 +1,12 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
-// Phase 1: the shell injects only the web origin, so the renderer (loaded under app://)
-// targets the real signaling server and builds correct share links. No native capability
-// yet — window.native gains capture/audio methods in phase 2. Its mere presence already
-// tells the web UI it runs inside the desktop app.
+// The bridge the web UI sees as `window.native` — its mere presence means "running in the desktop
+// app". Beyond the origin (signaling target + share links), it exposes the capture routing the
+// custom source picker needs: list what can be captured, then name the pick.
 const config = ipcRenderer.sendSync('ss:config') as { appOrigin: string };
-contextBridge.exposeInMainWorld('native', { appOrigin: config.appOrigin });
+contextBridge.exposeInMainWorld('native', {
+  appOrigin: config.appOrigin,
+  listSources: () => ipcRenderer.invoke('ss:sources'),
+  // Awaited by the renderer: main must hold the id before getDisplayMedia is called.
+  selectSource: (id: string) => ipcRenderer.invoke('ss:select-source', id),
+});

@@ -51,7 +51,7 @@ d'ensemble, puis le détail des trois qui portent le produit.
 | Fonctionnalité                  | Plafond web levé                                                   | Phase        |
 | ------------------------------- | ------------------------------------------------------------------ | ------------ |
 | **Audio par application**       | `getDisplayMedia` capture le mix système entier, ou rien           | 2 — MVP      |
-| **Sélecteur de source natif**   | Picker Chrome imposé, aucune API web ne liste les fenêtres         | 2 — MVP¹     |
+| **Sélecteur de source natif** ✅ | Picker Chrome imposé, aucune API web ne liste les fenêtres         | 2 — livré¹   |
 | **Avertissement HDR**           | Aucune API web ne connaît l'_état_ HDR du compositeur              | 2 — MVP      |
 | **Raccourcis globaux**          | Sandbox navigateur : rien hors de la fenêtre                       | 2 — MVP      |
 | **Réglages mémorisés**          | Rien ne survit proprement d'une session à l'autre                  | 2 — MVP      |
@@ -64,8 +64,8 @@ d'ensemble, puis le détail des trois qui portent le produit.
 
 La **phase 1** n'apporte aucune de ces fonctionnalités : elle emballe l'app web
 actuelle dans Electron + page `/download` + auto-update. ¹ En phase 1, faute de
-picker Electron sur Windows, la source est **imposée à l'écran principal** — une
-béquille temporaire levée par le vrai sélecteur en phase 2 (cf.
+picker Electron sur Windows, la source était **imposée à l'écran principal** ;
+cette béquille est levée depuis que le sélecteur existe (cf.
 [Contraintes Electron](#contraintes-electron-découvertes-au-test-phase-1)). Les
 quatre dernières lignes partagent le prérequis lourd de la **phase 3** —
 **reprendre la main sur les frames vidéo** (cf.
@@ -165,8 +165,11 @@ possible :
 - `desktopCapturer.getSources` (main process Electron depuis la v17) retourne les
   écrans et fenêtres avec **vignettes** (`thumbnail`) et **icônes d'application**
   (`appIcon`, via `fetchWindowIcons`).
-- Notre grille : vignettes live, icônes, recherche — l'UI de la maquette, telle
-  quelle.
+- Notre grille : vignettes, icônes, recherche — l'UI de la maquette, telle quelle.
+  Les vignettes sont un **instantané pris à l'ouverture**, pas un aperçu live :
+  rafraîchir voudrait dire re-capturer tous les écrans et fenêtres en boucle
+  (mesuré : ~540 ms l'appel avec vignettes, 9 sources). Réouvrir le sélecteur
+  suffit.
 - Le choix est appliqué via `setDisplayMediaRequestHandler`, qui **intercepte** la
   demande de capture et lui passe la source retenue — donc **pas de re-consentement
   navigateur**. En web, `surfaceSwitching: 'include'` permettait déjà de changer de
@@ -174,6 +177,42 @@ possible :
 
 C'est aussi la fonctionnalité qui **exclut Tauri / Wails / Deno** : aucun n'a
 d'équivalent `desktopCapturer` (cf. [Techno](#techno--electron)).
+
+**Livré (phase 2).** `electron/src/main.ts` expose `ss:sources` (liste + vignettes
++ icônes) et `ss:select-source` (nomme le choix) ; `src/lib/source-picker.ts`
+tient la grille. Trois pièges rencontrés à l'écriture, tous vérifiés sur machine :
+
+- **`ss:select-source` doit être `invoke`, pas `send`.** L'identifiant et l'appel
+  `getDisplayMedia` empruntent deux pipes IPC différents : rien ne les ordonne. En
+  fire-and-forget, ça partage la source précédente une fois de temps en temps.
+- **Le handler relit les sources**, il ne réutilise pas celles envoyées à la
+  grille : une fenêtre peut se fermer entre la liste et la confirmation, et un
+  `DesktopCapturerSource` périmé donne une piste morte. Relecture en
+  `thumbnailSize: {0,0}` (Electron saute la capture d'image ; ~310 ms au lieu de
+  ~540 ms).
+- **Aucun repli, jamais.** Une source choisie qui a disparu fait échouer la
+  capture ; une demande sans source choisie échoue aussi. `setDisplayMediaRequestHandler`
+  **est** le consentement — ce qu'il renvoie part sans prompt système — donc il ne
+  répond que ce que l'utilisateur a désigné. L'ancien repli « rien de choisi →
+  écran principal » était inatteignable par l'app (`capture()` passe toujours par
+  le sélecteur) : il ne servait plus qu'à du code qui n'est pas le nôtre, pour le
+  plus large partage possible.
+
+**Si la source disparaît en cours de partage** (fenêtre fermée), rien de spécial
+n'a été ajouté : on compte sur `ended`, que `host.ts` câble déjà sur `stopSource`
+— l'host retomberait sur « choose source », la room et les viewers survivant, les
+viewers passant en écran d'attente, exactement comme au « Stop sharing » du
+navigateur (ce chemin-là, lui, est couvert en e2e). **Non vérifié** en revanche :
+qu'une piste WGC émette bien `ended` quand la fenêtre se ferme sous Windows,
+plutôt que de rester vivante sur un cadre noir. À tester à l'occasion.
+
+Trois détails de plateforme constatés : `appIcon` peut être **non-null mais vide**
+(rendu en `<img>` cassé si on ne teste pas `isEmpty()`) ; `screen.getAllDisplays()`
+raisonne en **DIP** — un 2560×1440 à 150 % s'annonce 1707×960 si on n'applique pas
+`scaleFactor` ; et `nativeImage.toDataURL()` encode en **PNG sans perte**,
+synchrone sur le thread main, ce qui est absurde pour une vignette (mesuré sur un
+écran : 120 Ko en PNG contre **10 Ko en `toJPEG(70)`**, ×12). Une session Windows
+réelle compte 30-60 fenêtres — l'icône garde PNG, elle a besoin de l'alpha.
 
 ### HDR
 
@@ -387,12 +426,14 @@ sont dans `electron/src/main.ts`, commentés sur place.
 // pour que la phase 1 capture quelque chose sans construire la feature n°2.
 ```
 
-**Source imposée — phase 1 uniquement.** La coquille capture **l'écran principal**
-(+ audio système via `audio: 'loopback'` quand la page le demande), sans aucun
-choix possible. C'est une **béquille temporaire, pas le comportement cible** : le
-sélecteur visuel (grille écrans **et** fenêtres, vignettes live, icônes d'app)
-est la fonctionnalité n°2, livrée en **phase 2** via `desktopCapturer.getSources`
-sur ce même handler. Le jour où il arrive, cette béquille disparaît.
+**Source imposée — béquille levée.** En phase 1 la coquille capturait **l'écran
+principal** sans choix possible. Le sélecteur visuel de la phase 2 s'appuie sur ce
+même handler (cf.
+[Sélecteur de source natif](#sélecteur-de-source-natif)) : l'écran principal n'est
+plus qu'un repli quand la page appelle `getDisplayMedia` sans avoir rien désigné.
+`useSystemPicker` a été retiré au passage — maintenant qu'on a notre grille,
+autant qu'elle soit la même partout plutôt que macOS 15+ bascule sur la feuille
+système.
 
 ## Distribution
 
@@ -518,18 +559,16 @@ moment-là :
 | Phase                    | Contenu                                                                                                                                                                    | Sortie                                                                                                                     |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
 | **1 — coquille Electron** ✅ **livrée** | L'app web emballée dans Electron : scheme `app://`, CSP mirrorée, nav-lock, pas de menu, icône, close = quit, **page `/download`** + CTA accueil, **auto-update** câblé, packaging NSIS + job CI sur tag `v*.*.*`. `window.native` ne porte que `appOrigin`. **Source imposée à l'écran principal** (béquille, cf. ci-dessus). | **Validé de bout en bout** : installeur téléchargé depuis la Release, app installée, partage host desktop → viewer Chrome. Reste non prouvé : la mise à jour automatique (deux versions nécessaires). |
-| **2 — MVP**              | Audio par app (exclusion), grille de sources native, raccourcis globaux, réglages mémorisés, wake lock, notifications rejoint/quitte, avertissement HDR.                  | La version qui « récompense ». **Précédée d'un spike** : prouver que l'audio par process (Discord exclu) entre bien dans la peer connection — sinon la feature n°1 tombe, à réévaluer avant d'écrire le reste. |
+| **2 — MVP**              | Audio par app (exclusion), **grille de sources native ✅**, raccourcis globaux, réglages mémorisés, wake lock, notifications rejoint/quitte, avertissement HDR.            | La version qui « récompense ». Livrée par morceaux, le sélecteur en premier. Le spike audio est passé : `loopback-capture@2.0.0` sort du PCM 48 kHz / 16 bits / stéréo par paquets de 10 ms, et expose bien le mode **exclusion** — donc la feature n°1 tient. |
 | **3 — capture native**   | WGC/DXGI → injection : FPS garanti, tone-map HDR, encodage hardware, contrôle curseur. Fork architectural, **le vrai gain différentiel avec le web**.                     | Ouvert seulement si une de ces features est réellement demandée.                                                          |
 
 **À dire franchement : au sortir de la phase 1, l'app n'apporte rien qu'un
 navigateur ne fasse déjà** — elle fait même moins, la source étant imposée. C'est
 un socle technique (distribution, mise à jour, pont natif), pas un produit. Le
-critère « la récompense justifie le téléchargement » n'est rempli qu'à la
-**phase 2**, et c'est pour ça qu'elle commence par le spike qui la conditionne.
+critère « la récompense justifie le téléchargement » se remplit en **phase 2** :
+le sélecteur de source est la première pièce livrée, l'audio par app la suivante.
 
 ## Reste à trancher
 
-- **Comportement du sélecteur** quand une source disparaît en cours de session
-  (fenêtre fermée) — repli sur écran, ou pause ?
 - **macOS/Linux** : déclenchés par quel signal d'usage ? À décider quand Windows
   aura tourné.

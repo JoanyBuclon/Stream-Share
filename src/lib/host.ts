@@ -10,6 +10,7 @@ import { serial } from './serial.ts';
 import { WakeLock } from './wakelock.ts';
 import { reconcileRoster } from './roster.ts';
 import { el, hook, show, hide, setText, initials } from './dom.ts';
+import { pickSource } from './source-picker.ts';
 import {
   applyPreset,
   effectiveScale,
@@ -52,6 +53,7 @@ export class HostController {
   private stream: MediaStream | null = null; // raw capture (video + system audio), used for the preview
   private outgoing: MediaStream | null = null; // what peers receive (video + processed audio)
   private paused = false; // when true, buildOutgoing drops the video track
+  private sourceId: string | null = null; // desktop only: last pick, preselected in the picker
   private quality: Quality = { ...DEFAULT_QUALITY };
   private readonly mixer = new AudioMixer();
   private readonly audioQueue = serial(); // serializes outgoing rebuilds — no interleaving
@@ -91,8 +93,9 @@ export class HostController {
     this.refreshSidebar(); // 0 viewers → shows "waiting for friends"
 
     const signal = this.ac.signal;
-    // Empty-state "Choose source" opens the settings modal (pick source + tune quality there);
-    // the control-bar "Change source" is a direct quick re-pick.
+    // Empty-state "Choose source" opens the settings modal, which is where the source button
+    // lives (`btn-modal-source`) alongside quality and audio. Before a first source there is no
+    // other way in: the control bar's Settings button is inside the hidden `host-quality-bar`.
     el('btn-choose-source').addEventListener('click', this.openSettings, { signal });
     el('btn-pause').addEventListener('click', () => void this.togglePause(), { signal });
     el('btn-resume').addEventListener('click', () => void this.togglePause(), { signal });
@@ -111,7 +114,48 @@ export class HostController {
 
   // --- source capture ---
 
+  // Desktop shell: our own grid of screens and windows (see source-picker.ts). Browser: the
+  // native getDisplayMedia prompt, which is the only picker the web platform offers.
   private chooseSource = async (): Promise<void> => {
+    const native = window.native;
+    if (native) {
+      this.closeSettings(); // the picker replaces the panel it was opened from
+      let picked: string | null = null;
+      try {
+        picked = await pickSource(native, {
+          signal: this.ac.signal,
+          currentId: this.sourceId,
+          share: () => this.capture(), // the picker already told the shell which source this is
+        });
+      } catch (e) {
+        // pickSource throws only on a wiring bug (a missing id or data-hook). This method is a
+        // click listener, so without this it would be an invisible unhandled rejection.
+        console.error('stream-share: the source picker failed to open', e);
+        setText('settings-source-hint', 'capture failed — try another source');
+      }
+      if (picked) this.sourceId = picked; // dismissed → keep the previous pick preselected
+      // Cancelled: put back the panel the picker replaced, or the user lands on a bare stage with
+      // no way back to the quality settings. Not after teardown — that resolves null too, and a
+      // dialog opened then would sit over the next screen (see destroy()).
+      else if (!this.ac.signal.aborted) this.openSettings();
+      return;
+    }
+    try {
+      await this.capture();
+    } catch (e) {
+      // NotAllowedError = the user dismissed the prompt or a policy blocked it: intended, stay
+      // silent. The bare catch used to swallow everything, so NotReadableError (source locked by
+      // another app), OverconstrainedError, etc. looked identical to a cancel — a genuine failure
+      // with no feedback reads as a broken button. Surface those in the existing source hint.
+      if (!(e instanceof DOMException) || e.name !== 'NotAllowedError') {
+        setText('settings-source-hint', 'capture failed — try another source');
+      }
+    }
+  };
+
+  /** Capture whatever the platform resolves the request to, and install it. Throws on failure:
+   *  each caller surfaces the error where the user is actually looking. */
+  private async capture(): Promise<void> {
     const constraints: DisplayMediaStreamOptions = {
       video: { frameRate: { ideal: this.quality.fps } },
       // Left to its defaults, the browser runs its voice-tuned processing (AGC / noise suppression /
@@ -121,22 +165,12 @@ export class HostController {
         ? { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, sampleRate: 48000 }
         : false,
     };
-    try {
-      const stream = await navigator.mediaDevices.getDisplayMedia(constraints);
-      // The picker can resolve after the controller was destroyed (Stop/leave while it was open):
-      // don't run setStream on a torn-down controller — it would repaint the DOM and recreate peers.
-      if (this.ac.signal.aborted) return void stream.getTracks().forEach((t) => t.stop());
-      await this.setStream(stream);
-    } catch (e) {
-      // NotAllowedError = the user dismissed the picker or a policy blocked it: intended, stay
-      // silent. The bare catch used to swallow everything, so NotReadableError (source locked by
-      // another app), OverconstrainedError, etc. looked identical to a cancel — a genuine failure
-      // with no feedback reads as a broken button. Surface those in the existing source hint.
-      if (!(e instanceof DOMException) || e.name !== 'NotAllowedError') {
-        setText('settings-source-hint', 'capture failed — try another source');
-      }
-    }
-  };
+    const stream = await navigator.mediaDevices.getDisplayMedia(constraints);
+    // The prompt can resolve after the controller was destroyed (Stop/leave while it was open):
+    // don't run setStream on a torn-down controller — it would repaint the DOM and recreate peers.
+    if (this.ac.signal.aborted) return void stream.getTracks().forEach((t) => t.stop());
+    await this.setStream(stream);
+  }
 
   private setStream = async (capture: MediaStream): Promise<void> => {
     const previous = this.stream;

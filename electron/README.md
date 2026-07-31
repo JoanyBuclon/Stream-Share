@@ -1,23 +1,26 @@
 # StreamShare — desktop shell (Electron)
 
-Phase 1 "coquille": wraps the existing web build in an Electron window, adds auto-update and
-a downloadable installer. No native features yet (`window.native` carries only the web origin).
-See [`../docs/desktop.md`](../docs/desktop.md) for the full plan.
+Wraps the existing web build in an Electron window, adds auto-update and a downloadable
+installer (phase 1), plus the custom source picker (phase 2). Per-app audio is the next
+phase-2 feature. See [`../docs/desktop.md`](../docs/desktop.md) for the full plan.
 
 ## How it works
 
 - The Astro build (`../dist/`) is bundled and served over a privileged `app://` scheme
   (`src/main.ts`), so the renderer keeps a secure, non-opaque origin (required by
   getDisplayMedia / clipboard / localStorage).
-- The preload (`src/preload.ts`) injects `window.native = { appOrigin }`. The shared web code
-  reads it to target the real signaling server and build correct share links (it derives the
-  page origin from `location` otherwise).
+- The preload (`src/preload.ts`) injects `window.native`. The shared web code reads `appOrigin`
+  to target the real signaling server and build correct share links (it derives the page origin
+  from `location` otherwise), and its mere presence switches the host UI to the desktop path.
 - **Only the front-end is bundled** (`extraResources: ../dist`). The signaling server is NOT
   embedded: the app is a client of the deployed one — `https://stream.joanybuclon.com` by
   default, overridable with `SS_APP_ORIGIN`.
-- **Phase 1 forces the primary screen** as the capture source: Windows has no built-in
-  `getDisplayMedia` picker (`useSystemPicker` is macOS-15+ only), so the shell must supply a
-  source. The real screens/windows picker is phase 2 — see `docs/desktop.md`.
+- **The shell supplies the capture source**: Windows has no built-in `getDisplayMedia` picker.
+  `ss:sources` feeds the renderer's grid (`src/lib/source-picker.ts`), `ss:select-source` names
+  the pick, and `setDisplayMediaRequestHandler` routes it. That handler **is** the consent gate
+  — whatever it returns is shared with no OS prompt — so it only ever answers a source the user
+  explicitly picked. No "nothing selected" fallback: an unanswered request fails. See
+  `docs/desktop.md`.
 - Window close quits the app. No tray.
 
 ## Icon
