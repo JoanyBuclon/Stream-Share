@@ -3,6 +3,12 @@ name: CI & Publish
 on:
   push:
     branches: [master]
+    # Semver tags (`v0.3.0`) trigger the desktop packaging job — build + publish the .exe to the
+    # matching GitHub Release. The `*.*.*` shape is deliberate: `v*` would also fire on a `v1`
+    # or `vnext` tag, which electron-builder can't turn into a valid release version.
+    # `publish` (Docker images) is ref-guarded to master pushes, so a tag runs `quality` +
+    # `desktop` but never rebuilds the web/signaling images.
+    tags: ["v*.*.*"]
   # Sans ceci, `quality` ne tourne qu'APRÈS le merge : une PR ne peut pas être validée par la
   # CI et la casse se découvre déjà sur master. `publish` reste sur push (needs: quality), donc
   # une PR exécute les tests sans jamais publier d'image.
@@ -53,6 +59,10 @@ jobs:
       - name: Test (signaling)
         run: pnpm --ignore-workspace --dir signaling test
 
+      # Pure config logic of the desktop shell — node strips the TS, no electron install needed.
+      - name: Test (desktop config)
+        run: node --test electron/src/config.test.ts
+
       # E2E: real host↔viewer WebRTC flow in headless Chromium (Playwright starts the dev +
       # signaling servers itself since CI=true → reuseExistingServer is off).
       - name: Install Playwright browser
@@ -64,8 +74,9 @@ jobs:
   publish:
     needs: quality
     # `needs` ne suffit pas : sans ce garde, l'ajout du trigger pull_request publierait une
-    # image à chaque PR (et échouerait sur les forks, qui n'ont pas packages: write).
-    if: github.event_name == 'push'
+    # image à chaque PR (et échouerait sur les forks, qui n'ont pas packages: write). Le garde
+    # de ref exclut aussi les tags `v*` : ceux-ci ne republient pas les images web/signaling.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -113,3 +124,51 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+  # Desktop installer (Windows). Runs only on a semver `vx.y.z` tag, in parallel with `publish`,
+  # after `quality`. Builds the web dist, then packages + publishes the .exe (and latest.yml for
+  # the auto-updater) to the matching GitHub Release.
+  desktop:
+    needs: quality
+    # Matches the `v*.*.*` trigger; the step below asserts the tag equals the package version.
+    if: startsWith(github.ref, 'refs/tags/v')
+    # Note: the trigger already filters the shape — this guard only excludes branch pushes/PRs.
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "24"
+
+      - name: Setup pnpm
+        run: npm install -g pnpm
+
+      # electron-builder tags the release from electron/package.json, NOT the pushed tag — a
+      # mismatch would publish artefacts to the wrong (or a new) release. Fail loudly instead.
+      - name: Check tag matches desktop version
+        shell: bash
+        run: |
+          VER="v$(node -p "require('./electron/package.json').version")"
+          if [ "${GITHUB_REF_NAME}" != "$VER" ]; then
+            echo "Tag ${GITHUB_REF_NAME} != electron/package.json version $VER"; exit 1
+          fi
+
+      - name: Install dependencies (web)
+        run: pnpm install --frozen-lockfile
+
+      - name: Build web
+        run: pnpm run build
+
+      # Standalone sub-project with its own lockfile (like signaling) — --ignore-workspace.
+      - name: Install dependencies (desktop)
+        run: pnpm install --frozen-lockfile --ignore-workspace --dir electron
+
+      - name: Build & publish desktop installer
+        run: pnpm --ignore-workspace --dir electron release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

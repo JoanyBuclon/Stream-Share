@@ -1,0 +1,35 @@
+appId: com.joanybuclon.streamshare
+productName: Stream Share
+copyright: © Joany Buclon
+
+directories:
+  output: release
+
+# esbuild output + the manifest; electron-builder always bundles production dependencies
+# (electron-updater) on top of this glob.
+files:
+  - out/**/*
+  - package.json
+
+# The Astro build, served over app:// by main.ts (process.resourcesPath/dist when packaged).
+extraResources:
+  - from: ../dist
+    to: dist
+
+win:
+  target: nsis
+  # Unsigned for now (assumed decision): SmartScreen warns on first install. Documented on /download.
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+
+# electron-updater reads this to find latest.yml + the .exe on the matching GitHub Release.
+# releaseType: release publishes immediately — a `draft` (the default) is excluded from
+# /releases/latest and from the updater's "latest release" lookup, silently breaking both.
+publish:
+  provider: github
+  owner: JoanyBuclon
+  repo: Stream-Share
+  releaseType: release

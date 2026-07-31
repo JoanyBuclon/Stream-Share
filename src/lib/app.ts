@@ -33,6 +33,13 @@ function getToken(): string {
 }
 
 function signalingUrl(): string {
+  // Desktop shell: the page runs under app://, so derive the socket from the injected web
+  // origin instead of the (non-http) location. Inert in a browser (window.native is absent).
+  const appOrigin = window.native?.appOrigin;
+  if (appOrigin) {
+    const u = new URL(appOrigin);
+    return `${u.protocol === 'https:' ? 'wss' : 'ws'}://${u.host}/ws`;
+  }
   const { protocol, hostname, host: httpHost } = location;
   // Dev: the signaling runs standalone on :8080. Prod: same-origin behind Traefik at /ws.
   if (hostname === 'localhost' || hostname === '127.0.0.1') return 'ws://localhost:8080/ws';
@@ -199,8 +206,11 @@ function wireHome(): void {
   // Hosting needs getDisplayMedia, which no mobile browser implements. Say so instead of offering
   // a button that would silently do nothing. Joining stays wired — that's the whole mobile flow.
   const start = el<HTMLButtonElement>('btn-start');
-  if (supportsDisplayMedia()) start.addEventListener('click', () => void startShare());
-  else {
+  if (supportsDisplayMedia()) {
+    start.addEventListener('click', () => void startShare());
+    // Desktop browser (host-capable, not already the desktop app) → surface the download link.
+    if (!window.native) show(el('start-desktop-cta'));
+  } else {
     start.disabled = true;
     show(el('start-unsupported'));
   }

@@ -1,0 +1,26 @@
+{
+  "name": "stream-share-desktop",
+  "version": "0.3.0",
+  "description": "Desktop host shell for Stream-Share (Electron).",
+  "private": true,
+  "type": "module",
+  "main": "out/main.cjs",
+  "scripts": {
+    "build": "esbuild src/main.ts src/preload.ts --bundle --platform=node --format=cjs --target=node22 --external:electron --external:electron-updater --out-extension:.js=.cjs --outdir=out",
+    "start": "pnpm build && electron .",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test src/config.test.ts",
+    "dist": "pnpm build && electron-builder --publish never",
+    "release": "pnpm build && electron-builder --publish always"
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.9"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "electron": "^43.1.1",
+    "electron-builder": "^25.1.8",
+    "esbuild": "^0.24.2",
+    "typescript": "^6.0.3"
+  }
+}
