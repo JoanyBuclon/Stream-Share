@@ -8,7 +8,7 @@
   "type": "module",
   "main": "out/main.cjs",
   "scripts": {
-    "build": "esbuild src/main.ts src/preload.ts --bundle --platform=node --format=cjs --target=node22 --external:electron --external:electron-updater --out-extension:.js=.cjs --outdir=out",
+    "build": "esbuild src/main.ts src/preload.ts --bundle --platform=node --format=cjs --target=node22 --external:electron --out-extension:.js=.cjs --outdir=out",
     "start": "pnpm build && electron .",
     "typecheck": "tsc --noEmit",
     "test": "node --test src/config.test.ts",

@@ -172,7 +172,27 @@ jobs:
       - name: Install dependencies (desktop)
         run: pnpm install --frozen-lockfile --ignore-workspace --ignore-scripts --dir electron
 
-      - name: Build & publish desktop installer
-        run: pnpm --ignore-workspace --dir electron release
+      # Build and upload are split on purpose. electron-builder's own GitHub publisher reported
+      # success while only the .blockmap landed on the release — no installer, no latest.yml —
+      # twice. Building with `--publish never` and uploading explicitly makes both steps visible
+      # in the log and fails the job when an artefact is missing, instead of shipping a release
+      # that looks fine and cannot be installed or updated.
+      - name: Build desktop installer
+        run: pnpm --ignore-workspace --dir electron dist
+
+      - name: Show built artefacts
+        run: Get-ChildItem electron/release | Select-Object Name, Length | Format-Table -AutoSize
+
+      # `gh` is preinstalled on the runner. --clobber replaces assets left by an earlier run on
+      # the same tag. The three files are exactly what electron-updater needs.
+      - name: Upload installer to the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $exe = Get-ChildItem electron/release/*.exe -ErrorAction SilentlyContinue
+          $map = Get-ChildItem electron/release/*.blockmap -ErrorAction SilentlyContinue
+          $yml = Get-ChildItem electron/release/latest.yml -ErrorAction SilentlyContinue
+          if (-not $exe) { throw "no installer in electron/release — nothing to publish" }
+          if (-not $yml) { throw "no latest.yml — the auto-updater would be blind" }
+          gh release upload $env:GITHUB_REF_NAME $exe.FullName $map.FullName $yml.FullName --clobber
+          if ($LASTEXITCODE -ne 0) { throw "gh release upload failed ($LASTEXITCODE)" }

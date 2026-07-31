@@ -5,11 +5,14 @@ copyright: © Joany Buclon
 directories:
   output: release
 
-# esbuild output + the manifest; electron-builder always bundles production dependencies
-# (electron-updater) on top of this glob.
+# esbuild output + the manifest, and nothing else. The negation matters: electron-builder walks
+# up to the repo root and pulls in ITS production dependencies (astro, tailwindcss and their
+# whole tree — 7300 files, 118 MB) which have no business in a desktop app. Everything we need
+# at runtime is bundled into out/main.cjs, so no node_modules ships at all.
 files:
   - out/**/*
   - package.json
+  - '!node_modules/**'
 
 # The Astro build, served over app:// by main.ts (process.resourcesPath/dist when packaged).
 extraResources:
