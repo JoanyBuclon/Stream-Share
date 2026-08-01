@@ -33,6 +33,14 @@ nsis:
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
+  # No spaces in the artefact name, and this is load-bearing, not cosmetic. By default
+  # electron-builder writes "StreamShare Setup x.y.z.exe" on disk but records the URL-safe
+  # "StreamShare-Setup-x.y.z.exe" in latest.yml. We upload with `gh release upload`, and GitHub
+  # replaces spaces with DOTS — so the asset lands as "StreamShare.Setup.x.y.z.exe" and the
+  # updater 404s on a name nobody ever created. Same trap for the .blockmap.
+  # (electron-builder's own publisher hides this by uploading the hyphenated name itself; we
+  # don't use it, see the split build/upload in .github/workflows/docker-publish.yml.)
+  artifactName: ${productName}-Setup-${version}.${ext}
 
 # electron-updater reads this to find latest.yml + the .exe on the matching GitHub Release.
 # releaseType: release publishes immediately — a `draft` (the default) is excluded from
