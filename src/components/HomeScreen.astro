@@ -1,5 +1,8 @@
 ---
 // Landing: start a share or join one with a code. Behaviour wired in src/lib/app.ts.
+// The version in the footer comes from the manifest so it can never drift from a hand-typed one.
+// The ROOT package.json, not electron/'s: this is the web app. They happen to move together today.
+import { version } from '../../package.json';
 ---
 
 <!-- Not `hidden` like the other screens: it's the default route, and shipping it visible lets the
@@ -124,6 +127,6 @@
     class='flex items-center justify-between border-t border-white/[0.05] px-10 py-[22px] font-mono text-[11px] text-muted-4 max-sm:px-5'
   >
     <span>webRTC · direct connection</span>
-    <span>StreamShare — v0.3.3</span>
+    <span>StreamShare — v{version}</span>
   </footer>
 </section>

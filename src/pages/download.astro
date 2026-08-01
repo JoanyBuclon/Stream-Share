@@ -1,7 +1,8 @@
 ---
 // /download — desktop app landing. Layout, copy and tokens taken from the updated mockup
-// (docs/mockup.html, "/download" screen). Both download affordances point at the latest GitHub
-// Release; macOS/Linux are announced, not shipped (cf. docs/desktop.md § Plateformes à venir).
+// (docs/mockup.html, "/download" screen). The Windows row links the installer directly; the button
+// below it goes to the repo. macOS/Linux are announced, not shipped (cf. docs/desktop.md
+// § Plateformes à venir).
 import { Font } from 'astro:assets';
 import '../styles/app.css';
 // electron/package.json, NOT the root one: the CI job refuses to publish unless the git tag equals
@@ -100,7 +101,7 @@ const platforms = [
         <div class='mb-[52px] grid grid-cols-2 gap-3.5 max-sm:mb-9 max-sm:grid-cols-1'>
           {
             benefits.map((b) => (
-              <div class='rounded-2xl border border-white/[0.08] bg-panel p-[22px]'>
+              <div class='rounded-2xl border border-white/[0.08] bg-panel p-[22px] transition-transform hover:-translate-y-[3px]'>
                 <div class='flex items-center justify-between gap-3'>
                   <span class='flex size-[38px] items-center justify-center rounded-[10px] border border-white/[0.08] bg-elev font-mono text-[9.5px] tracking-[0.06em] text-fg-dim'>
                     {b.tag}
@@ -148,8 +149,13 @@ const platforms = [
             }
           </div>
 
+          <!-- New tab: leaving the page would lose the download the visitor came for. It is also
+               what the desktop shell keys on — setWindowOpenHandler sends target=_blank straight to
+               the system browser instead of loading github.com with our privileged preload. -->
           <a
             href={REPO_URL}
+            target='_blank'
+            rel='noopener noreferrer'
             class='mt-[26px] block cursor-pointer rounded-xl bg-cream p-[17px] text-center text-base font-semibold text-ink transition-transform hover:-translate-y-[2px]'
           >
             Discover on GitHub
