@@ -52,25 +52,34 @@ d'ensemble, puis le détail des trois qui portent le produit.
 | ------------------------------- | ------------------------------------------------------------------ | ------------ |
 | **Audio par application** ✅     | `getDisplayMedia` capture le mix système entier, ou rien           | 2 — livré    |
 | **Sélecteur de source natif** ✅ | Picker Chrome imposé, aucune API web ne liste les fenêtres         | 2 — livré¹   |
-| **Avertissement HDR**           | Aucune API web ne connaît l'_état_ HDR du compositeur              | 2 — MVP      |
-| **Raccourcis globaux**          | Sandbox navigateur : rien hors de la fenêtre                       | 2 — MVP      |
 | **Réglages mémorisés**          | Rien ne survit proprement d'une session à l'autre                  | 2 — MVP      |
 | **Wake lock fiable**            | `navigator.wakeLock` best-effort, révocable                        | 2 — MVP      |
-| **Notifications natives**       | Pas d'alerte quand un viewer rejoint (fenêtre en arrière-plan)     | 2 — MVP      |
+| **Notifications natives**       | Pas d'alerte hors fenêtre : viewer qui rejoint/quitte, mise à jour | 2 — MVP      |
 | **Tone-map HDR correct**        | `getDisplayMedia` écrase le HDR par un clamp brutal, sans tone-map | 3 — natif    |
 | **FPS élevé garanti (120/144)** | `getDisplayMedia` best-effort, souvent non honoré                  | 3 — natif    |
 | **Encodage hardware**           | Le navigateur n'expose ni NVENC ni QuickSync ni AMF                | 3 — natif    |
-| **Contrôle du curseur**         | La contrainte `cursor` est ignorée par les navigateurs             | 3 — natif    |
+| **Contrôle du curseur**         | La contrainte `cursor` est ignorée par les navigateurs             | 3 — natif²   |
 
 La **phase 1** n'apporte aucune de ces fonctionnalités : elle emballe l'app web
 actuelle dans Electron + page `/download` + auto-update. ¹ En phase 1, faute de
 picker Electron sur Windows, la source était **imposée à l'écran principal** ;
 cette béquille est levée depuis que le sélecteur existe (cf.
-[Contraintes Electron](#contraintes-electron-découvertes-au-test-phase-1)). Les
-quatre dernières lignes partagent le prérequis lourd de la **phase 3** —
-**reprendre la main sur les frames vidéo** (cf.
-[Capture native](#capture-native-fps-hdr-encodage-curseur)). Détail des phases :
-[Chemin d'exécution](#chemin-dexécution).
+[Contraintes Electron](#contraintes-electron-découvertes-au-test-phase-1)).
+² Envisagé en phase 2, écarté sur vérification : **Electron 43.2 n'expose rien**
+pour le curseur de capture — ni sur `desktopCapturer`, ni dans les options de
+`setDisplayMediaRequestHandler`. Le levier (`IsCursorCaptureEnabled` de WGC) vit
+sous Chromium, hors de portée du JS. Les quatre dernières lignes partagent donc
+le même prérequis lourd de **phase 3** — **reprendre la main sur les frames
+vidéo** (cf. [Capture native](#capture-native-fps-hdr-encodage-curseur)). Détail
+des phases : [Chemin d'exécution](#chemin-dexécution).
+
+> **Abandonnés après usage réel (2026-08-01)**, pas reportés :
+> **les raccourcis globaux** — le contrôle sans alt-tab n'a jamais manqué en
+> session, et des hotkeys système entrent en conflit avec les jeux, ce qui est
+> exactement le contexte visé ; **l'avertissement HDR** — un bandeau « coupez
+> votre HDR » est un aveu, pas une fonctionnalité, et le seul vrai correctif est
+> le tone-map de la phase 3. Tous deux sont retirés de `/download`, qui les
+> annonçait.
 
 > **Hors périmètre**, définitivement : la composition de scène (écran + webcam +
 > overlays) — c'est OBS, on partage un écran — et l'ouverture de port /
@@ -344,20 +353,24 @@ HDR / 10 bits / BT.2020 n'est négociable sur une `RTCPeerConnection` en 2026 (V
 profil 2, AV1 Main10, HEVC Main10 : capacités codec, jamais offertes dans le SDP
 WebRTC). Donc **il faut tone-mapper en SDR avant d'entrer dans la peer
 connection** — la question n'est pas _si_ on convertit, mais _comment_. Le web
-fait un clamp brutal ; nous, on peut faire mieux. Deux niveaux :
+fait un clamp brutal ; nous, on peut faire mieux — mais une seule façon compte :
 
-1. **Avertissement (MVP).** `DXGI_OUTPUT_DESC1` (via `IDXGIOutput6::GetDesc1`,
-   champ `ColorSpace`) donne l'**état HDR courant** du compositeur — allumé ou
-   éteint, maintenant. Le web n'a que `matchMedia('(dynamic-range: high)')`, qui
-   ne dit que la **capacité** de l'écran, jamais son état. On affiche donc un
-   avertissement natif fiable « votre HDR est allumé, coupez-le (`Win+Alt+B`) » —
-   pansement immédiat, gratuit.
-2. **Tone-map correct (phase capture native).** Faire ce que fait OBS : capturer
-   la surface native (Windows Graphics Capture en `R16G16B16A16_FLOAT` / scRGB, le
-   HDR intact), appliquer **notre** tone-map HDR→SDR avec un « SDR white level »
-   réglable (BT.2390 est le standard de référence), puis injecter les frames.
-   **Web-impossible par construction**, durable — mais couplé au chantier lourd
-   ci-dessous.
+**Tone-map correct (phase capture native).** Faire ce que fait OBS : capturer la
+surface native (Windows Graphics Capture en `R16G16B16A16_FLOAT` / scRGB, le HDR
+intact), appliquer **notre** tone-map HDR→SDR avec un « SDR white level » réglable
+(BT.2390 est le standard de référence), puis injecter les frames.
+**Web-impossible par construction**, durable — mais couplé au chantier lourd
+ci-dessous.
+
+> **L'avertissement HDR est abandonné** (2026-08-01). Le plan prévoyait un
+> pansement de phase 2 : lire l'état HDR courant du compositeur via
+> `DXGI_OUTPUT_DESC1` (`IDXGIOutput6::GetDesc1`, champ `ColorSpace`) — ce que le
+> web ne sait pas faire, `matchMedia('(dynamic-range: high)')` ne donnant que la
+> **capacité** de l'écran, jamais son état — et afficher « votre HDR est allumé,
+> coupez-le (`Win+Alt+B`) ». Techniquement juste, produit médiocre : ça demande à
+> l'utilisateur de dégrader son propre écran pour arranger le nôtre, et ça coûte
+> un binding natif de plus pour du texte. Si le HDR gêne vraiment, la réponse est
+> le tone-map ci-dessus, pas un bandeau.
 
 ### Capture native : FPS, HDR, encodage, curseur
 
@@ -387,19 +400,23 @@ Chromium réel avant de promettre le gain d'encodage.
 
 ### Confort système
 
-- **Raccourcis globaux** (`globalShortcut`) : mute micro / pause / stop **sans
-  alt-tab**, pendant qu'on joue en plein écran.
-- **Réglages mémorisés** entre sessions : dernière source, preset qualité, listes
-  d'exclusion audio.
+- **Réglages mémorisés** entre sessions : preset qualité, résolution, fps,
+  bitrate, micro, son système. Aujourd'hui tout repart de `DEFAULT_QUALITY` à
+  chaque lancement. Côté web aussi — c'est du `localStorage` dans `settings.ts`,
+  pas un chantier natif, et ça profite aux deux.
 - **Wake lock fiable** : `powerSaveBlocker` natif (`prevent-display-sleep`) —
   remplace le `navigator.wakeLock` best-effort du web (`wakelock.ts`).
-- **Notifications natives** quand un viewer **rejoint ou quitte**, utile fenêtre en
-  arrière-plan. C'est **la seule** notification — rien de plus.
+- **Notifications natives**, et **seulement ces trois** :
+  1. un viewer **rejoint** le stream ;
+  2. un viewer **quitte** le stream ;
+  3. une **nouvelle version est détectée** — en plus de celle qu'`electron-updater`
+     émet déjà quand la mise à jour est *prête à installer*. Deux moments
+     distincts : « on l'a vue » et « elle est téléchargée ».
 
 **Pas de tray.** Aucune icône de barre système, aucune réduction en arrière-plan :
-fermer la fenêtre **quitte l'application** (cf. [Décisions](#décisions)). Les
-raccourcis globaux suffisent au contrôle sans alt-tab ; un tray n'ajouterait qu'un
-état « app cachée mais vivante » qu'on ne veut pas.
+fermer la fenêtre **quitte l'application** (cf. [Décisions](#décisions)). Un tray
+n'ajouterait qu'un état « app cachée mais vivante » qu'on ne veut pas, et sans
+raccourcis globaux (abandonnés) il n'y aurait de toute façon rien à y piloter.
 
 ## Techno — Electron
 
@@ -444,7 +461,7 @@ système butent.
 > corrigé, **et** WebRTC activé dans WebKitGTK des distros, **et** WebView2 dotée
 > d'une vraie API de sélection de source. Piste à surveiller : `deno desktop
 --backend cef` (Chromium embarqué, piloté en TypeScript) — s'il se stabilise et
-> gagne les raccourcis globaux, c'est le successeur naturel.
+> gagne le loopback audio par process, c'est le successeur naturel.
 
 ## Architecture
 
@@ -578,8 +595,15 @@ système.
 ```
 
 - **La page `/download`** présente les avantages de l'app (audio par app,
-  sélecteur de source, HDR, raccourcis globaux) et un lien de téléchargement :
+  sélecteur de source, puis HDR et FPS garanti) et un lien de téléchargement :
   **Windows d'abord**, macOS et Linux dans un second temps.
+
+  Règle : une carte décrit soit du **livré**, soit du **`soon:true`** — qui reçoit
+  le même traitement « Coming soon » que les lignes macOS/Linux plus bas. Rien
+  d'annoncé au présent qui n'existe pas. La page affichait le HDR et les raccourcis
+  globaux comme s'ils fonctionnaient déjà : les raccourcis sont abandonnés, le HDR
+  et le FPS garanti sont de la phase 3 et le disent. C'est la seule page du projet
+  que lit quelqu'un d'autre que nous, juste avant d'installer un binaire non signé.
 
 ## CI / packaging
 
@@ -679,9 +703,9 @@ moment-là :
 
 | Phase                    | Contenu                                                                                                                                                                    | Sortie                                                                                                                     |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
-| **1 — coquille Electron** ✅ **livrée** | L'app web emballée dans Electron : scheme `app://`, CSP mirrorée, nav-lock, pas de menu, icône, close = quit, **page `/download`** + CTA accueil, **auto-update** câblé, packaging NSIS + job CI sur tag `v*.*.*`. `window.native` ne porte que `appOrigin`. **Source imposée à l'écran principal** (béquille, cf. ci-dessus). | **Validé de bout en bout** : installeur téléchargé depuis la Release, app installée, partage host desktop → viewer Chrome. Reste non prouvé : la mise à jour automatique (deux versions nécessaires). |
-| **2 — MVP**              | **Audio par app (une case par app) ✅**, **grille de sources native ✅**, raccourcis globaux, réglages mémorisés, wake lock, notifications rejoint/quitte, avertissement HDR.            | La version qui « récompense ». Livrée par morceaux, le sélecteur en premier. Le spike audio est passé : `loopback-capture@2.0.0` sort du PCM 48 kHz / 16 bits / stéréo par paquets de 10 ms, et une session par app tient (16 mesurées) — donc la feature n°1 va jusqu'au modèle de la maquette. |
-| **3 — capture native**   | WGC/DXGI → injection : FPS garanti, tone-map HDR, encodage hardware, contrôle curseur. Fork architectural, **le vrai gain différentiel avec le web**.                     | Ouvert seulement si une de ces features est réellement demandée.                                                          |
+| **1 — coquille Electron** ✅ **livrée** | L'app web emballée dans Electron : scheme `app://`, CSP mirrorée, nav-lock, pas de menu, icône, close = quit, **page `/download`** + CTA accueil, **auto-update** câblé, packaging NSIS + job CI sur tag `v*.*.*`. `window.native` ne porte que `appOrigin`. **Source imposée à l'écran principal** (béquille, cf. ci-dessus). | **Validé de bout en bout** : installeur téléchargé depuis la Release, app installée, partage host desktop → viewer Chrome. La mise à jour automatique, longtemps non prouvée faute de deux versions, l'est depuis : 0.3.1 → 0.3.2 → 0.3.3 en conditions réelles. |
+| **2 — MVP**              | **Audio par app (une case par app) ✅**, **grille de sources native ✅**, **auto-update validé ✅** (0.3.1→0.3.2→0.3.3 sur machine réelle) ; reste : **réglages mémorisés** (prochaine étape), **wake lock natif**, **notifications** (rejoint / quitte / mise à jour détectée). Abandonnés : raccourcis globaux, avertissement HDR. | La version qui « récompense ». Livrée par morceaux, le sélecteur en premier. Le spike audio est passé : `loopback-capture@2.0.0` sort du PCM 48 kHz / 16 bits / stéréo par paquets de 10 ms, et une session par app tient (16 mesurées) — donc la feature n°1 va jusqu'au modèle de la maquette. |
+| **3 — capture native + plateformes** | WGC/DXGI → injection : FPS garanti, tone-map HDR, encodage hardware, contrôle curseur. Puis **macOS / Linux**, précédés d'une analyse détaillée de ce qui doit changer (cf. [Plateformes à venir](#plateformes-à-venir) : l'audio par app y a un binding différent, ou aucun). Fork architectural, **le vrai gain différentiel avec le web**. | **Confirmée nécessaire** après une session en conditions réelles (2026-08-01) — plus « ouverte seulement si demandée ». |
 
 **À dire franchement : au sortir de la phase 1, l'app n'apporte rien qu'un
 navigateur ne fasse déjà** — elle fait même moins, la source étant imposée. C'est
@@ -691,5 +715,12 @@ le sélecteur de source est la première pièce livrée, l'audio par app la suiv
 
 ## Reste à trancher
 
-- **macOS/Linux** : déclenchés par quel signal d'usage ? À décider quand Windows
-  aura tourné.
+- **macOS/Linux** : tranché — **phase 3**, après la capture native. Ce qui reste
+  à décider est le *contenu* : une analyse détaillée précédera le chantier, parce
+  que la fonctionnalité n°1 n'y est pas portable telle quelle (ScreenCaptureKit
+  sur macOS avec un binding semi-maintenu, **rien de maintenu** sur Linux/PipeWire
+  — cf. [Plateformes à venir](#plateformes-à-venir)). Sur Wayland, la grille de
+  sources n'existe pas non plus. Ce sont deux ports différents, pas un.
+- **Le plafond d'upload en maillage** : l'estimation (`estimatedUpload`) est
+  affichée, jamais mesurée en vrai. À observer à la prochaine session à 3-4 avant
+  d'en faire un chantier.

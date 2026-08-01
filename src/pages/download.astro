@@ -4,138 +4,160 @@
 // Release; macOS/Linux are announced, not shipped (cf. docs/desktop.md § Plateformes à venir).
 import { Font } from 'astro:assets';
 import '../styles/app.css';
+// electron/package.json, NOT the root one: the CI job refuses to publish unless the git tag equals
+// this exact value (.github/workflows/docker-publish.yml), so it is the only version guaranteed to
+// match a real Release. The filename below must stay in step with electron-builder.yml's
+// `artifactName` — that pair already cost one silently broken auto-updater.
+import { version } from '../../electron/package.json';
 
-const RELEASES_URL = 'https://github.com/JoanyBuclon/Stream-Share/releases/latest';
+const REPO_URL = 'https://github.com/JoanyBuclon/Stream-Share';
+// Straight at the installer: one click instead of Releases → assets → find the .exe. The cost is
+// that this 404s in the window between bumping the version and the Release going up.
+const WINDOWS_INSTALLER_URL = `${REPO_URL}/releases/download/v${version}/StreamShare-Setup-${version}.exe`;
 
 // Mono badge + copy per benefit, in the mockup's order.
+//
+// `soon: true` renders the same "Coming soon" treatment as the macOS/Linux rows below, and it is
+// the ONLY way an unshipped feature may appear here. This is the one page a stranger reads before
+// trusting us with an unsigned installer, so a promise has to look like a promise — the page used
+// to present tone-mapped HDR and global shortcuts as if they already worked. The shortcuts were
+// dropped outright; these two are phase 3 (cf. docs/desktop.md § Capture native).
 const benefits = [
   {
     tag: 'AUD',
     title: 'Per-app audio',
-    body: 'Pick exactly which apps your friends hear. Share the game, mute Discord — no more echo of your own voice chat.',
+    soon: false,
+    body: 'Tick exactly which apps your friends hear. Share the game, mute Discord — no more echo of your own voice chat.',
   },
   {
     tag: 'SRC',
     title: 'Visual source picker',
-    body: 'A live thumbnail grid of every screen and window, with app icons and search. Switch source instantly, no browser prompt.',
+    soon: false,
+    body: 'A thumbnail grid of every screen and window, with app icons and search. Switch source instantly, no browser prompt.',
   },
   {
     tag: 'HDR',
     title: 'Correct HDR capture',
+    soon: true,
     body: 'Tone-mapped capture so HDR games keep their contrast instead of arriving washed out on your friends’ screens.',
   },
   {
-    tag: 'KEY',
-    title: 'Global shortcuts',
-    body: 'Pause, mute or switch source without leaving your game — the hotkeys work while the app is in the background.',
+    tag: 'FPS',
+    title: 'Guaranteed high frame rate',
+    soon: true,
+    body: 'A capture locked to 120 fps, instead of the browser’s best-effort rate that quietly settles for less.',
   },
 ];
 
 // `href: null` renders a disabled "Coming soon" row instead of a download button.
 const platforms = [
-  { name: 'Windows 10 / 11', detail: '64-bit', href: RELEASES_URL },
+  { name: 'Windows 10 / 11', detail: `64-bit · v${version} · updates automatically`, href: WINDOWS_INSTALLER_URL },
   { name: 'macOS', detail: 'Apple silicon + Intel', href: null },
   { name: 'Linux', detail: 'AppImage · deb', href: null },
 ];
 ---
 
 <!doctype html>
-<html lang="en">
+<html lang='en'>
   <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#0a0a0a" />
+    <meta charset='utf-8' />
+    <meta name='viewport' content='width=device-width, initial-scale=1' />
+    <meta name='theme-color' content='#0a0a0a' />
     <meta
-      name="description"
-      content="StreamShare for desktop — per-app audio, a visual source picker, correct HDR capture and global shortcuts."
+      name='description'
+      content='StreamShare for desktop — per-app audio, a visual source picker, and updates that install themselves.'
     />
-    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="icon" href="/favicon.ico" sizes="32x32" />
-    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-    <Font cssVariable="--font-hanken" preload />
+    <link rel='icon' href='/favicon.svg' type='image/svg+xml' />
+    <link rel='icon' href='/favicon.ico' sizes='32x32' />
+    <link rel='apple-touch-icon' href='/apple-touch-icon.png' />
+    <Font cssVariable='--font-hanken' preload />
     <title>StreamShare — desktop app</title>
   </head>
   <body>
-    <div class="flex min-h-dvh flex-col bg-ink">
-      <header class="flex items-center justify-between px-10 py-[26px] max-sm:px-5">
-        <a href="/" class="flex items-center gap-2.5">
-          <img src="/favicon.svg" alt="" class="size-[18px]" />
-          <span class="font-semibold tracking-[-0.01em]">StreamShare</span>
+    <div class='flex min-h-dvh flex-col bg-ink'>
+      <header class='flex items-center justify-between px-10 py-[26px] max-sm:px-5'>
+        <a href='/' class='flex items-center gap-2.5'>
+          <img src='/favicon.svg' alt='' class='size-[18px]' />
+          <span class='font-semibold tracking-[-0.01em]'>StreamShare</span>
         </a>
-        <a href="/" class="font-mono text-xs text-muted-3 transition-colors hover:text-muted-2">← back to home</a>
+        <a href='/' class='font-mono text-xs text-muted-3 transition-colors hover:text-muted-2'>← back to home</a>
       </header>
 
-      <main class="mx-auto w-full max-w-[1000px] flex-1 px-10 py-10 max-sm:px-5 max-sm:py-6">
-        <div class="mb-[52px] max-sm:mb-9">
-          <div class="mb-5 font-mono text-xs uppercase tracking-[0.14em] text-muted-3">desktop app for windows</div>
+      <main class='mx-auto w-full max-w-[1000px] flex-1 px-10 py-10 max-sm:px-5 max-sm:py-6'>
+        <div class='mb-[52px] max-sm:mb-9'>
+          <div class='mb-5 font-mono text-xs uppercase tracking-[0.14em] text-muted-3'>desktop app for windows</div>
           <h1
-            class="max-w-[640px] text-[54px] font-semibold leading-[1.04] tracking-[-0.03em] text-balance max-lg:text-[42px] max-sm:text-[31px]"
+            class='max-w-[640px] text-[54px] font-semibold leading-[1.04] tracking-[-0.03em] text-balance max-lg:text-[42px] max-sm:text-[31px]'
           >
             Everything the browser won't let you do.
           </h1>
-          <p class="mt-[22px] max-w-[520px] text-[17px] leading-[1.6] text-muted">
+          <p class='mt-[22px] max-w-[520px] text-[17px] leading-[1.6] text-muted'>
             Same rooms, same codes, same viewers in the browser. The desktop app just gives the host real control over
             audio, sources and capture quality.
           </p>
         </div>
 
-        <div class="mb-[52px] grid grid-cols-2 gap-3.5 max-sm:mb-9 max-sm:grid-cols-1">
+        <div class='mb-[52px] grid grid-cols-2 gap-3.5 max-sm:mb-9 max-sm:grid-cols-1'>
           {
             benefits.map((b) => (
-              <div class="rounded-2xl border border-white/[0.08] bg-panel p-[22px]">
-                <span class="flex size-[38px] items-center justify-center rounded-[10px] border border-white/[0.08] bg-elev font-mono text-[9.5px] tracking-[0.06em] text-fg-dim">
-                  {b.tag}
-                </span>
-                <div class="mt-4 text-[17px] font-semibold tracking-[-0.01em]">{b.title}</div>
-                <p class="mt-1.5 text-[13.5px] leading-[1.6] text-muted-2">{b.body}</p>
+              <div class='rounded-2xl border border-white/[0.08] bg-panel p-[22px]'>
+                <div class='flex items-center justify-between gap-3'>
+                  <span class='flex size-[38px] items-center justify-center rounded-[10px] border border-white/[0.08] bg-elev font-mono text-[9.5px] tracking-[0.06em] text-fg-dim'>
+                    {b.tag}
+                  </span>
+                  {b.soon && (
+                    <span class='rounded-lg bg-elev/60 px-3 py-1.5 text-[12px] font-medium text-muted-3'>
+                      Coming soon
+                    </span>
+                  )}
+                </div>
+                <div class={`mt-4 text-[17px] tracking-[-0.01em] ${b.soon ? 'text-muted-2' : 'font-semibold'}`}>
+                  {b.title}
+                </div>
+                <p class={`mt-1.5 text-[13.5px] leading-[1.6] ${b.soon ? 'text-muted-3' : 'text-muted-2'}`}>{b.body}</p>
               </div>
             ))
           }
         </div>
 
-        <div class="max-w-[560px]">
-          <div class="mb-3.5 font-mono text-[10px] uppercase tracking-[0.12em] text-muted-3">get the app</div>
+        <div class='max-w-[560px]'>
+          <div class='mb-3.5 font-mono text-[10px] uppercase tracking-[0.12em] text-muted-3'>get the app</div>
 
-          <a
-            href={RELEASES_URL}
-            class="block cursor-pointer rounded-xl bg-cream p-[17px] text-center text-base font-semibold text-ink transition-transform hover:-translate-y-[2px]"
-          >
-            Download for Windows
-          </a>
-          <div class="mt-2.5 text-center font-mono text-[11px] text-muted-3">
-            Windows 10 / 11 · 64-bit · updates automatically
-          </div>
-
-          <div class="mt-[26px] flex flex-col gap-2.5">
+          <div class='flex flex-col gap-2.5'>
             {
               platforms.map((p) => (
-                <div class="flex items-center justify-between gap-4 rounded-xl border border-white/[0.09] bg-panel px-[18px] py-4">
+                <div class='flex items-center justify-between gap-4 rounded-xl border border-white/[0.09] bg-panel px-[18px] py-4'>
                   <div>
                     <div class={p.href ? 'text-[15px] font-semibold' : 'text-[15px] text-muted-2'}>{p.name}</div>
-                    <div class="mt-0.5 font-mono text-[11px] text-muted-3">{p.detail}</div>
+                    <div class='mt-0.5 font-mono text-[11px] text-muted-3'>{p.detail}</div>
                   </div>
-                  {
-                    p.href ? (
-                      <a
-                        href={p.href}
-                        class="shrink-0 cursor-pointer rounded-lg bg-cream px-4 py-2 text-[13px] font-semibold text-ink"
-                      >
-                        Download
-                      </a>
-                    ) : (
-                      <span class="shrink-0 rounded-lg bg-elev/60 px-4 py-2 text-[13px] font-medium text-muted-3">
-                        Coming soon
-                      </span>
-                    )
-                  }
+                  {p.href ? (
+                    <a
+                      href={p.href}
+                      class='shrink-0 cursor-pointer rounded-lg bg-cream px-4 py-2 text-[13px] font-semibold text-ink'
+                    >
+                      Download
+                    </a>
+                  ) : (
+                    <span class='shrink-0 rounded-lg bg-elev/60 px-4 py-2 text-[13px] font-medium text-muted-3'>
+                      Coming soon
+                    </span>
+                  )}
                 </div>
               ))
             }
           </div>
 
-          <p class="mt-[26px] font-mono text-[11px] leading-[1.7] text-muted-4">
-            Windows may show a SmartScreen prompt — click <span class="text-muted-2">More info → Run anyway</span>. The
-            app isn't code-signed yet.
+          <a
+            href={REPO_URL}
+            class='mt-[26px] block cursor-pointer rounded-xl bg-cream p-[17px] text-center text-base font-semibold text-ink transition-transform hover:-translate-y-[2px]'
+          >
+            Discover on GitHub
+          </a>
+          <div class='mt-2.5 text-center font-mono text-[11px] text-muted-3'>source · releases · issues</div>
+
+          <p class='mt-[26px] font-mono text-[11px] leading-[1.7] text-muted-4'>
+            Windows may show a SmartScreen prompt — click <span class='text-muted-2'>More info → Run anyway</span>.
           </p>
         </div>
       </main>
