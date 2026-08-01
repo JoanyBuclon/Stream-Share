@@ -3,12 +3,17 @@ import { type Page } from '@playwright/test';
 // Replace the native screen-picker with a synthetic animated canvas stream, so the whole WebRTC
 // path runs for real (RTCPeerConnection, ICE, encode) but headless and without a user gesture.
 // Lives outside the specs because Playwright forbids importing one test file from another.
-export async function fakeDisplayMedia(page: Page): Promise<void> {
-  await page.addInitScript(() => {
+export async function fakeDisplayMedia(page: Page, opts: { sizes?: Array<[number, number]> } = {}): Promise<void> {
+  // `sizes` gives each successive capture its own dimensions (the last entry repeats). Needed to
+  // exercise anything that reacts to the SOURCE height — the resolution cap in particular, whose
+  // interesting case is switching from a small window to a big screen.
+  await page.addInitScript((sizes: number[][]) => {
+    let call = 0;
     navigator.mediaDevices.getDisplayMedia = async () => {
+      const [w, h] = sizes[Math.min(call++, sizes.length - 1)];
       const canvas = document.createElement('canvas');
-      canvas.width = 640;
-      canvas.height = 360;
+      canvas.width = w;
+      canvas.height = h;
       const ctx = canvas.getContext('2d');
       let hue = 0;
       setInterval(() => {
@@ -19,7 +24,35 @@ export async function fakeDisplayMedia(page: Page): Promise<void> {
       }, 66); // keep painting so the encoder has fresh frames
       return canvas.captureStream(15);
     };
-  });
+  }, opts.sizes ?? [[640, 360]]);
+}
+
+/**
+ * Record native toasts into `window.__toasts` instead of showing them.
+ *
+ * `focused` drives `document.hasFocus()`, which is the gate host.ts checks. It has to be stubbed:
+ * a Playwright run has two pages in two contexts and only one can hold the OS focus, so the real
+ * value is a coin toss and the test would be flaky about the thing it is not even testing.
+ *
+ * Scope, so nobody reads more into a green suite than it says: this covers **which events notify**,
+ * never that a toast reaches Windows. `Notification.permission` is not modelled at all — that was
+ * measured by hand against the real shell (granted under app://, no prompt), and a packaged build
+ * that stopped granting it would pass every test here. See docs/desktop.md § Contraintes Electron.
+ */
+export async function fakeNotifications(page: Page, opts: { focused?: boolean } = {}): Promise<void> {
+  await page.addInitScript(([focused]) => {
+    const w = window as unknown as { __toasts: string[] };
+    w.__toasts = [];
+    Object.defineProperty(document, 'hasFocus', { value: () => focused, configurable: true });
+    Object.defineProperty(window, 'Notification', {
+      value: class {
+        constructor(title: string) {
+          w.__toasts.push(title);
+        }
+      },
+      configurable: true,
+    });
+  }, [opts.focused ?? false] as const);
 }
 
 /** Sources the fake desktop shell reports; `thumbnail`/`icon` stay tiny so the grid renders. */

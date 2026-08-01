@@ -52,9 +52,9 @@ d'ensemble, puis le détail des trois qui portent le produit.
 | ------------------------------- | ------------------------------------------------------------------ | ------------ |
 | **Audio par application** ✅     | `getDisplayMedia` capture le mix système entier, ou rien           | 2 — livré    |
 | **Sélecteur de source natif** ✅ | Picker Chrome imposé, aucune API web ne liste les fenêtres         | 2 — livré¹   |
-| **Réglages mémorisés**          | Rien ne survit proprement d'une session à l'autre                  | 2 — MVP      |
+| **Réglages mémorisés** ✅        | Rien ne survit proprement d'une session à l'autre                  | 2 — livré    |
 | **Wake lock fiable**            | `navigator.wakeLock` best-effort, révocable                        | 2 — MVP      |
-| **Notifications natives**       | Pas d'alerte hors fenêtre : viewer qui rejoint/quitte, mise à jour | 2 — MVP      |
+| **Notifications natives** ✅     | Pas d'alerte hors fenêtre : viewer qui rejoint/quitte, mise à jour | 2 — livré    |
 | **Tone-map HDR correct**        | `getDisplayMedia` écrase le HDR par un clamp brutal, sans tone-map | 3 — natif    |
 | **FPS élevé garanti (120/144)** | `getDisplayMedia` best-effort, souvent non honoré                  | 3 — natif    |
 | **Encodage hardware**           | Le navigateur n'expose ni NVENC ni QuickSync ni AMF                | 3 — natif    |
@@ -400,18 +400,57 @@ Chromium réel avant de promettre le gain d'encodage.
 
 ### Confort système
 
-- **Réglages mémorisés** entre sessions : preset qualité, résolution, fps,
-  bitrate, micro, son système. Aujourd'hui tout repart de `DEFAULT_QUALITY` à
-  chaque lancement. Côté web aussi — c'est du `localStorage` dans `settings.ts`,
-  pas un chantier natif, et ça profite aux deux.
+- **Réglages mémorisés** ✅ : preset, résolution, fps, bitrate, son système, dans
+  `localStorage` (`parseQuality` / `serializeQuality`, `settings.ts`). Ce n'est pas
+  un chantier natif, donc le web en profite aussi — mais le store est **par
+  origine**, donc `app://bundle` et le site gardent des réglages séparés. Trois
+  décisions qui tiennent la feature :
+  - **Le micro n'est jamais restauré**, même s'il a été activé. C'est le seul
+    réglage à dimension vie privée : le remettre à `true` déclencherait
+    `getUserMedia` — et allumerait le témoin micro de l'OS — dès la première
+    capture d'une session où personne ne l'a demandé. Deux clics est l'erreur la
+    moins chère.
+  - **On persiste la résolution _demandée_, pas la résolution rabotée.**
+    `clampResolution` abaisse le plafond pour tenir dans la source ; or on partage
+    surtout des **fenêtres**, jamais hautes de 2160. Sauver la valeur rabotée
+    figerait le plafond à 720p pour toutes les sessions suivantes, y compris sur un
+    écran 4K, sans rien à l'écran pour l'expliquer. D'où `pickedResolution`.
+  - **Validation champ par champ**, avec repli sur le défaut du seul champ fautif.
+    L'argument n'est pas l'utilisateur hostile mais **notre propre schéma** : une
+    app qui se met à jour toute seule relit un store écrit par une version
+    antérieure d'elle-même. Le jour où `120` quitte l'échelle de fps, un parse
+    tout-ou-rien jetterait aussi un bitrate et un preset parfaitement valides.
 - **Wake lock fiable** : `powerSaveBlocker` natif (`prevent-display-sleep`) —
   remplace le `navigator.wakeLock` best-effort du web (`wakelock.ts`).
-- **Notifications natives**, et **seulement ces trois** :
+- **Notifications natives** ✅, et **seulement ces trois** :
   1. un viewer **rejoint** le stream ;
   2. un viewer **quitte** le stream ;
   3. une **nouvelle version est détectée** — en plus de celle qu'`electron-updater`
      émet déjà quand la mise à jour est *prête à installer*. Deux moments
      distincts : « on l'a vue » et « elle est téléchargée ».
+
+  **Pas d'IPC** : le renderer appelle directement l'API HTML5 `Notification`,
+  qu'Electron mappe sur un toast Windows natif. Mesuré sous `app://bundle` :
+  `Notification.permission` vaut déjà `granted`, aucun prompt. Le canal IPC prévu
+  au plan aurait été un préload, un handler et une garde d'origine pour atteindre
+  une API déjà présente. La notification de mise à jour, elle, n'a pas de renderer :
+  elle se crée dans le main, sur `autoUpdater.on('update-available')`.
+
+  Deux portes, et il faut être clair sur ce que la seconde fait : elle ne **limite
+  pas** les dégâts, elle les **sélectionne**. Un host non focalisé est en général un
+  host dont l'écran est regardé par toute la room, donc chaque toast s'affiche dans
+  le stream, pseudo compris. Assumé — la sidebar montre déjà ces noms — et c'est la
+  raison pour laquelle la liste d'événements reste aussi courte.
+  - `window.native` : silence total sur le web (pas de prompt de permission).
+  - `document.hasFocus()` : rien quand le host regarde déjà son app.
+  - **Le kick ne notifie pas** : le host vient de le décider, le lui annoncer est du
+    bruit. C'est le seul appelant du drapeau `silent`.
+  - **La reconnexion, si.** Envisagé de la silencer, puis écarté : `reconcileRoster`
+    diffe contre la vérité du serveur, et les viewers gardent leur lien P2P pendant
+    un blip — le diff est donc vide sauf si quelqu'un est réellement arrivé ou parti
+    pendant la coupure, c'est-à-dire précisément le moment où le host n'a aucun
+    autre moyen de l'apprendre. La rafale après une longue coupure est absorbée par
+    le `tag` partagé, qui remplace le toast précédent au lieu de l'empiler.
 
 **Pas de tray.** Aucune icône de barre système, aucune réduction en arrière-plan :
 fermer la fenêtre **quitte l'application** (cf. [Décisions](#décisions)). Un tray
@@ -544,6 +583,22 @@ sont dans `electron/src/main.ts`, commentés sur place.
 - **`app.setAppUserModelId` doit correspondre à l'`appId`.** Sans identité Windows,
   les notifications toast sont muettes — ce qui compte dès la phase 2 (annonce des
   viewers), et pas seulement pour le regroupement dans la barre des tâches.
+- **Le scheme privilégié conditionne `localStorage`.** Il est enregistré `standard`
+  + `secure` avant `app.ready` pour que l'origine ne soit pas opaque ; sans ça,
+  `getDisplayMedia`, le presse-papiers **et le stockage** tombent. Les réglages
+  mémorisés en dépendent désormais. Corollaire : le store est **par origine**, donc
+  la coquille et le site web ne partagent pas leurs réglages.
+- **L'API `Notification` du renderer suffit.** Mesuré sous `app://bundle` :
+  `Notification.permission` vaut `granted` d'emblée, sans prompt, et Electron mappe
+  le constructeur HTML5 sur un toast Windows natif. Inutile d'ouvrir un canal IPC
+  pour ça. *(Mesuré sur le build non packagé ; même scheme et même AppUserModelId
+  en packagé, mais si un jour un toast manque à l'installation, c'est la première
+  chose à revérifier.)*
+- **L'event `close` d'un `<dialog>` est asynchrone.** Il est donc inutilisable pour
+  persister quoi que ce soit depuis un objet qui se démonte : `destroy()` fait
+  `modal.close()` puis `ac.abort()`, ce qui retire l'écouteur **avant** que l'event
+  ne parte. Attrapé au test — la sauvegarde des réglages y était accrochée et
+  quitter la room la perdait à tous les coups.
 
 ```
 // ponytail: la source forcée n'est PAS un choix produit, c'est le strict minimum

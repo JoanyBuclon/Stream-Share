@@ -1,4 +1,15 @@
-import { app, BrowserWindow, Menu, protocol, screen, session, shell, ipcMain, desktopCapturer } from 'electron';
+import {
+  app,
+  BrowserWindow,
+  Menu,
+  Notification,
+  protocol,
+  screen,
+  session,
+  shell,
+  ipcMain,
+  desktopCapturer,
+} from 'electron';
 import { autoUpdater } from 'electron-updater';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -182,7 +193,25 @@ app.whenReady().then(() => {
   createWindow();
 
   // Auto-update only makes sense on an installed build (dev has no publish channel).
-  if (app.isPackaged) void autoUpdater.checkForUpdatesAndNotify();
+  if (app.isPackaged) {
+    // Without a listener, an 'error' on a Node EventEmitter is re-thrown — and this one emits on a
+    // 404 feed, a bad signature or a flaky network, none of which should be able to take the app
+    // down mid-share. It also gives the only trace there is: no electron-log in the tree, so a
+    // silent updater is diagnosed from latest.yml and the cache (cf. docs/desktop.md).
+    autoUpdater.on('error', (err) => console.error('stream-share: auto-update failed', err));
+    // checkForUpdatesAndNotify already toasts once the download is READY to install. This is the
+    // earlier moment — "there is a new version, it is coming down" — which is the one that
+    // explains why a restart will be worth it. Not focus-gated, unlike the viewer toasts: the
+    // check runs once per launch, so this is at most one toast per start of the app.
+    autoUpdater.on('update-available', (info) => {
+      if (!Notification.isSupported()) return;
+      new Notification({
+        title: 'StreamShare update available',
+        body: `Version ${info.version} is downloading. It installs the next time you quit.`,
+      }).show();
+    });
+    void autoUpdater.checkForUpdatesAndNotify();
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

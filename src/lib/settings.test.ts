@@ -1,6 +1,97 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyPreset, maxBitrateBps, estimatedUpload, contentHintFor, degradationFor, viewerTiers, effectiveScale, resLabel, sourceTier, DEFAULT_QUALITY, PRESETS } from './settings.ts';
+import { applyPreset, maxBitrateBps, estimatedUpload, contentHintFor, degradationFor, viewerTiers, effectiveScale, resLabel, sourceTier, parseQuality, serializeQuality, DEFAULT_QUALITY, PRESETS, RESOLUTIONS } from './settings.ts';
+
+// parseQuality is a trust boundary: localStorage is user-editable, and — the real reason — it is
+// read by a self-updating desktop app that may have written it under an older schema. Everything
+// below is about degrading one field at a time instead of losing the lot.
+
+test('parseQuality: a full valid payload round-trips', () => {
+  const q = { ...DEFAULT_QUALITY, preset: null, resolution: 1080 as const, fps: 30, bitrate: 8, systemAudio: false };
+  assert.deepEqual(parseQuality(serializeQuality(q)), { ...q, mic: false });
+});
+
+test('parseQuality: nothing stored yet is the default', () => {
+  assert.deepEqual(parseQuality(null), DEFAULT_QUALITY);
+});
+
+test('parseQuality: the fallback is a COPY, never the shared default object', () => {
+  const a = parseQuality(null);
+  a.bitrate = 999;
+  assert.equal(DEFAULT_QUALITY.bitrate, 20, 'mutating a parsed value must not poison the default');
+});
+
+test('parseQuality: garbage and wrong shapes fall back instead of throwing', () => {
+  for (const raw of ['', 'not json', '[]', 'null', '42', '"a string"', '{']) {
+    assert.deepEqual(parseQuality(raw), DEFAULT_QUALITY, `raw: ${raw}`);
+  }
+});
+
+test('parseQuality: one bad field does not discard the good ones', () => {
+  // The whole point of per-field validation: the day 120 leaves the fps ladder, an all-or-nothing
+  // parse would also throw away a perfectly good bitrate and preset.
+  const out = parseQuality(JSON.stringify({ preset: null, resolution: 1440, fps: 240, bitrate: 33 }));
+  assert.equal(out.fps, DEFAULT_QUALITY.fps, 'the unknown fps falls back');
+  assert.equal(out.resolution, 1440, 'and the rest survives');
+  assert.equal(out.bitrate, 33);
+  assert.equal(out.preset, null);
+});
+
+test('parseQuality: values outside the allowed sets are rejected', () => {
+  const bad = {
+    preset: 'ultra',
+    resolution: 4320, // above the ladder
+    fps: 0,
+    bitrate: 500,
+    systemAudio: 'yes', // not a boolean
+  };
+  assert.deepEqual(parseQuality(JSON.stringify(bad)), DEFAULT_QUALITY);
+  assert.equal(parseQuality(JSON.stringify({ bitrate: 1 })).bitrate, DEFAULT_QUALITY.bitrate, 'under the slider min');
+  assert.equal(parseQuality(JSON.stringify({ bitrate: 61 })).bitrate, DEFAULT_QUALITY.bitrate, 'over the slider max');
+  assert.equal(parseQuality(JSON.stringify({ bitrate: 12.5 })).bitrate, DEFAULT_QUALITY.bitrate, 'not an integer');
+  assert.equal(parseQuality(JSON.stringify({ resolution: '1080' })).resolution, DEFAULT_QUALITY.resolution, 'string');
+});
+
+test('parseQuality: every value the UI can actually produce is accepted', () => {
+  // The mirror of the test above, and the half that is easy to forget: a range check with the
+  // wrong comparison, or a tier missing from the ladder, rejects legitimate settings and silently
+  // resets them. Only the inclusive ends and the rarely-clicked tiers would catch that.
+  for (const bitrate of [2, 60]) {
+    assert.equal(parseQuality(JSON.stringify({ bitrate })).bitrate, bitrate, `bitrate ${bitrate} is in range`);
+  }
+  for (const fps of [10, 30, 60, 120]) {
+    assert.equal(parseQuality(JSON.stringify({ fps })).fps, fps, `fps ${fps} is on the ladder`);
+  }
+  for (const resolution of RESOLUTIONS) {
+    assert.equal(parseQuality(JSON.stringify({ resolution })).resolution, resolution, `res ${resolution}`);
+  }
+  for (const preset of Object.keys(PRESETS)) {
+    assert.equal(parseQuality(JSON.stringify({ preset })).preset, preset, `preset ${preset}`);
+  }
+});
+
+test('parseQuality: an inherited Object key is not a preset', () => {
+  // `'toString' in PRESETS` is true. Accepting it would put PRESETS['toString'].contentHint —
+  // undefined — into the contentHint setter and degradationPreference, silently.
+  assert.equal(parseQuality(JSON.stringify({ preset: 'toString' })).preset, DEFAULT_QUALITY.preset);
+  assert.equal(parseQuality(JSON.stringify({ preset: 'constructor' })).preset, DEFAULT_QUALITY.preset);
+});
+
+test('parseQuality: a __proto__ payload cannot reach the prototype', () => {
+  // Same reasoning as isQualityRequest in host.test.ts: JSON.parse makes "__proto__" an OWN data
+  // property rather than invoking the setter, so the object keeps Object.prototype. Pinned as a
+  // precedent — no hardening code needed for it.
+  const out = parseQuality('{"__proto__":{"bitrate":999}}');
+  assert.deepEqual(out, DEFAULT_QUALITY);
+  assert.equal(({} as { bitrate?: number }).bitrate, undefined, 'Object.prototype is untouched');
+});
+
+test('parseQuality: the microphone is never restored, even when stored as true', () => {
+  // The one setting with a privacy dimension. Restoring it would fire getUserMedia and light the
+  // OS mic indicator on the first capture of a session where nobody asked for it.
+  assert.equal(parseQuality(JSON.stringify({ ...DEFAULT_QUALITY, mic: true })).mic, false);
+  assert.ok(!('mic' in JSON.parse(serializeQuality({ ...DEFAULT_QUALITY, mic: true }))), 'not even written');
+});
 
 test('applyPreset: pose resolution/fps/bitrate + preset, garde l audio', () => {
   const q = { ...DEFAULT_QUALITY, mic: true, preset: null };

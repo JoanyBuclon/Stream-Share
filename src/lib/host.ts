@@ -14,6 +14,9 @@ import { pickSource } from './source-picker.ts';
 import { NativeAudio } from './native-audio.ts';
 import {
   applyPreset,
+  parseQuality,
+  serializeQuality,
+  QUALITY_KEY,
   effectiveScale,
   maxBitrateBps,
   estimatedUpload,
@@ -77,7 +80,13 @@ export class HostController {
   private audioNoOwner = false;
   private readonly nativeAudio = new NativeAudio();
   private offAudioChunk: (() => void) | null = null;
-  private quality: Quality = { ...DEFAULT_QUALITY };
+  private quality: Quality = loadQuality();
+  /** The resolution the HOST picked, before clampResolution lowers it to fit the source. Only this
+   *  is ever persisted: the clamp is a property of the current source, and a desktop host mostly
+   *  shares *windows*, which are almost never 2160 tall. Saving the clamped value would quietly
+   *  pin the cap at 720p for every later session — including on a 4K screen, with nothing on
+   *  screen to explain it. */
+  private pickedResolution: ResolutionTarget = this.quality.resolution;
   private readonly mixer = new AudioMixer();
   private readonly audioQueue = serial(); // serializes outgoing rebuilds — no interleaving
   private readonly wakeLock = new WakeLock(); // keep the screen awake while hosting
@@ -372,12 +381,18 @@ export class HostController {
     this.renderSettings();
   };
 
+  /** Recompute the effective cap from what the host asked for and what the source can fill.
+   *
+   *  DERIVED, not stepped down in place. The old version only ever lowered — it compared against
+   *  the already-clamped value — so sharing a 900px window and then switching to a 4K screen left
+   *  the cap stuck at 720 for the rest of the session, with nothing on screen to explain it and
+   *  (once settings persisted) a stored value that was more correct than the live one. Reading
+   *  `pickedResolution` each time makes that class of bug impossible: `quality.resolution` is
+   *  always exactly `min(asked, what the source can fill)`. */
   private clampResolution(): void {
     const src = this.sourceHeight();
-    if (src) {
-      const cap = sourceTier(src);
-      if (this.quality.resolution > cap) this.quality = { ...this.quality, resolution: cap };
-    }
+    const cap = src ? sourceTier(src) : this.pickedResolution; // no source yet → nothing to cap to
+    this.quality = { ...this.quality, resolution: Math.min(this.pickedResolution, cap) as ResolutionTarget };
   }
 
   private broadcastHeight(): void {
@@ -402,6 +417,10 @@ export class HostController {
     el('chip-bitrate').addEventListener('click', open, { signal });
     el('btn-settings-close').addEventListener('click', this.closeSettings, { signal });
     el('btn-settings-done').addEventListener('click', this.closeSettings, { signal });
+    // The native `close` event, not the buttons: it also covers Escape and the scrim, which used
+    // to be a real leak — Escape never ran closeSettings, so the window titles stayed in the DOM.
+    // Cleanup only; the settings are saved elsewhere (see onSettingsClosed for why they must be).
+    el('settings-modal').addEventListener('close', this.onSettingsClosed, { signal });
     el('settings-modal').addEventListener(
       'click',
       (e) => {
@@ -437,7 +456,14 @@ export class HostController {
   };
   private closeSettings = (): void => {
     const modal = el<HTMLDialogElement>('settings-modal');
-    if (modal.open) modal.close(); // Escape closes it natively too; this covers the buttons/scrim
+    if (modal.open) modal.close(); // everything else happens in onSettingsClosed
+  };
+
+  /** The two buttons, the scrim, and Escape. NOT destroy(), and that is the point: `close` is
+   *  dispatched asynchronously, and destroy() runs `modal.close()` then `ac.abort()`, which
+   *  unregisters this listener before the queued event can fire. So this is cleanup only —
+   *  hanging the settings save here dropped them every time the host left the room. */
+  private onSettingsClosed = (): void => {
     // Window titles are documents and chat subjects, painted on a screen that is being shared
     // full-screen. They have no reason to outlive the panel.
     el('audio-apps-list').replaceChildren();
@@ -445,6 +471,7 @@ export class HostController {
 
   private applyPresetChoice(name: PresetName): void {
     this.quality = applyPreset(this.quality, name);
+    this.pickedResolution = this.quality.resolution; // record the ask, before the clamp rewrites it
     this.clampResolution(); // a preset may set 4K/2K above the current source
     const video = this.stream?.getVideoTracks()[0];
     if (video) video.contentHint = contentHintFor(this.quality);
@@ -455,7 +482,9 @@ export class HostController {
   }
 
   private setResolution(target: ResolutionTarget): void {
-    this.quality = { ...this.quality, resolution: target, preset: null };
+    this.quality = { ...this.quality, preset: null };
+    this.pickedResolution = target;
+    this.clampResolution(); // the ask is `target`; what lands is that capped by the source
     this.applyVideoQualityAll();
     this.broadcastHeight(); // cap changed → viewers refresh their tier ceiling
     this.renderSettings();
@@ -625,6 +654,17 @@ export class HostController {
   };
 
   private renderSettings(): void {
+    // The one save site, and it is here because it is synchronous and unconditional: every path
+    // that changes a setting repaints the panel, so nothing can change without being written. The
+    // dialog's `close` event cannot do this job — see onSettingsClosed.
+    //
+    // Two non-user-driven mutations reach here, and both are handled rather than absent:
+    //   - clampResolution lowers the cap to fit the source, which is why `pickedResolution` and
+    //     not `quality.resolution` is what goes to storage;
+    //   - buildOutgoing drops `mic` when the permission is denied (reachable from setStream and
+    //     sendAudio) — harmless ONLY because serializeQuality never writes `mic`. If mic ever
+    //     becomes persisted, this save has to move to the individual setters.
+    saveQuality({ ...this.quality, resolution: this.pickedResolution });
     markActive('[data-preset]', 'preset', this.quality.preset);
     markActive('[data-res]', 'res', String(this.quality.resolution));
     markActive('[data-fps]', 'fps', String(this.quality.fps));
@@ -692,6 +732,11 @@ export class HostController {
   private reconcile(iceServers: RTCIceServer[], viewers: RoomViewer[]): void {
     this.config = { iceServers };
     const { toRemove, toAdd } = reconcileRoster(this.viewers.keys(), viewers);
+    // These DO notify. The diff is against the server's truth, so it is empty unless somebody
+    // genuinely came or went while we were offline — viewers keep their direct P2P link across a
+    // blip, which is why a reconnect on its own moves nobody. Suppressing them would silence the
+    // one moment the host has no other way to find out; the shared `tag` in notify() collapses a
+    // long-outage burst into a single toast.
     for (const peerId of toRemove) this.removeViewer(peerId);
     for (const v of toAdd) this.addViewer(v.peerId, v.pseudo);
   }
@@ -704,6 +749,30 @@ export class HostController {
       this.sig.reclaim(this.code, this.hostToken); // regain the room (and our peerId)
     }
   };
+
+  /** A native toast, desktop only.
+   *
+   *  Two gates. `window.native` keeps the web build silent — a browser tab would have to beg for
+   *  permission first, and "someone joined" is not worth a prompt. Focus is the feature itself:
+   *  the host is meant to learn this while they are in their game.
+   *
+   *  Note what focus-gating does NOT do — it does not limit the blast radius, it selects for it.
+   *  An unfocused host is usually one whose screen is being watched by the whole room, so every
+   *  toast is painted into the stream, viewer pseudonym included. Accepted (the sidebar already
+   *  shows those names), and the reason the event list is kept as short as it is.
+   *
+   *  Measured on the shell: under app:// the permission is already `granted`, no request needed
+   *  (Electron maps this to a Windows toast, which needs the AppUserModelId set in main.ts). */
+  private notify(text: string): void {
+    if (!window.native || document.hasFocus()) return;
+    try {
+      // One shared tag: a flaky viewer reconnecting five times replaces its own toast instead of
+      // leaving five to sweep out of the Windows notification centre.
+      new Notification(text, { tag: 'ss-viewers' });
+    } catch {
+      // No Notification constructor at all. Never worth breaking a join over.
+    }
+  }
 
   private addViewer(peerId: string, pseudo: string): void {
     if (this.viewers.has(peerId)) return;
@@ -726,17 +795,20 @@ export class HostController {
     this.viewers.set(peerId, entry);
     this.offerTo(peerId, entry); // always offer — no source yet just means a paused (waiting) viewer
     this.refreshSidebar();
+    this.notify(`${pseudo} joined your stream`);
   }
 
   private kick(peerId: string, ban: boolean): void {
     if (ban) this.sig.ban(peerId);
     else this.sig.kick(peerId);
-    this.removeViewer(peerId);
+    this.removeViewer(peerId, true); // silent: we just did this on purpose, a toast is noise
   }
 
-  private removeViewer(peerId: string): void {
+  /** `silent` exists for exactly one caller: kick(), where the host just did this on purpose. */
+  private removeViewer(peerId: string, silent = false): void {
     const entry = this.viewers.get(peerId);
     if (!entry) return;
+    if (!silent) this.notify(`${entry.pseudo} left your stream`);
     entry.peer?.close();
     entry.row.remove();
     this.viewers.delete(peerId);
@@ -806,6 +878,10 @@ export class HostController {
     void this.pushOutgoing();
     for (const peerId of this.viewers.keys()) this.sig.signal(peerId, { control: 'pause' });
     this.resetStage();
+    // AFTER resetStage, which clears the preview: sourceHeight() reads that element as a fallback,
+    // so clamping any earlier would just re-derive the cap of the source we are dropping. With no
+    // source there is nothing to cap against, and the panel goes back to showing what was asked for.
+    this.clampResolution();
     this.renderSettings(); // "Choose source" label + "no source selected" hint
   };
 
@@ -857,6 +933,24 @@ export class HostController {
     this.stream?.getTracks().forEach((t) => t.stop());
     this.stream = null;
     this.outgoing = null;
+  }
+}
+
+/** Storage is best-effort on both sides: `localStorage` throws outright in some private-browsing
+ *  modes and on quota, and a settings panel is never worth taking a live share down for. */
+function loadQuality(): Quality {
+  try {
+    return parseQuality(localStorage.getItem(QUALITY_KEY));
+  } catch {
+    return { ...DEFAULT_QUALITY };
+  }
+}
+
+function saveQuality(q: Quality): void {
+  try {
+    localStorage.setItem(QUALITY_KEY, serializeQuality(q));
+  } catch {
+    /* nothing to recover: the session keeps working, it just won't be remembered */
   }
 }
 
