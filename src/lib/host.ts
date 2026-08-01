@@ -57,10 +57,20 @@ export class HostController {
   private sourceId: string | null = null; // desktop only: last pick, preselected in the picker
   // Desktop only, session state — deliberately NOT in `Quality`: that is pure quality math the
   // presets spread over, and an app name has no business being persisted with a bitrate.
-  // The single native capture, if any. One object rather than loose fields: the epoch guard has
-  // to reconcile the whole thing across an await, and WASAPI allows one mode at a time anyway.
-  private audio: { mode: 'include' | 'exclude'; name: string; pid: number } | null = null;
+  /** Names from the last listing. */
+  private audioApps: string[] = [];
+  /** What the shell CONFIRMED is running, and nothing else — there is deliberately no second
+   *  field holding what the host *meant*. Every checkbox renders from `spec` (see isAudible), so
+   *  the panel cannot claim a mute the shell refused, dropped or never armed: the whole class of
+   *  bugs here is inaudible to the host, and the only defence is having one truth to read.
+   *  `null` = no native capture, viewers get the loopback track. `{ include: [] }` = a live
+   *  capture holding nothing, i.e. silence. `sessions` carries the pids, for restart detection. */
+  private live: { spec: LiveSpec; sessions: NativeCapturedApp[] } | null = null;
   private audioSeq = 0; // guards the round trip against a faster second click
+  /** The last change the shell turned down. The previous capture is still running (main resolves
+   *  before it stops anything), so the boxes stay honest — but a click that does nothing needs to
+   *  say so, or it reads as a broken button. */
+  private audioFailed = false;
   // Sticky: the shared window has no owning process, so app-only sound is impossible for it. Kept
   // as state, not just as text — the pick happens before the panel opens, and opening it resets
   // the hint line.
@@ -151,9 +161,8 @@ export class HostController {
         // The audio follows the source. Done HERE and not in setStream: `this.sourceId` is only
         // committed once pickSource resolves, so anything under setStream still sees the previous
         // window and would capture the wrong app's sound on every change after the first.
-        // A window shares that app alone; a screen drops back to the system mix (any mute the
-        // user had set is re-picked from the panel, rather than silently re-armed).
-        void this.setAudio(picked.startsWith('window:') ? { sourceId: picked } : null);
+        // A window shares that app alone; a screen drops back to the system mix.
+        void this.sendAudio(picked.startsWith('window:') ? { sourceId: picked } : null);
       }
       // Cancelled: put back the panel the picker replaced, or the user lands on a bare stage with
       // no way back to the quality settings. Not after teardown — that resolves null too, and a
@@ -241,13 +250,14 @@ export class HostController {
     }
     const video = this.paused ? null : this.stream.getVideoTracks()[0];
     if (video) out.addTrack(video);
-    // Excluding an app swaps the source of "system audio": the shell's WASAPI capture (the whole
-    // mix minus that app's process tree) instead of the loopback track getDisplayMedia handed us.
-    // The loopback track stays alive and simply isn't used — exactly what turning systemAudio off
-    // already does — so toggling exclusion never re-runs capture() and never disturbs viewers.
+    // Muting an app swaps the source of "system audio": the shell's WASAPI sessions instead of the
+    // loopback track getDisplayMedia handed us. The loopback track stays alive and simply isn't
+    // used — exactly what turning systemAudio off already does — so ticking a box never re-runs
+    // capture() and never disturbs viewers. `[]` is a live capture with nothing in it: still the
+    // native track, and it is silent, which is the point.
     const systemTrack = !this.quality.systemAudio
       ? null
-      : this.audio
+      : this.live
         ? this.nativeAudio.track()
         : (this.stream.getAudioTracks()[0] ?? null);
     let mixed: MediaStreamTrack | null;
@@ -466,42 +476,61 @@ export class HostController {
 
   private toggleSystemAudio = async (): Promise<void> => {
     this.quality = { ...this.quality, systemAudio: !this.quality.systemAudio };
-    // No point running a WASAPI client for audio nobody receives; setAudio finishes the job.
-    if (!this.quality.systemAudio && this.audio) return void (await this.setAudio(null));
+    // No point running WASAPI clients for audio nobody receives. Turning it back on starts from
+    // "viewers hear everything": the ticks are not remembered across the toggle, because they are
+    // read from the live capture and there no longer is one. Deliberate — an intent kept aside
+    // just to survive this is exactly the second source of truth that can drift out of step.
+    if (!this.quality.systemAudio && this.live) return void (await this.sendAudio(null));
+    this.markAudioRows(); // the rows lock/unlock with system audio
     await this.pushOutgoing();
     this.renderSettings();
   };
 
   // --- per-app audio (desktop only) ---
 
-  /** Point the native capture at something, or stop it with `null`.
-   *
-   *  `{ sourceId }` — the shared window's app alone. `{ exclude }` — everything but that app.
-   *  Only one can be live: WASAPI takes a single process tree, include OR exclude. */
-  private setAudio = async (spec: { sourceId: string } | { exclude: string } | null): Promise<void> => {
+  /** Tick or untick one app. The intent is read back off the live capture rather than stored, so
+   *  there is nothing that can fall out of step with it between two clicks. */
+  private toggleAudioApp = async (name: string): Promise<void> => {
+    const spec = this.live?.spec ?? null;
+    const names = audioRowNames(this.audioApps, spec);
+    const muted = new Set(names.filter((n) => !isAudible(spec, n)));
+    if (!muted.delete(name)) muted.add(name);
+    await this.sendAudio(audioSpecFor(names, muted));
+  };
+
+  /** Hand one spec to the shell and record what actually came back. */
+  private sendAudio = async (spec: AudioSpec | { sourceId: string }): Promise<void> => {
     const native = window.native;
     if (!native) return;
     // Rows stay clickable during the round trip. Without this, a first call that resolves to
     // nothing (app quit) can land AFTER a second that succeeded and wipe its state: the panel
-    // would say nothing is muted while the shell is actively excluding.
+    // would say nothing is muted while the shell is actively capturing.
     const mine = ++this.audioSeq;
-    let got: { pid: number; name: string } | null;
+    let got: NativeCapturedApp[] | null;
     try {
       got = await native.setAudioCapture(spec);
     } catch {
-      got = null; // the shell couldn't start the capture — fall back to the ordinary loopback
+      got = null;
     }
     if (mine !== this.audioSeq || this.ac.signal.aborted) return;
-    this.audio = spec && got ? { mode: 'sourceId' in spec ? 'include' : 'exclude', ...got } : null;
+    // A non-null spec answered with null is a refusal — the app quit, the addon failed to load.
+    // The shell resolves everything BEFORE it stops what is running, so the previous capture is
+    // untouched and `live` must stay exactly as it was. (`[]` is not a refusal: it is a live
+    // capture of nothing, which is how "mute every app" reaches viewers as silence.)
+    this.audioFailed = !!spec && !got;
+    // Normalised through what actually started, not what was asked: a window pick is stored as
+    // "include that app" so one rule renders every mode, and an include whose app quit before
+    // start() must not leave its box ticked.
+    if (spec && got) this.live = { spec: 'exclude' in spec ? spec : { include: got.map((g) => g.name) }, sessions: got };
+    else if (!spec) this.live = null; // an explicit stop; a refusal leaves `live` alone
     // Asking for "this app alone" and silently getting everything is the worst outcome here, so
     // say it. MainWindowHandle names one window per process: a second top-level window (a Chrome
     // popout, a second editor) has no owner to resolve.
     this.audioNoOwner = !!spec && 'sourceId' in spec && !got;
-    if (this.audioNoOwner) setText('audio-apps-hint', AUDIO_NO_OWNER);
 
-    if (this.audio && !this.offAudioChunk) {
-      this.offAudioChunk = native.onAudioChunk((chunk) => this.nativeAudio.push(chunk));
-    } else if (!this.audio && this.offAudioChunk) {
+    if (this.live && !this.offAudioChunk) {
+      this.offAudioChunk = native.onAudioChunk((key, chunk) => this.nativeAudio.push(key, chunk));
+    } else if (!this.live && this.offAudioChunk) {
       this.offAudioChunk();
       this.offAudioChunk = null;
       this.nativeAudio.teardown();
@@ -511,40 +540,42 @@ export class HostController {
     this.renderSettings();
   };
 
-  /** Reflect the current capture onto the rows already in the DOM, and lock them when native
-   *  audio would do nothing — with system audio off, or before a source exists, buildOutgoing
-   *  never reaches the native track, so a live capture would be pure waste behind a UI claiming
-   *  otherwise. */
+  /** Reflect the LIVE capture onto the rows already in the DOM, and lock them when native audio
+   *  would do nothing — with system audio off, or before a source exists, buildOutgoing never
+   *  reaches the native track, so a capture would be pure waste behind a UI claiming otherwise. */
   private markAudioRows(): void {
     const usable = this.quality.systemAudio && !!this.stream;
-    const current = this.audio;
-    for (const row of document.querySelectorAll<HTMLButtonElement>('#audio-apps-list [data-mode]')) {
-      const mode = row.dataset.mode;
-      const active = current
-        ? mode === current.mode && (mode === 'include' || row.dataset.app === current.name)
-        : mode === 'none';
-      row.dataset.active = String(active);
-      row.setAttribute('aria-pressed', String(active));
+    const spec = this.live?.spec ?? null;
+    for (const row of document.querySelectorAll<HTMLButtonElement>('#audio-apps-list [data-app]')) {
+      const audible = isAudible(spec, row.dataset.app ?? '');
+      row.dataset.active = String(audible);
+      row.setAttribute('aria-pressed', String(audible));
       row.disabled = !usable;
       row.classList.toggle('pointer-events-none', !usable);
       row.classList.toggle('opacity-40', !usable);
     }
-    if (!usable) {
-      setText('audio-apps-hint', this.stream ? 'turn system audio on to change this' : 'pick a source first');
-    }
+    setText('audio-apps-hint', this.audioHint(usable));
   }
 
-  /** (Re)draw the audio rows. Refreshed on every panel open, which is also how a restarted app
-   *  (Discord auto-updates) gets its new pid picked up — exclusion is keyed on the name. */
+  private audioHint(usable: boolean): string {
+    if (!usable) return this.stream ? 'turn system audio on to change this' : 'pick a source first';
+    if (this.audioNoOwner) return AUDIO_NO_OWNER;
+    if (this.audioFailed) return AUDIO_FAILED;
+    // Off the live spec, not off a count of ticks: those two disagree whenever a muted app has
+    // since quit, and a warning that cries wolf is a warning nobody reads.
+    return this.live && 'include' in this.live.spec ? AUDIO_SNAPSHOT : AUDIO_HINT;
+  }
+
+  /** (Re)draw the audio rows. */
   private async renderAudioApps(): Promise<void> {
     const native = window.native;
     if (!native) return;
     show(el('audio-apps-section'));
     // The host DOM is reused across sessions and openings: without this, the previous list stays
-    // on screen for the ~240 ms of the listing, with its old selection highlighted and its click
-    // listeners already dead (they went with the previous AbortController).
+    // on screen for the ~240 ms of the listing, with its old ticks and its click listeners already
+    // dead (they went with the previous AbortController).
     el('audio-apps-list').replaceChildren();
-    setText('audio-apps-hint', this.audioNoOwner ? AUDIO_NO_OWNER : AUDIO_HINT);
+    setText('audio-apps-hint', AUDIO_HINT);
     let apps: NativeAudioApp[];
     try {
       apps = await native.listAudioApps();
@@ -553,57 +584,34 @@ export class HostController {
       return;
     }
     if (this.ac.signal.aborted) return;
+    this.audioApps = apps.map((a) => a.name);
 
-    // Re-arm if the muted app restarted (Discord auto-updates itself): its pid moved, and the
-    // shell would go on excluding a dead one — the echo would come back with nothing to show for
-    // it. Only when the pid actually changed, so opening the panel doesn't churn every viewer.
-    const muted = this.audio?.mode === 'exclude' ? this.audio : null;
-    if (muted) {
-      const still = apps.find((a) => a.name === muted.name);
-      if (still?.pid !== muted.pid) void this.setAudio(still ? { exclude: muted.name } : null);
-    }
+    // A captured app that RESTARTED (Discord auto-updates itself) moved pid, so its session points
+    // at a dead one and the mute quietly stopped working. Re-send the very same spec — never a
+    // re-derivation, which could resolve a different instance. An app that merely left the listing
+    // is NOT stale: minimising Discord to tray drops it from `Get-Process | Where MainWindowHandle`
+    // while its process, and its session, carry on perfectly well.
+    const moved = (s: NativeCapturedApp): boolean => {
+      const now = apps.find((a) => a.name === s.name);
+      return now !== undefined && now.pid !== s.pid;
+    };
+    if (this.live?.sessions.some(moved)) void this.sendAudio(this.live.spec);
 
     const tpl = el<HTMLTemplateElement>('tpl-audio-app').content.firstElementChild;
     if (!tpl) throw new Error('stream-share: empty #tpl-audio-app');
-    const sourceId = this.sourceId;
-    const rows: Array<{ mode: 'include' | 'none' | 'exclude'; app: string; label: string; note: string }> = [];
-    // Sharing a window: offer "that app alone". One more row rather than a toggle — the section is
-    // already a single-select list, which is exactly the shape of the one-tree API constraint.
-    if (sourceId?.startsWith('window:')) {
-      rows.push({
-        mode: 'include',
-        app: '',
-        label: this.audio?.mode === 'include' ? `Only ${this.audio.name}'s sound` : "Only the shared app's sound",
-        note: 'viewers hear this app alone',
-      });
-    }
-    rows.push({ mode: 'none', app: '', label: 'No app muted', note: 'viewers hear everything' });
-    for (const a of apps) rows.push({ mode: 'exclude', app: a.name, label: a.name, note: a.title || 'running' });
-
+    const titles = new Map(apps.map((a) => [a.name, a.title]));
     el('audio-apps-list').replaceChildren(
-      ...rows.map((row) => {
+      ...audioRowNames(this.audioApps, this.live?.spec ?? null).map((name) => {
         const node = tpl.cloneNode(true) as HTMLElement;
-        node.dataset.mode = row.mode; // the keys markAudioRows compares against
-        node.dataset.app = row.app;
-        node.setAttribute(
-          'aria-label',
-          row.mode === 'include' ? row.label : row.mode === 'exclude' ? `Mute ${row.app} for viewers` : 'Mute no app',
-        );
-        hook(node, 'icon').textContent = row.mode === 'exclude' ? initials(row.app) : row.mode === 'include' ? '►' : '—';
-        hook(node, 'name').textContent = row.label;
-        hook(node, 'note').textContent = row.note;
-        node.addEventListener(
-          'click',
-          () =>
-            void this.setAudio(
-              row.mode === 'include' && sourceId
-                ? { sourceId }
-                : row.mode === 'exclude'
-                  ? { exclude: row.app }
-                  : null,
-            ),
-          { signal: this.ac.signal },
-        );
+        node.dataset.app = name; // the key markAudioRows renders from
+        // The hint explains why a locked row is locked; without this the row is just dead.
+        node.setAttribute('aria-describedby', 'audio-apps-hint');
+        hook(node, 'icon').textContent = initials(name);
+        hook(node, 'name').textContent = name;
+        hook(node, 'note').textContent = titles.get(name) || 'no open window';
+        // No aria-label: the row's own text names the app, and aria-pressed carries "heard by
+        // viewers". A label would have to restate the state and could then contradict it.
+        node.addEventListener('click', () => void this.toggleAudioApp(name), { signal: this.ac.signal });
         return node;
       }),
     );
@@ -789,9 +797,10 @@ export class HostController {
     this.stream = null;
     this.paused = false; // a fresh source starts live, not paused
     // Same rule as turning system audio off: no WASAPI client for audio nobody receives. With no
-    // source, buildOutgoing drops the audio entirely, so the capture would just burn a native
-    // thread and ~100 IPC messages a second for nothing.
-    if (this.audio) void this.setAudio(null);
+    // source, buildOutgoing drops the audio entirely, so the sessions would just burn native
+    // threads and ~100 IPC messages a second each for nothing. The ticks go with them: the next
+    // source starts from "viewers hear everything".
+    if (this.live) void this.sendAudio(null);
     // Pause the viewers now (synchronous); the rebuild's replaceTrack(null) that drops their video +
     // audio can follow async — unlike togglePause we don't await it, the paused screen is immediate.
     void this.pushOutgoing();
@@ -835,13 +844,16 @@ export class HostController {
     for (const entry of this.viewers.values()) entry.peer?.close();
     this.viewers.clear();
     this.mixer.teardown();
-    // A native capture keeps a WASAPI client and an IPC listener alive across sessions; the
+    // A native capture keeps its WASAPI clients and an IPC listener alive across sessions; the
     // AbortController above doesn't reach either.
     this.offAudioChunk?.();
     this.offAudioChunk = null;
     this.nativeAudio.teardown();
-    if (this.audio) void window.native?.setAudioCapture(null);
-    this.audio = null;
+    // Unconditional, not `if (this.live)`: a capture requested seconds ago may still be resolving
+    // in main, in which case `live` is null here and the sessions would start after we are gone
+    // and never stop. IPC is ordered, so this null reaches the handler first and cancels it.
+    void window.native?.setAudioCapture(null);
+    this.live = null;
     this.stream?.getTracks().forEach((t) => t.stop());
     this.stream = null;
     this.outgoing = null;
@@ -851,8 +863,62 @@ export class HostController {
 /** Default text under "Per-app audio" — restored on each open so one transient listing failure
  *  doesn't leave its error sitting above a perfectly good list for the rest of the session. */
 const AUDIO_HINT = 'only apps with an open window are listed';
-/** Shown when a shared window has no resolvable owning process — see setAudio. */
+/** Replaces it whenever the live capture is an inclusion, which no longer follows the machine.
+ *  Not a detail: the host is told, in the panel, exactly while it is true. */
+const AUDIO_SNAPSHOT = 'only the ticked apps are sent — anything started later is silent until you tick it';
+/** Shown when a shared window has no resolvable owning process — see sendAudio. */
 const AUDIO_NO_OWNER = "this window has no app audio of its own — sharing all system sound";
+/** A click the shell turned down. Whatever was running still is, so the boxes are still true. */
+const AUDIO_FAILED = 'that change did not take — the app may have quit; nothing else was altered';
+
+/** A capture the shell is running. */
+export type LiveSpec = { exclude: string } | { include: string[] };
+/** What to ask the shell to capture. `null` = nothing native, use the ordinary loopback track. */
+export type AudioSpec = LiveSpec | null;
+
+/** Whether viewers hear `name` under the capture that is actually running. The single rule every
+ *  checkbox renders from — no stored intent to drift away from it. */
+export function isAudible(spec: LiveSpec | null, name: string): boolean {
+  if (!spec) return true; // the loopback track carries the whole machine
+  if ('exclude' in spec) return name !== spec.exclude;
+  return spec.include.includes(name); // an app not in the set has no session, so no sound
+}
+
+/** Which rows to draw: the listing, plus any app the live capture names that has dropped out of
+ *  it. Minimising Discord to tray removes it from `Get-Process | Where MainWindowHandle` while its
+ *  exclusion keeps running — losing the row would leave the host no way to see or undo the mute. */
+export function audioRowNames(apps: readonly string[], spec: LiveSpec | null): string[] {
+  const named = !spec ? [] : 'exclude' in spec ? [spec.exclude] : spec.include;
+  return [...apps, ...named.filter((n) => !apps.includes(n))];
+}
+
+/**
+ * Turn the checkboxes into a capture spec: which of `apps` the host unchecked → what the shell
+ * should run.
+ *
+ * Nothing muted → `null`: the loopback track already carries everything, for free.
+ *
+ * Exactly one muted → exclusion, and the special case earns its keep. Exclusion is the only mode
+ * that keeps up with the machine: apps with no window, Windows' own sounds and anything launched
+ * after the capture started are all still heard. Inclusion can't do that — its list is a snapshot.
+ * So the common case (mute the voice client) stays on the mode with no blind spot.
+ *
+ * Two or more → WASAPI takes a single process tree per mode, so the mix has to be rebuilt from the
+ * other side: one include session per app left ticked.
+ *
+ * Every app muted → `{ include: [] }`, NEVER `null`. Returning null there would mean "use the
+ * loopback track", which un-mutes every app the host just muted — the worst possible outcome
+ * reached by the most natural gesture. An empty include is a live capture of nothing: silence.
+ *
+ * A muted name that is no longer running is ignored: there is nothing left to silence, and
+ * counting it would push a one-app mute into inclusion for no reason.
+ */
+export function audioSpecFor(apps: readonly string[], muted: ReadonlySet<string>): AudioSpec {
+  const live = apps.filter((a) => muted.has(a));
+  if (live.length === 0) return null;
+  if (live.length === 1) return { exclude: live[0] };
+  return { include: apps.filter((a) => !muted.has(a)) };
+}
 
 export function parseRes(v: string): ResolutionTarget {
   return Number(v) as ResolutionTarget;

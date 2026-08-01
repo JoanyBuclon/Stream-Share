@@ -15,12 +15,18 @@ interface NativeSource {
   readonly icon: string | null;
 }
 
-/** A running app whose audio can be excluded from the shared mix. */
+/** A running app whose audio the host can mute for viewers. */
 interface NativeAudioApp {
   readonly pid: number;
   /** Executable name — the stable key: a restarted app keeps it, its pid changes. */
   readonly name: string;
   readonly title: string;
+}
+
+/** One live WASAPI session, as the shell reports it back. */
+interface NativeCapturedApp {
+  readonly pid: number;
+  readonly name: string;
 }
 
 interface StreamShareNative {
@@ -33,19 +39,29 @@ interface StreamShareNative {
   /** Apps with a visible window, each with its root pid. */
   listAudioApps(): Promise<NativeAudioApp[]>;
   /**
-   * Start the native audio capture, or stop it with `null`.
+   * Replace the native audio capture, or stop it with `null`.
    *
-   * `{ sourceId }` — the window being shared: capture that app's tree ALONE, so viewers hear it
-   * and nothing else. `{ exclude }` — a screen is being shared: capture everything except that
-   * app, named by executable so it survives the app restarting under a new pid.
+   * `{ sourceId }` — the window being shared: capture that app's tree ALONE, resolved by window
+   * handle so it can't hit another instance of the same executable.
+   * `{ exclude }` — the whole machine except one app, named by executable so it survives that app
+   * restarting under a new pid. The only mode that keeps up with the system: unlisted apps,
+   * Windows' own sounds and anything started later are all still heard.
+   * `{ include }` — one session per named app, and nothing else. Muting two or more apps needs
+   * this, because WASAPI takes a single process tree per mode. The set is a SNAPSHOT: an app
+   * started afterwards is silent until the caller sends a new list.
    *
-   * Resolves to the app actually captured, or null — a window whose owner couldn't be resolved
-   * (it isn't a process's main window), or an app that quit since it was listed. Callers must
-   * treat null as "no native audio" and fall back to the ordinary loopback track.
+   * Resolves to one entry per session actually started, or null when the shell could not do what
+   * was asked (a window with no resolvable owner, an app that quit since it was listed, the addon
+   * failing to load). An EMPTY ARRAY is a success, not a failure: it means "capture nothing", i.e.
+   * silence. Callers must treat only null as "fall back to the ordinary loopback track" — treating
+   * `[]` that way would un-mute every app the host just muted.
    */
-  setAudioCapture(spec: { sourceId: string } | { exclude: string } | null): Promise<{ pid: number; name: string } | null>;
-  /** Raw PCM (48 kHz, 16-bit, stereo, interleaved) in ~10 ms chunks. Returns an unsubscribe. */
-  onAudioChunk(cb: (chunk: Uint8Array) => void): () => void;
+  setAudioCapture(
+    spec: { sourceId: string } | { exclude: string } | { include: string[] } | null,
+  ): Promise<NativeCapturedApp[] | null>;
+  /** Raw PCM (48 kHz, 16-bit, stereo, interleaved) in ~10 ms chunks, tagged with the name of the
+   *  app it came from — sessions are independent streams. Returns an unsubscribe. */
+  onAudioChunk(cb: (key: string, chunk: Uint8Array) => void): () => void;
 }
 
 interface Window {

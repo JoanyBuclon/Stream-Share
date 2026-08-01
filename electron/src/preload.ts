@@ -11,12 +11,13 @@ contextBridge.exposeInMainWorld('native', {
   selectSource: (id: string) => ipcRenderer.invoke('ss:select-source', id),
 
   listAudioApps: () => ipcRenderer.invoke('ss:audio-apps'),
-  setAudioCapture: (spec: { sourceId: string } | { exclude: string } | null) =>
+  setAudioCapture: (spec: { sourceId: string } | { exclude: string } | { include: string[] } | null) =>
     ipcRenderer.invoke('ss:audio-capture', spec),
-  // ~100 chunks/s of raw PCM while an app is excluded. Returns its own unsubscribe: the host
-  // controller is recreated per session and a stacked listener would double every sample.
-  onAudioChunk: (cb: (chunk: Uint8Array) => void) => {
-    const handler = (_e: unknown, chunk: Uint8Array): void => cb(chunk);
+  // ~100 chunks/s of raw PCM per live session, each tagged with its app name. Returns its own
+  // unsubscribe: the host controller is recreated per session and a stacked listener would double
+  // every sample.
+  onAudioChunk: (cb: (key: string, chunk: Uint8Array) => void) => {
+    const handler = (_e: unknown, key: string, chunk: Uint8Array): void => cb(key, chunk);
     ipcRenderer.on('ss:audio-chunk', handler);
     return () => ipcRenderer.removeListener('ss:audio-chunk', handler);
   },

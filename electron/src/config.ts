@@ -42,9 +42,11 @@ export function parseAudioApps(json: string, ownPid: number): AudioApp[] {
   const rows: unknown[] = Array.isArray(raw) ? raw : raw && typeof raw === 'object' ? [raw] : [];
   const apps: AudioApp[] = [];
   // Two windows of the same app (two Chrome profiles, two Notepads) are two root pids under one
-  // name. The selection is keyed on the name and WASAPI excludes ONE tree, so a second row would
-  // be a lie: picking it would mute only the first instance while the UI claimed otherwise.
-  // Documented as a real limitation rather than papered over.
+  // name. One row per name, and the first pid wins: the checkbox UI is keyed on the name, so a
+  // second row would offer no way to tell the two apart and would silence whichever the lookup
+  // happened to find. Documented as a real limitation rather than papered over.
+  // (Running several sessions at once is now possible, so a per-instance row is representable —
+  // it just isn't nameable in the panel. That is the blocker, not the API.)
   const seen = new Set<string>();
   for (const row of rows) {
     if (!row || typeof row !== 'object') continue;

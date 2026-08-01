@@ -99,6 +99,17 @@ function createWindow(): void {
     }
   });
 
+  // A native capture must not outlive the page that asked for it. Registered here, once: doing it
+  // inside the IPC handler added a pair per click, which trips MaxListenersExceededWarning after a
+  // handful of checkbox toggles. A reload keeps the SAME WebContents, so isDestroyed() stays false
+  // and the sessions would go on feeding a page that has lost its listener and its state — but
+  // `isSameDocument` must be honoured, or our own `history.replaceState` of the room code would
+  // kill the capture while the renderer still believes it is live (silence, with nothing to see).
+  win.webContents.on('destroyed', stopCapture);
+  win.webContents.on('did-start-navigation', (details) => {
+    if (!details.isSameDocument) stopCapture();
+  });
+
   void win.loadURL(`${APP_SCHEME}://bundle/`);
 }
 
@@ -236,6 +247,11 @@ interface LoopbackAddon {
   };
 }
 type Capture = InstanceType<LoopbackAddon['LoopbackCapture']>;
+/** One process tree to run a WASAPI session against — and, sent back, one live session. */
+interface CaptureTarget {
+  pid: number;
+  name: string;
+}
 
 const ADDON_FILE = 'loopback_capture_addon.node';
 let addon: LoopbackAddon | null = null;
@@ -251,15 +267,27 @@ function loadAddon(): LoopbackAddon {
   return addon;
 }
 
-let capture: Capture | null = null;
+// Every live session. Muting two or more apps means one WASAPI client per app left audible, so
+// this is a list, not a slot — and every instance lands in it the moment it starts, because the
+// only thing that can stop an orphan is this array.
+let captures: Capture[] = [];
+// Bumped by every call to ss:audio-capture AND by stopCapture, so a call still resolving its
+// targets can tell it has been superseded and start nothing.
+let captureEpoch = 0;
 
 function stopCapture(): void {
-  try {
-    capture?.stop();
-  } catch {
-    // Already stopped, or the device went away. Nothing to recover — just don't take the app down.
+  // Cancels anything in flight too. Without this, a reload during the ~240 ms lookup would clear
+  // the list and the resolving call would then start sessions feeding a page that no longer has a
+  // listener — nothing left holding them but the next call or app quit.
+  captureEpoch++;
+  for (const c of captures) {
+    try {
+      c.stop();
+    } catch {
+      // Already stopped, or the device went away. Nothing to recover — just don't take the app down.
+    }
   }
-  capture = null;
+  captures = [];
 }
 
 /** Apps the user could exclude, with their ROOT pid.
@@ -327,81 +355,110 @@ async function appForWindow(hwnd: number): Promise<{ pid: number; name: string }
   }
 }
 
-/** Start the per-app capture, or stop it with `null`.
+/** Replace the per-app capture, or stop it with `null`. See `setAudioCapture` in src/global.d.ts
+ *  for the three specs and what the return value means.
  *
- *  `{ sourceId }` — the window being shared: capture **only** that app's tree, so viewers hear
- *  the game and nothing else. `{ exclude }` — a screen is being shared: capture everything the
- *  machine plays **except** that app, by process NAME.
- *
- *  Name for exclude, handle for include, and that asymmetry is deliberate. Exclusion targets an
- *  app the user named (Discord), which auto-updates and restarts under a new pid — the name is
- *  what survives, and the panel re-arms on reopen. Inclusion targets the exact window being
- *  shared, where a name would resolve the first instance and could silence the wrong one.
+ *  Name for exclude and include, handle for the shared window, and that asymmetry is deliberate.
+ *  A named app (Discord) auto-updates and restarts under a new pid — the name is what survives,
+ *  and the panel re-arms on reopen. The shared window is one exact window, where a name would
+ *  resolve the first instance of that executable and could capture the wrong one.
  *
  *  ponytail: no process-death watcher. Measured what happens when the target dies mid-capture:
  *  the WASAPI session survives and the rest of the system audio keeps flowing, so viewers never
  *  fall silent. Add polling only if that turns out to bite.
- *  Returns the app actually captured, or null. */
-let captureEpoch = 0;
-ipcMain.handle('ss:audio-capture', async (event, spec: unknown): Promise<{ pid: number; name: string } | null> => {
+ *  ponytail: no cap on the number of sessions. Measured 16 concurrent ones — 5 ms to start all of
+ *  them, 4 MB RSS, 3 ms to stop — against 8 windowed apps on a real desktop. Cap it if a machine
+ *  ever shows up with an order of magnitude more. */
+ipcMain.handle('ss:audio-capture', async (event, spec: unknown): Promise<CaptureTarget[] | null> => {
   if (!isInternalUrl(event.senderFrame?.url ?? '')) return null;
   // ipcMain.handle does NOT serialize, and there is a ~240 ms lookup below. Two quick clicks
-  // would otherwise both reach start(), and `capture` would only remember the second — the first
-  // WASAPI session would stream on unstoppably, summing into the renderer and making an excluded
-  // app audible again, which is the one outcome this feature exists to prevent.
+  // would otherwise both reach start(), and only the second would be remembered — the first
+  // sessions would stream on unstoppably, summing into the renderer and making a muted app
+  // audible again, which is the one outcome this feature exists to prevent.
   const mine = ++captureEpoch;
-  stopCapture();
-  if (!spec || typeof spec !== 'object') return null;
-  const { sourceId, exclude } = spec as { sourceId?: unknown; exclude?: unknown };
+  if (!spec || typeof spec !== 'object') {
+    stopCapture(); // `null` is how the renderer asks for "stop everything"
+    return null;
+  }
+  const { sourceId, exclude, include } = spec as { sourceId?: unknown; exclude?: unknown; include?: unknown };
 
-  let target: { pid: number; name: string } | null;
+  // Resolve EVERY target before stopping or starting anything, for two reasons. It leaves no await
+  // between the starts below, so a second click — which bumps the epoch — cannot interleave and
+  // strand half of this call's sessions. And it makes a refusal NON-DESTRUCTIVE: every `return
+  // null` below happens with the previous capture still running, so the renderer's checkboxes stay
+  // true instead of a failed click quietly un-muting everything.
+  let targets: CaptureTarget[];
   let includeTree: boolean;
   if (typeof sourceId === 'string') {
     const hwnd = hwndFromSourceId(sourceId);
-    target = hwnd === null ? null : await appForWindow(hwnd);
+    const owner = hwnd === null ? null : await appForWindow(hwnd);
+    if (!owner) return null;
+    targets = [owner];
     includeTree = true;
   } else if (typeof exclude === 'string' && exclude) {
     const app = (await listAudioApps()).find((a) => a.name === exclude);
-    target = app ? { pid: app.pid, name: app.name } : null;
+    if (!app) return null;
+    targets = [{ pid: app.pid, name: app.name }];
     includeTree = false;
+  } else if (Array.isArray(include)) {
+    // One listing for the whole set: each costs a ~240 ms PowerShell spawn, and N of them would
+    // also be N different snapshots of the process table.
+    const byName = new Map((await listAudioApps()).map((a) => [a.name, a.pid]));
+    targets = include.flatMap((n: unknown) => {
+      const pid = typeof n === 'string' ? byName.get(n) : undefined;
+      return pid === undefined ? [] : [{ pid, name: n as string }];
+    });
+    includeTree = true;
   } else {
     return null;
   }
-  if (!target || mine !== captureEpoch) return null;
+  if (mine !== captureEpoch) return null;
 
   const sender = event.sender;
-  let instance: Capture;
-  try {
-    // Inside the try: a missing/incompatible .node throws here, and the handler must answer null
-    // rather than reject — the renderer's catch can't tell the two apart.
-    instance = new (loadAddon().LoopbackCapture)();
-    // true = INCLUDE_TARGET_PROCESS_TREE (that app alone), false = EXCLUDE (everything but it).
-    // Tree either way, which is what covers a Chromium app's separate audio-service child.
-    instance.start(target.pid, includeTree, (chunk) => {
-      // Delivered on the JS loop via a threadsafe function (not the native thread itself), ~100×/s.
-      // The window can still go away mid-stream — a reload is handled by the listeners below.
-      if (!sender.isDestroyed()) sender.send('ss:audio-chunk', chunk);
-    });
-  } catch (err) {
-    console.error('stream-share: starting the per-app capture failed', err);
-    return null;
-  }
-  // Superseded while we were listing (another click, or teardown): this session must not become
-  // the orphan described above.
-  if (mine !== captureEpoch) {
+  const started: CaptureTarget[] = [];
+  const replacing = captures;
+  captures = []; // the old sessions are still running; they are stopped once this call commits
+  for (const t of targets) {
     try {
-      instance.stop();
-    } catch {
-      /* nothing to recover */
+      // Inside the try: a missing/incompatible .node throws here, and the handler must answer
+      // rather than reject — the renderer's catch can't tell the two apart.
+      const instance = new (loadAddon().LoopbackCapture)();
+      captures.push(instance); // before start(), so a throw mid-start still leaves it stoppable
+      // A chunk is tagged with the source it belongs to, so the renderer can schedule each one on
+      // its own cursor. Under exclusion there is a single session and it carries everything BUT
+      // the named app — tagging it with that app's name would read as its exact opposite.
+      const key = includeTree ? t.name : 'system';
+      // true = INCLUDE_TARGET_PROCESS_TREE (that app alone), false = EXCLUDE (everything but it).
+      // Tree either way, which is what covers a Chromium app's separate audio-service child.
+      instance.start(t.pid, includeTree, (chunk) => {
+        // Delivered on the JS loop via a threadsafe function (not the native thread itself),
+        // ~100×/s per audible session — the addon drops silent buffers, so a session for an app
+        // that isn't making noise costs nothing. The window can still go away mid-stream, which
+        // the listeners in createWindow cover.
+        if (!sender.isDestroyed()) sender.send('ss:audio-chunk', key, chunk);
+      });
+      started.push(t);
+    } catch (err) {
+      console.error('stream-share: starting the per-app capture failed', err);
     }
+  }
+  // Nothing started when something was asked for = a refusal. Roll back to what was already
+  // running rather than leaving the machine unmuted. An empty `targets` is different: it means
+  // "capture nothing" (every app muted), and returning [] keeps the renderer on the silent
+  // native track.
+  if (!started.length && targets.length) {
+    stopCapture();
+    captures = replacing;
     return null;
   }
-  capture = instance;
-  // A reload keeps the SAME WebContents, so isDestroyed() stays false and the capture would go on
-  // feeding a page that has lost its listener and its state.
-  sender.once('destroyed', stopCapture);
-  sender.once('did-start-navigation', stopCapture);
-  return target;
+  for (const c of replacing) {
+    try {
+      c.stop();
+    } catch {
+      // Already stopped, or the device went away.
+    }
+  }
+  return started;
 });
 
 // A native capture thread would outlive the window and hold the audio device.

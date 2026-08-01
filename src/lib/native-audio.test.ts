@@ -4,7 +4,7 @@
 // stops after the first quiet moment. decodePcm is the trust boundary for bytes off an IPC pipe.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { nextStartTime, decodePcm, LEAD_SECONDS, MAX_LEAD_SECONDS } from './native-audio.ts';
+import { nextStartTime, advance, decodePcm, LEAD_SECONDS, MAX_LEAD_SECONDS } from './native-audio.ts';
 
 test('the first chunk is anchored one lead ahead of the clock', () => {
   assert.equal(nextStartTime(0, 10), 10 + LEAD_SECONDS);
@@ -32,6 +32,26 @@ test('running too far ahead resyncs instead of staying that far behind forever',
 
 test('the lead sits under the drop ceiling (else every chunk would be dropped)', () => {
   assert.ok(LEAD_SECONDS < MAX_LEAD_SECONDS);
+});
+
+test('two sources keep independent cursors', () => {
+  // Muting 2+ apps runs one WASAPI session per app still audible, all arriving interleaved on one
+  // IPC channel. On a shared cursor, A's chunk would push B's schedule forward, so every second
+  // chunk would land in the past and be re-anchored — a permanent stutter on both streams.
+  const cursors = new Map<string, number>();
+  const chunk = 0.01;
+  assert.equal(advance(cursors, 'Spotify', 10, chunk), 10 + LEAD_SECONDS);
+  assert.equal(advance(cursors, 'chrome', 10, chunk), 10 + LEAD_SECONDS, 'the other source starts fresh, not queued');
+  // Each one now continues from its OWN position rather than from the last chunk seen.
+  assert.equal(advance(cursors, 'Spotify', 10, chunk), 10 + LEAD_SECONDS + chunk);
+  assert.equal(advance(cursors, 'chrome', 10, chunk), 10 + LEAD_SECONDS + chunk);
+});
+
+test('a source that went quiet re-anchors instead of being pruned', () => {
+  // Stale keys are deliberately never cleaned up: the cursor of an app that stopped is simply in
+  // the past, which is the gap case. It must not schedule a burst when the app comes back.
+  const cursors = new Map([['Spotify', 3]]);
+  assert.equal(advance(cursors, 'Spotify', 10, 0.01), 10 + LEAD_SECONDS);
 });
 
 test('decodePcm de-interleaves stereo Int16 into per-channel Float32', () => {

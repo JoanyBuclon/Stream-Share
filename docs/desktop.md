@@ -90,41 +90,84 @@ dont un cassé :
 | Source partagée   | Web aujourd'hui                   | Desktop                                            |
 | ----------------- | --------------------------------- | -------------------------------------------------- |
 | Onglet navigateur | audio de l'onglet seul            | ⚠️ **régression** — voir plus bas                  |
-| Écran             | tout le son système, sans recours | tout le son système **moins une app choisie** ✅   |
+| Écran             | tout le son système, sans recours | tout le système **moins les apps décochées** ✅    |
 | **Fenêtre / app** | **rien, ou tout le système** ❌   | **le son de cette app, et rien d'autre** ✅        |
 
 **L'audio suit la source vidéo**, automatiquement :
 
 - **Source = une fenêtre** → on capture l'arbre de processus de cette app **et
   rien d'autre**, sans rien configurer. C'est appliqué au moment du choix de la
-  source, pas au moment d'ouvrir les réglages.
-- **Source = un écran** → tout le système, **moins une app** qu'on désigne.
-
-Un repli existe dans les deux sens : le panneau liste « uniquement le son de
-&lt;app&gt; », « aucune app coupée », puis les apps à couper — une seule ligne
-active à la fois, ce qui est exactement la forme de la contrainte WASAPI (un seul
-arbre de processus, en inclusion **ou** en exclusion). Partager le jeu **et**
-couper Spotify reste donc impossible.
+  source, pas au moment d'ouvrir les réglages. À la première ouverture du panneau,
+  les cases se règlent sur ce qui est déjà capturé : cette app cochée, les autres
+  décochées.
+- **Source = un écran** → tout le système, moins ce qu'on décoche.
 
 **Le lien fenêtre → process est gratuit** : l'identifiant `desktopCapturer` d'une
 fenêtre est `window:<HWND>:<n>`, et ce HWND est celui que `MainWindowHandle`
 expose — vérifié sur 6 fenêtres sur 6, Discord compris. La résolution vit dans le
 main process, seul endroit qui détient l'identifiant à jour au moment du besoin.
 
-#### Le modèle : liste d'exclusion
+#### Le modèle : une case par app
 
-**Un seul arbre de processus à la fois**, en inclusion ou en exclusion : c'est ce
-que l'API autorise, et c'est ce qui décide de l'UI. Pas de cases à cocher
-multiples comme dans la maquette, ni de pré-décochage des clients vocaux — une
-liste à choix unique.
+Une case à cocher par app, cochée = les viewers l'entendent — le modèle de la
+maquette. WASAPI ne prend **qu'un seul arbre de processus à la fois**, en
+inclusion **ou** en exclusion ; c'est une contrainte par *session*, pas par
+machine, donc on en ouvre plusieurs. `audioSpecFor` (dans `src/lib/host.ts`)
+choisit le côté le moins cher :
+
+| Apps décochées | Ce qui tourne                              | Pourquoi                                                                |
+| -------------- | ------------------------------------------ | ----------------------------------------------------------------------- |
+| aucune         | rien du tout                               | la piste loopback de `getDisplayMedia` porte déjà tout, gratuitement     |
+| une            | **exclusion** de cette app                 | seul mode sans angle mort — voir juste en dessous                        |
+| deux ou plus   | une session **inclusion** par app restante | on reconstruit le mix par l'autre bout                                   |
+| toutes         | une capture **vide**                       | le silence, et surtout **pas** un repli sur la piste loopback            |
+
+Ce dernier cas est le piège : répondre « pas de capture » quand tout est décoché
+renverrait les viewers sur la piste loopback, donc **démuterait tout** — le pire
+résultat possible, atteint par le geste le plus naturel. Une inclusion vide est
+une capture bien vivante qui ne contient rien.
+
+#### La règle qui tient tout : une seule vérité, la capture vivante
+
+Les cases **ne mémorisent pas une intention**. Elles se lisent depuis la capture
+que le shell exécute réellement (`isAudible`) : décoché = *aucune session ne
+porte cette app*. Un second état « ce que l'utilisateur voulait » dériverait tôt
+ou tard de ce qui tourne, et **toutes les pannes de cette feature sont inaudibles
+pour le host** — il croit son vocal coupé, les viewers l'entendent. Il n'y a donc
+qu'une source, et c'est celle qui produit le son.
+
+Trois conséquences, toutes voulues :
+
+- **Un refus ne casse rien.** Le main résout toutes ses cibles *avant* d'arrêter
+  quoi que ce soit : un clic qu'il ne peut pas honorer laisse la capture
+  précédente en place, les cases restent donc vraies. Le panneau dit juste que le
+  changement n'est pas passé.
+- **Pas de mise à jour optimiste.** Le clic attend l'aller-retour (~240 ms) et
+  n'affiche que du confirmé.
+- **Couper le son système oublie les coches.** Il n'y a plus de capture à lire,
+  donc plus rien de coupé ; rallumer repart de « les viewers entendent tout ».
+  C'est le prix de la règle, et il est petit.
+
+Le passage de 1 à 2 apps coupées **change la sémantique en silence**, et c'est la
+limite principale du modèle. Le panneau l'annonce pendant toute la durée où c'est
+vrai (dérivé du mode réellement actif, pas d'un décompte de coches).
 
 Limites assumées, toutes constatées :
 
-- **Une seule app à la fois.** L'API ne sait pas faire plus.
+- **En mode inclusion, la liste est un instantané.** L'inclusion ne connaît que
+  les apps nommées : une app **lancée après** est muette, les apps sans fenêtre et
+  les sons propres de Windows aussi. Elle apparaît alors **décochée** — ce qui est
+  la vérité — et la cocher l'ajoute. Rien ne se ré-arme dans le dos du host. Avec
+  **une seule** app coupée, l'exclusion n'a pas ce problème : c'est exactement
+  pour ça que le cas particulier existe.
+- **Une app coupée qui se minimise en tray garde sa ligne.** Elle sort de
+  `Get-Process | Where MainWindowHandle` alors que son process, et sa session,
+  tournent très bien. La ligne survit à la disparition du listing, sinon le host
+  n'aurait plus rien à voir ni à défaire — et le tray est l'état le plus courant
+  de Discord. Sortir du listing n'est donc **pas** un signal d'obsolescence.
 - **Une app par nom d'exécutable.** Deux fenêtres de la même app (deux profils
   Chrome, deux Notepad) sont deux PID racines sous un même nom ; la liste n'en
-  montre qu'un, et c'est cette instance-là qui est tue. Afficher les deux serait
-  mentir, puisqu'on ne peut en exclure qu'une.
+  montre qu'un, et c'est cet arbre-là qui est visé.
 - **Seules les apps avec une fenêtre visible sont listées** — c'est ce qui donne
   le PID racine gratuitement (voir Technique). Discord réduit dans la barre des
   tâches en sort donc, ce qui est son état le plus courant. L'UI le dit.
@@ -133,16 +176,29 @@ Limites assumées, toutes constatées :
   fenêtre de haut niveau (un pop-out Chrome, un second éditeur) n'a aucune
   correspondance. Partager celle-là bascule sur le son système complet, et l'UI
   l'annonce plutôt que de prétendre isoler l'app.
-- **Si l'app exclue redémarre** (Discord se met à jour tout seul), son PID change.
-  Rouvrir le panneau ré-arme l'exclusion sur le nouveau PID ; entre les deux, elle
-  redevient audible. Pas de surveillance de process : mesuré, la capture **survit**
-  à la mort de la cible et le reste du son continue de passer — les viewers ne
-  tombent jamais dans le silence.
+- **Si une app capturée redémarre** (Discord se met à jour tout seul), son PID
+  change et la session pointe sur un mort. C'est le **seul** cas qui ré-arme :
+  PID vu dans le listing ≠ PID de la session → on renvoie **le même spec**, jamais
+  une re-dérivation qui pourrait viser autre chose. Entre les deux, l'app redevient
+  audible. Pas de surveillance de process : mesuré, la capture **survit** à la mort
+  de la cible et le reste du son continue de passer — les viewers ne tombent jamais
+  dans le silence.
+- **Pas de pré-décochage des clients vocaux**, contrairement à la maquette. La
+  liste ne peut pas être juste (`DiscordCanary`, Vencord, Teams…), elle est fausse
+  quand on partage justement un appel Discord, et son mode d'échec est
+  *inaudible*. Ça n'économiserait qu'un clic, dans un panneau déjà ouvert.
+
+**Coût de N sessions** : mesuré, 16 sessions concurrentes démarrent en 5 ms (0
+échec), tiennent 4,1 Mo de RSS et s'arrêtent en 3 ms — sur une machine réelle qui
+compte 8 apps fenêtrées après déduplication. Le volume IPC ne suit pas le nombre
+de sessions mais le nombre d'apps qui **jouent** réellement (l'addon jette les
+buffers silencieux) : sur ces 16 sessions, 2 émettaient.
 
 ```
-// ponytail: liste d'exclusion, pas de mixer par app. Des sliders de volume par
+// ponytail: cases à cocher, pas de mixer par app. Des sliders de volume par
 // application, c'est une table de mixage — c'est OBS, pas nous. Si la demande
-// arrive vraiment, la liste d'exclusion en est le sous-ensemble, rien à jeter.
+// arrive vraiment, le tout-ou-rien par app en est le sous-ensemble, rien à jeter.
+// ponytail: pas de plafond sur le nombre de sessions, cf. la mesure ci-dessus.
 ```
 
 #### Technique
@@ -151,7 +207,9 @@ Limites assumées, toutes constatées :
   (`AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`, Windows 10 build 20348+), via
   `loopback-capture` (C++ N-API — successeur de `application-loopback`, déprécié).
   `start(pid, includeProcessTree, cb)` : le booléen à `false` sélectionne
-  l'exclusion. Format figé dans le C++ : **PCM 48 kHz, 16 bits, stéréo,
+  l'exclusion. Une instance = une session ; le main en tient une **liste**, et
+  chaque instance y entre au moment où elle démarre — c'est la seule chose capable
+  d'arrêter une session orpheline. Format figé dans le C++ : **PCM 48 kHz, 16 bits, stéréo,
   entrelacé**, par paquets de 1920 octets = 10 ms (~100 callbacks/s). Le 48 kHz
   tombe pile sur l'`AudioContext` d'`audio.ts` : **aucun rééchantillonnage** nulle
   part. L'addon **jette les buffers silencieux** (seuil −70 dB) : le flux n'est
@@ -169,7 +227,11 @@ Limites assumées, toutes constatées :
   silencieux rend l'ordonnancement *plus* simple qu'un worklet, qui devrait
   synthétiser du silence. **Ne pas** passer par `MediaStreamTrackGenerator`
   (breakout box) : non-standard, Chromium seul, refusé par Mozilla — et il
-  n'existe pas d'`AudioTrackGenerator`.
+  n'existe pas d'`AudioTrackGenerator`. Chaque paquet est **étiqueté du nom de son
+  app** et ordonnancé sur son propre curseur : plusieurs sessions arrivent
+  entrelacées sur un seul canal IPC, et un curseur partagé ferait qu'un paquet sur
+  deux tomberait dans le passé — un bégaiement permanent sur tous les flux. Ils se
+  mélangent dans le graphe audio, où ils alimentent le même nœud de destination.
 - **Packaging** : `extraResources` copie le **`.node` nu**, requis par chemin
   absolu. Surtout pas `require('loopback-capture')` : son `dist/index.cjs` passe
   par le paquet `bindings`, donc l'embarquer traînerait un `node_modules` dans
@@ -540,7 +602,7 @@ parallèle des deux publish, après `quality` :
 // qui n'a pas passé lint/typecheck/tests n'a rien à faire en release.
 ```
 
-### Les cinq pièges de la chaîne de release
+### Les six pièges de la chaîne de release
 
 Chacun a coûté une release ratée. Ils sont détaillés dans
 [`electron/README.md`](../electron/README.md) ; résumé de ce qu'il ne faut pas
@@ -553,11 +615,25 @@ défaire :
 | **L'`app.asar` embarquait 7 315 fichiers / 118 Mo** : electron-builder remonte à la racine du dépôt et empaquette **ses** dépendances de production (astro, tailwind, vite, sharp…).                              | `!node_modules/**` + `electron-updater` bundlé → asar de 608 Ko      |
 | **La publication d'electron-builder rapportait « succès » en ne déposant que le `.blockmap`** — ni installeur ni `latest.yml`, deux fois de suite.                                                                | build et upload séparés, avec gardes qui **font échouer le job**     |
 | **`gh release upload` exige une release existante**, or plus rien ne la créait après le passage en `--publish never`.                                                                                            | `gh release view` → `create` si absente, puis `upload --clobber`     |
+| **Le nom d'artefact par défaut contient des espaces** : electron-builder écrit `StreamShare Setup x.y.z.exe` sur le disque mais inscrit la forme URL-safe `StreamShare-Setup-x.y.z.exe` dans `latest.yml` ; GitHub, lui, remplace les espaces par des **points** à l'upload. L'asset s'appelle donc `StreamShare.Setup.x.y.z.exe` et l'updater 404 sur un nom que personne n'a jamais créé. Même piège pour le `.blockmap`. Conséquence de notre build/upload séparé — le publisher d'electron-builder masque le problème en uploadant lui-même la forme à tirets. | `artifactName: ${productName}-Setup-${version}.${ext}` |
 
 ```
-// ponytail: ces cinq points ne sont pas des préférences. Chacun est un mode de
-// panne vérifié — dont trois SILENCIEUX (job vert, release inutilisable).
+// ponytail: ces six points ne sont pas des préférences. Chacun est un mode de
+// panne vérifié — dont quatre SILENCIEUX (job vert, release inutilisable).
 ```
+
+#### Diagnostiquer un updater qui ne fait rien
+
+Pas de `electron-log` dans l'arbre : `checkForUpdatesAndNotify()` échoue sans
+laisser de trace. La procédure, dans cet ordre, tient en trois vérifications :
+
+1. **Le cache** — `%LOCALAPPDATA%\stream-share-desktop-updater\pending\`. Un
+   `installer.exe` présent ne prouve rien : vérifier sa **date** et sa version,
+   c'est souvent celui d'une release précédente.
+2. **`latest.yml` de la release** — le champ `path` (et `url`) doit correspondre
+   **caractère pour caractère** au nom de l'asset publié. C'est le piège n°6.
+3. **Le `sha512`** — si un asset a dû être renommé à la main, comparer son
+   empreinte à celle de `latest.yml` avant de supprimer l'ancien.
 
 ## Décisions
 
@@ -568,7 +644,7 @@ d'avis.
 | ------------------ | ------------------------------------------------------- |
 | Périmètre          | Host uniquement, Windows d'abord                        |
 | Techno             | Electron (dernière stable)                              |
-| Modèle audio       | L'audio suit la source vidéo, puis liste d'exclusion    |
+| Modèle audio       | L'audio suit la source vidéo, puis une case par app     |
 | Code               | Même repo, dossier `electron/`, `src/` partagé          |
 | Signature Windows  | Aucune, assumé pour l'instant (warning expliqué)        |
 | Distribution       | GitHub Releases + `electron-updater`                    |
@@ -604,7 +680,7 @@ moment-là :
 | Phase                    | Contenu                                                                                                                                                                    | Sortie                                                                                                                     |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
 | **1 — coquille Electron** ✅ **livrée** | L'app web emballée dans Electron : scheme `app://`, CSP mirrorée, nav-lock, pas de menu, icône, close = quit, **page `/download`** + CTA accueil, **auto-update** câblé, packaging NSIS + job CI sur tag `v*.*.*`. `window.native` ne porte que `appOrigin`. **Source imposée à l'écran principal** (béquille, cf. ci-dessus). | **Validé de bout en bout** : installeur téléchargé depuis la Release, app installée, partage host desktop → viewer Chrome. Reste non prouvé : la mise à jour automatique (deux versions nécessaires). |
-| **2 — MVP**              | **Audio par app (exclusion) ✅**, **grille de sources native ✅**, raccourcis globaux, réglages mémorisés, wake lock, notifications rejoint/quitte, avertissement HDR.            | La version qui « récompense ». Livrée par morceaux, le sélecteur en premier. Le spike audio est passé : `loopback-capture@2.0.0` sort du PCM 48 kHz / 16 bits / stéréo par paquets de 10 ms, et expose bien le mode **exclusion** — donc la feature n°1 tient. |
+| **2 — MVP**              | **Audio par app (une case par app) ✅**, **grille de sources native ✅**, raccourcis globaux, réglages mémorisés, wake lock, notifications rejoint/quitte, avertissement HDR.            | La version qui « récompense ». Livrée par morceaux, le sélecteur en premier. Le spike audio est passé : `loopback-capture@2.0.0` sort du PCM 48 kHz / 16 bits / stéréo par paquets de 10 ms, et une session par app tient (16 mesurées) — donc la feature n°1 va jusqu'au modèle de la maquette. |
 | **3 — capture native**   | WGC/DXGI → injection : FPS garanti, tone-map HDR, encodage hardware, contrôle curseur. Fork architectural, **le vrai gain différentiel avec le web**.                     | Ouvert seulement si une de ces features est réellement demandée.                                                          |
 
 **À dire franchement : au sortir de la phase 1, l'app n'apporte rien qu'un

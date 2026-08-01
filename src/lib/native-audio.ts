@@ -1,5 +1,6 @@
-// Desktop-only: turns the shell's raw PCM stream (system audio minus one excluded app) into a
-// MediaStreamTrack the AudioMixer can treat like any other system track. See docs/desktop.md.
+// Desktop-only: turns the shell's raw PCM streams (the system mix minus one app, or one stream per
+// app left audible) into a single MediaStreamTrack the AudioMixer treats like any other system
+// track. See docs/desktop.md.
 //
 // No AudioWorklet. Each ~10 ms chunk is scheduled as its own AudioBufferSourceNode, which is both
 // smaller and a better fit here: the addon DROPS silent buffers, so an underrun means "schedule
@@ -35,6 +36,24 @@ export function nextStartTime(cursor: number, now: number): number {
   return cursor; // already anchored: play back to back
 }
 
+/**
+ * Where `key`'s next chunk goes, advancing its cursor by `seconds`.
+ *
+ * One cursor PER SOURCE. Muting two apps means the shell runs one WASAPI session per app still
+ * audible, and those arrive interleaved on a single IPC channel — a shared cursor would let one
+ * app's chunk push the other's schedule forward, so every second chunk would land in the past and
+ * be re-anchored, i.e. a permanent stutter on both. They are independent streams; the mixing
+ * happens in the audio graph, where all of them feed the same destination node.
+ *
+ * Stale keys are never pruned: a stopped app's cursor is left in the past, which is exactly the
+ * "after a gap" case nextStartTime already re-anchors if that app ever comes back.
+ */
+export function advance(cursors: Map<string, number>, key: string, now: number, seconds: number): number {
+  const at = nextStartTime(cursors.get(key) ?? 0, now);
+  cursors.set(key, at + seconds);
+  return at;
+}
+
 /** Interleaved little-endian Int16 → per-channel Float32 in [-1, 1). */
 export function decodePcm(chunk: Uint8Array): Float32Array<ArrayBuffer>[] {
   const channels = CHANNELS;
@@ -56,40 +75,44 @@ export function decodePcm(chunk: Uint8Array): Float32Array<ArrayBuffer>[] {
 export class NativeAudio {
   private ctx: AudioContext | null = null;
   private dest: MediaStreamAudioDestinationNode | null = null;
-  private cursor = 0; // context time the next chunk plays at
+  private readonly cursors = new Map<string, number>(); // per source: context time its next chunk plays at
 
   /** The track to hand the mixer, creating the graph on first use. */
   track(): MediaStreamTrack | null {
     if (!this.dest) {
       // Same 48 kHz as AudioMixer and as the capture — no resampling anywhere in the chain.
       this.ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
+      // Every path here starts from a click, so it should already be running. One line of
+      // insurance: a suspended context leaves currentTime at 0, so every chunk piles up on the
+      // same instant and the whole backlog fires at once when it resumes.
+      void this.ctx.resume().catch(() => {});
       this.dest = this.ctx.createMediaStreamDestination();
     }
     return this.dest.stream.getAudioTracks()[0] ?? null;
   }
 
-  /** Schedule one PCM chunk. Cheap enough to call ~100×/s; a dropped chunk is 10 ms. */
-  push(chunk: Uint8Array): void {
+  /** Schedule one PCM chunk from source `key`. Cheap enough to call ~100×/s per live source; a
+   *  dropped chunk is 10 ms. Every source connects to the same destination, so they sum. */
+  push(key: string, chunk: Uint8Array): void {
     const ctx = this.ctx;
     const dest = this.dest;
     if (!ctx || !dest || chunk.byteLength < 4) return;
     const channels = decodePcm(chunk);
     const frames = channels[0].length;
     if (!frames) return;
-    const at = nextStartTime(this.cursor, ctx.currentTime);
+    const at = advance(this.cursors, key, ctx.currentTime, frames / SAMPLE_RATE);
     const buffer = ctx.createBuffer(channels.length, frames, SAMPLE_RATE);
     for (let c = 0; c < channels.length; c++) buffer.copyToChannel(channels[c], c);
     const src = ctx.createBufferSource();
     src.buffer = buffer;
     src.connect(dest);
     src.start(at);
-    this.cursor = at + frames / SAMPLE_RATE;
   }
 
   teardown(): void {
     void this.ctx?.close();
     this.ctx = null;
     this.dest = null;
-    this.cursor = 0;
+    this.cursors.clear();
   }
 }

@@ -49,6 +49,18 @@ export async function fakeNative(page: Page, opts: { delaysMs?: number[]; fail?:
       const px =
         'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
       let call = 0;
+      // The fake process table. A test mutates it to simulate an app launching, restarting under
+      // a new pid, or minimising to tray. `Ghost` is listed but unresolvable (pid 0): the app that
+      // quits between the listing and the click.
+      (window as unknown as { __apps: unknown[] }).__apps = [
+        { pid: 4444, name: 'Elden Ring', title: 'ELDEN RING' },
+        { pid: 4001, name: 'Discord', title: '@someone - Discord' },
+        { pid: 4002, name: 'Spotify', title: 'Spotify Premium' },
+        { pid: 0, name: 'Ghost', title: 'about to exit' },
+      ];
+      // Explicitly null, not undefined: a refusal leaves `__audio` untouched, so before the first
+      // successful capture the tests must still be able to read "nothing is running".
+      (window as unknown as { __audio: unknown }).__audio = null;
       Object.defineProperty(window, 'native', {
         value: {
           // The signaling lives on :8080 in dev; app.ts derives the socket from this origin.
@@ -68,29 +80,61 @@ export async function fakeNative(page: Page, opts: { delaysMs?: number[]; fail?:
           selectSource: async (id: string) => {
             (window as unknown as { __picked?: string }).__picked = id;
           },
-          // Per-app audio. The PCM stream itself isn't faked — there is nothing to assert about
-          // it in a browser — but the exclusion handshake drives the whole settings UI.
-          listAudioApps: async () => [
-            { pid: 4001, name: 'Discord', title: '@someone - Discord' },
-            { pid: 4002, name: 'Spotify', title: 'Spotify Premium' },
-            // Quits between the listing and the click — the shell then answers null.
-            { pid: 4003, name: 'Ghost', title: 'about to exit' },
-          ],
-          setAudioCapture: async (spec: { sourceId?: string; exclude?: string } | null) => {
-            const w = window as unknown as { __audio?: { mode: string; name: string } | null };
+          // Per-app audio. The PCM stream itself isn't faked — there is nothing to assert about it
+          // in a browser — but the capture handshake drives the whole checkbox UI.
+          //
+          // `window.__apps` is the process table, MUTABLE from a test: an app can be added
+          // (launched), removed (minimised to tray, which drops it from the real
+          // `Get-Process | Where MainWindowHandle`) or given a new pid (restarted). `pid: 0` means
+          // "listed but no longer resolvable" — the app that quits between the listing and the
+          // click. `window.__audioFail` forces a refusal.
+          //
+          // `__audio` mirrors what the shell is actually running: null = the ordinary loopback
+          // track, an object = live WASAPI sessions (empty `names` = a capture of nothing, i.e.
+          // silence). A refusal leaves it untouched, because main resolves everything before it
+          // stops what is live.
+          listAudioApps: async () => (window as unknown as { __apps: unknown[] }).__apps,
+          setAudioCapture: async (spec: { sourceId?: string; exclude?: string; include?: string[] } | null) => {
+            const w = window as unknown as {
+              __apps: Array<{ pid: number; name: string }>;
+              __audioFail?: boolean;
+              __audio?: { mode: string; names: string[]; pids: number[] } | null;
+            };
+            const pidOf = (n: string): number | undefined => w.__apps.find((a) => a.name === n && a.pid > 0)?.pid;
+            const record = (mode: string, got: Array<{ pid: number; name: string }>) => {
+              w.__audio = { mode, names: got.map((g) => g.name), pids: got.map((g) => g.pid) };
+              return got;
+            };
             if (!spec) { w.__audio = null; return null; }
+            if (w.__audioFail) return null; // refused: whatever was running still is
             if (spec.sourceId) {
               // Only window:4242:* resolves to an owner — the others stand in for a window that
               // is not its process's main window, where app-only sound is impossible.
-              if (!spec.sourceId.startsWith('window:4242:')) { w.__audio = null; return null; }
-              w.__audio = { mode: 'include', name: 'Elden Ring' };
-              return { pid: 4444, name: 'Elden Ring' };
+              if (!spec.sourceId.startsWith('window:4242:')) return null;
+              return record('include', [{ pid: 4444, name: 'Elden Ring' }]);
             }
-            if (spec.exclude === 'Ghost') { w.__audio = null; return null; }
-            w.__audio = { mode: 'exclude', name: spec.exclude! };
-            return { pid: spec.exclude === 'Discord' ? 4001 : 4002, name: spec.exclude! };
+            if (spec.include) {
+              const got = spec.include.flatMap((n) => {
+                const pid = pidOf(n);
+                return pid === undefined ? [] : [{ pid, name: n }];
+              });
+              return record('include', got); // possibly [] — a success, not a refusal
+            }
+            const pid = pidOf(spec.exclude!);
+            if (pid === undefined) return null;
+            return record('exclude', [{ pid, name: spec.exclude! }]);
           },
-          onAudioChunk: () => () => {},
+          // The renderer subscribes iff it considers a native capture live — which is also when it
+          // routes viewers onto the native track instead of the loopback one. That decision is
+          // invisible from the page otherwise, and it is the whole point of an empty include, so
+          // the stub records it.
+          onAudioChunk: () => {
+            const w = window as unknown as { __chunkSub?: boolean };
+            w.__chunkSub = true;
+            return () => {
+              w.__chunkSub = false;
+            };
+          },
         },
         configurable: true,
       });
