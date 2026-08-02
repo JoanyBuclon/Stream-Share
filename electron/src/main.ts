@@ -180,9 +180,16 @@ app.whenReady().then(() => {
   });
 
   // Windows identity for taskbar grouping — and a hard requirement for toast notifications to
-  // show under the app's name rather than being dropped (phase 2 announces viewers joining).
-  // Must match electron-builder's appId. No-op on other platforms.
-  app.setAppUserModelId('com.joanybuclon.streamshare');
+  // show under the app's name rather than being dropped. Packaged, it MUST equal electron-builder's
+  // appId, which is what the installer stamps on the Start Menu shortcut. No-op off Windows.
+  //
+  // A separate id unpackaged, and this is not cosmetic. Windows resolves a toast's sender through a
+  // Start Menu shortcut carrying that id, so an unpackaged run showing a notification makes Electron
+  // create one — pointing into node_modules, named and iconed "Electron". Sharing the id with the
+  // installed app would let a `pnpm desktop` session speak for it in the shell: taskbar grouping,
+  // pinning, and the Start Menu entry. The stray shortcut still appears in dev; it just can no
+  // longer be confused with the real app, and deleting it is safe.
+  app.setAppUserModelId(app.isPackaged ? 'com.joanybuclon.streamshare' : 'com.joanybuclon.streamshare.dev');
 
   // No File/Edit/View/Window bar: it's Electron's default menu, not something the product uses.
   // Windows/Linux keep the native editing shortcuts (Chromium handles Ctrl+C/V/X/A in inputs on

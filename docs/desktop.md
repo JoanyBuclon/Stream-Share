@@ -580,9 +580,25 @@ sont dans `electron/src/main.ts`, commentés sur place.
   de ressource**, donc `pnpm desktop` doit la passer explicitement à la
   `BrowserWindow` sinon on voit celle d'Electron. En dev, la barre des tâches peut
   malgré tout rester celle d'Electron : Windows la rattache à l'exécutable lancé.
-- **`app.setAppUserModelId` doit correspondre à l'`appId`.** Sans identité Windows,
-  les notifications toast sont muettes — ce qui compte dès la phase 2 (annonce des
-  viewers), et pas seulement pour le regroupement dans la barre des tâches.
+- **`app.setAppUserModelId` doit correspondre à l'`appId`** — *packagé*. Sans
+  identité Windows, les notifications toast sont muettes, et pas seulement le
+  regroupement dans la barre des tâches en souffre.
+- **En dev, l'identité doit être DIFFÉRENTE**, et ça s'est payé une fois. Windows
+  retrouve l'émetteur d'un toast via un raccourci du menu Démarrer portant cet
+  identifiant : une exécution **non packagée** qui affiche une notification pousse
+  donc Electron à en créer un, pointant vers `node_modules`, nommé et iconé
+  « Electron ». Il survit à une désinstallation de l'app (il est dans le profil
+  utilisateur, pas dans l'installation) et se retrouve dans le menu Démarrer et la
+  recherche Windows à côté du vrai. D'où le `.dev` hors packaging : le raccourci
+  parasite apparaît toujours, mais il ne peut plus parler au nom de l'app installée.
+  Symptômes constatés quand c'est arrivé : une entrée « Electron » dans le menu
+  Démarrer qui lançait `electron.exe`, l'icône de la barre des tâches revenue à
+  celle d'Electron, et StreamShare introuvable dans la recherche. Le nettoyage est
+  manuel : supprimer le `.lnk`, vider `IconCache.db` +
+  `%LOCALAPPDATA%\Microsoft\Windows\Explorer\iconcache_*.db`, relancer
+  `explorer.exe`. Diagnostic : comparer la cible et l'`AppUserModelId` des `.lnk` de
+  `%APPDATA%\Microsoft\Windows\Start Menu\Programs` — l'exe installé, lui, porte son
+  icône et son `ProductName` en interne et se vérifie indépendamment.
 - **Le scheme privilégié conditionne `localStorage`.** Il est enregistré `standard`
   + `secure` avant `app.ready` pour que l'origine ne soit pas opaque ; sans ça,
   `getDisplayMedia`, le presse-papiers **et le stockage** tombent. Les réglages
