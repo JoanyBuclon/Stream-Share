@@ -3,6 +3,7 @@ import {
   BrowserWindow,
   Menu,
   Notification,
+  powerSaveBlocker,
   protocol,
   screen,
   session,
@@ -22,6 +23,7 @@ import {
   wsOrigin,
   parseAudioApps,
   hwndFromSourceId,
+  createWakeLockToggle,
   type AudioApp,
 } from './config.ts';
 
@@ -29,6 +31,18 @@ const execFile = promisify(execFileCb);
 
 const APP_SCHEME = 'app';
 const appOrigin = resolveAppOrigin();
+
+// --- wake lock ---
+
+/** Hold the display awake at the PROCESS level, unlike the renderer's document-scoped
+ *  `navigator.wakeLock` — which is granted under app:// but released the moment the window hides.
+ *  See docs/desktop.md § Confort système for the measurement and the reasoning.
+ *
+ *  ponytail: one blocker for the whole process. Host and viewer are mutually exclusive (app.ts
+ *  teardown() destroys one synchronously before the other is built) and the app is single-window,
+ *  so nothing can want it on and off at once. Refcount the day a second window can hold a session.
+ *  The bookkeeping itself lives in config.ts, where it is unit-tested without booting Electron. */
+const setWakeLock = createWakeLockToggle(powerSaveBlocker);
 
 // --- source picker (renderer-side UI, main-side capture routing) ---
 
@@ -116,9 +130,23 @@ function createWindow(): void {
   // and the sessions would go on feeding a page that has lost its listener and its state — but
   // `isSameDocument` must be honoured, or our own `history.replaceState` of the room code would
   // kill the capture while the renderer still believes it is live (silence, with nothing to see).
-  win.webContents.on('destroyed', stopCapture);
+  // The wake lock rides along: a blocker that outlives the page holding it keeps the machine awake
+  // with nothing left to turn it off, and there is no UI that would ever show it. (This also fires
+  // on the initial loadURL, which is a no-op only because setWakeLock tracks the id explicitly.)
+  const dropNativeState = (): void => {
+    stopCapture();
+    setWakeLock(false);
+  };
+  win.webContents.on('destroyed', dropNativeState);
+  // A crashed renderer leaves the WebContents alive, so neither of the other two fire — and the
+  // blocker would be held against a blank page for as long as the app stays open.
+  win.webContents.on('render-process-gone', dropNativeState);
+  // `isMainFrame` as well as `isSameDocument`: a subframe navigating is not our session ending. It
+  // also keeps this off the path of an external `<a href>` without target=_blank, which would fire
+  // here BEFORE will-navigate cancels it — tearing down the capture and the lock under a session
+  // that carries on, with no way for the renderer to know.
   win.webContents.on('did-start-navigation', (details) => {
-    if (!details.isSameDocument) stopCapture();
+    if (details.isMainFrame && !details.isSameDocument) dropNativeState();
   });
 
   void win.loadURL(`${APP_SCHEME}://bundle/`);
@@ -497,8 +525,19 @@ ipcMain.handle('ss:audio-capture', async (event, spec: unknown): Promise<Capture
   return started;
 });
 
-// A native capture thread would outlive the window and hold the audio device.
-app.on('before-quit', stopCapture);
+// One-way: the renderer holds the display awake for as long as a session is live. No reply to
+// wait for, so `on` rather than `handle`.
+ipcMain.on('ss:wake-lock', (event, on: unknown) => {
+  if (!isInternalUrl(event.senderFrame?.url ?? '')) return;
+  setWakeLock(on === true);
+});
+
+// A native capture thread would outlive the window and hold the audio device. The power request is
+// a per-process handle so exiting releases it anyway — this is belt and braces on an existing line.
+app.on('before-quit', () => {
+  stopCapture();
+  setWakeLock(false);
+});
 
 // handle (awaited), not send: the id and the getDisplayMedia call travel on different IPC pipes,
 // so nothing orders them — fire-and-forget would capture the previous source now and then.

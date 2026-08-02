@@ -8,7 +8,7 @@ import { el, show, hide, setText } from './dom.ts';
 import { formatCode } from './code.ts';
 import { viewerTiers, type ViewerTier } from './settings.ts';
 import { readStats, rateStats, type RtcStat, type Sample } from './stats.ts';
-import { WakeLock } from './wakelock.ts';
+import { createWakeLock } from './wakelock.ts';
 import {
   reduce,
   initialSession,
@@ -106,7 +106,7 @@ export class ViewerController {
   private watching = false; // true only while a live stream plays → gate the UI auto-hide
   private uiVisible = true; // mirrors setUiVisible → lets a touch tap toggle rather than only reveal
   private readonly ac = new AbortController(); // removes all DOM listeners on destroy()
-  private readonly wakeLock = new WakeLock(); // keep the screen awake while watching
+  private readonly wakeLock = createWakeLock(); // keep the screen awake while watching
   private readonly offMessage: () => void;
   private readonly offStatus: () => void;
 
@@ -333,6 +333,12 @@ export class ViewerController {
     hide(el('viewer-play-prompt')); // only 'live' re-arms it, via playVideo()
 
     this.setWatching(state === 'live'); // gate the UI auto-hide
+    // A terminal screen means nobody is watching anything: give the wake lock back. It cannot wait
+    // for destroy(), which only runs on a CLICK (the three "back home" buttons) — a viewer whose
+    // host stopped sharing and who then walked away would hold the display awake indefinitely.
+    // This became a real leak with the desktop blocker: the web sentinel used to die on its own the
+    // moment the window was hidden, which is precisely what the native one is built not to do.
+    if (state === 'ended' || state === 'error') this.wakeLock.release();
 
     const dot = el('conn-dot');
     switch (state) {

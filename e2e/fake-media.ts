@@ -113,6 +113,12 @@ export async function fakeNative(page: Page, opts: { delaysMs?: number[]; fail?:
           selectSource: async (id: string) => {
             (window as unknown as { __picked?: string }).__picked = id;
           },
+          // Every toggle is recorded, not just the last one: the bug that matters is a lock left
+          // held after the session ends, which only shows up as a missing trailing `false`.
+          setWakeLock: (on: boolean) => {
+            const w = window as unknown as { __wakeLock: boolean[] };
+            (w.__wakeLock ??= []).push(on);
+          },
           // Per-app audio. The PCM stream itself isn't faked — there is nothing to assert about it
           // in a browser — but the capture handshake drives the whole checkbox UI.
           //

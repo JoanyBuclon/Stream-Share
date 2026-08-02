@@ -55,3 +55,32 @@ export class WakeLock {
     this.sentinel = null;
   }
 }
+
+/**
+ * The wake lock to use for a session — the desktop shell's, when there is one.
+ *
+ * The shell holds a process-level `powerSaveBlocker`, which is not tied to a document and therefore
+ * survives the window being hidden — unlike the sentinel above, which the browser releases the
+ * instant it is. That is the whole feature; the measurement behind it is in docs/desktop.md
+ * § Confort système.
+ *
+ * A sibling rather than a second mode inside `WakeLock`: everything that class exists for (the
+ * sentinel, the acquiring guard, the visibilitychange re-acquire) is dead weight on this path, and
+ * keeping it out means the class — and its existing tests — stay exactly as they were.
+ */
+export function createWakeLock(): Pick<WakeLock, 'request' | 'release'> {
+  const native = typeof window === 'undefined' ? undefined : window.native;
+  if (!native) return new WakeLock();
+  // Swallowing, to match WakeLock: its release() cannot throw, and both callers run it near the TOP
+  // of destroy() — so an IPC that threw here would skip closing the peers and tearing down the
+  // audio, trading "the screen sleeps" for "WASAPI clients and peers stay alive".
+  // ponytail: no `active` bookkeeping — the shell collapses repeated toggles on its own id.
+  const toggle = (on: boolean): void => {
+    try {
+      native.setWakeLock(on);
+    } catch {
+      // The display sleeping is a degradation, never a reason to break a session.
+    }
+  };
+  return { request: async () => toggle(true), release: () => toggle(false) };
+}

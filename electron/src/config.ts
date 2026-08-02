@@ -6,6 +6,34 @@
 /** Production web origin the shell points at when no override is set. */
 export const PROD_ORIGIN = 'https://stream.joanybuclon.com';
 
+/** The slice of Electron's `powerSaveBlocker` the toggle below needs, so it can be faked in a test
+ *  that never boots Electron. */
+export interface PowerBlocker {
+  start(type: 'prevent-display-sleep'): number;
+  stop(id: number): void;
+}
+
+/**
+ * Hold at most ONE power-save blocker, by id.
+ *
+ * Ten lines, extracted here rather than left inline in main.ts, because its only symptom when wrong
+ * is "the machine stopped sleeping" — no error, no UI, nothing the user could trace back to us. And
+ * it has a measured trap one keystroke wide: `powerSaveBlocker.start()` returns **0** for the first
+ * blocker, so a `if (!id)` guard would decide nothing is held and stack a new blocker on every
+ * request, leaving all but the last unstoppable. Hence `=== null`, and hence a test.
+ */
+export function createWakeLockToggle(blocker: PowerBlocker): (on: boolean) => void {
+  let id: number | null = null;
+  return (on: boolean): void => {
+    if (on) {
+      if (id === null) id = blocker.start('prevent-display-sleep');
+    } else if (id !== null) {
+      blocker.stop(id);
+      id = null;
+    }
+  };
+}
+
 /** An app the user could exclude from the shared audio. `pid` is the ROOT process — WASAPI
  *  excludes a process *tree*, and a Chromium app renders its audio in a child service process. */
 export interface AudioApp {

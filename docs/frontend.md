@@ -119,8 +119,10 @@ Le détail des contrôles (quels réglages, comment ils agissent) est dans
   du socket, cf. [`signaling-server.md`](./signaling-server.md)).
 - **Connexion impossible** : message clair quand la connexion directe échoue (NAT
   symétriques, pas de TURN).
-- **Wake lock** : `navigator.wakeLock` côté host **et** viewer pour empêcher la mise
-  en veille pendant une session (aucune UI, comportement de fond).
+- **Wake lock** : côté host **et** viewer, pour empêcher la mise en veille pendant
+  une session (aucune UI, comportement de fond). `navigator.wakeLock` sur le web ;
+  dans l'app desktop, le `powerSaveBlocker` de la coquille, qui lui survit à une
+  fenêtre masquée (cf. [`desktop.md`](./desktop.md) § Confort système).
 
 ## Gotcha CSP
 
@@ -157,8 +159,10 @@ Ce qui est **câblé et testé en réel** (host ↔ viewer direct) :
   `scaleResolutionDownBy` sur **le sender de ce viewer** (`effectiveScale`).
 - Viewer — **overlay stats** : toggle → polling `getStats()` (latence / fps / bitrate
   / résolution / packet loss ; parsing pur dans `stats.ts`).
-- **Wake lock** host + viewer (`navigator.wakeLock`, ré-acquis à la visibilité,
-  best-effort, sans UI ; `wakelock.ts`).
+- **Wake lock** host + viewer, sans UI (`wakelock.ts`). `createWakeLock()` choisit :
+  `navigator.wakeLock` sur le web (ré-acquis à la visibilité, best-effort), ou le
+  `powerSaveBlocker` de la coquille desktop, qui n'est pas lié au document et tient
+  donc fenêtre masquée.
 - Viewer — **UI auto-masquée** en lecture : la barre du haut + les contrôles
   s'estompent après 3 s d'immobilité de la souris (ou dès qu'elle quitte le stage) ;
   un mouvement les rappelle. Actif uniquement pendant le flux `live`.

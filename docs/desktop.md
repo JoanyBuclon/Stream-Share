@@ -53,7 +53,7 @@ d'ensemble, puis le détail des trois qui portent le produit.
 | **Audio par application** ✅     | `getDisplayMedia` capture le mix système entier, ou rien           | 2 — livré    |
 | **Sélecteur de source natif** ✅ | Picker Chrome imposé, aucune API web ne liste les fenêtres         | 2 — livré¹   |
 | **Réglages mémorisés** ✅        | Rien ne survit proprement d'une session à l'autre                  | 2 — livré    |
-| **Wake lock fiable**            | `navigator.wakeLock` best-effort, révocable                        | 2 — MVP      |
+| **Wake lock fiable** ✅          | `navigator.wakeLock` est relâché dès que la fenêtre est masquée    | 2 — livré    |
 | **Notifications natives** ✅     | Pas d'alerte hors fenêtre : viewer qui rejoint/quitte, mise à jour | 2 — livré    |
 | **Tone-map HDR correct**        | `getDisplayMedia` écrase le HDR par un clamp brutal, sans tone-map | 3 — natif    |
 | **FPS élevé garanti (120/144)** | `getDisplayMedia` best-effort, souvent non honoré                  | 3 — natif    |
@@ -420,8 +420,48 @@ Chromium réel avant de promettre le gain d'encodage.
     app qui se met à jour toute seule relit un store écrit par une version
     antérieure d'elle-même. Le jour où `120` quitte l'échelle de fps, un parse
     tout-ou-rien jetterait aussi un bitrate et un preset parfaitement valides.
-- **Wake lock fiable** : `powerSaveBlocker` natif (`prevent-display-sleep`) —
-  remplace le `navigator.wakeLock` best-effort du web (`wakelock.ts`).
+- **Wake lock fiable** ✅ : `powerSaveBlocker` natif (`prevent-display-sleep`), qui
+  remplace le `navigator.wakeLock` du web pendant une session — host **et** viewer.
+
+  Le mot important n'est pas « best-effort », c'est **« lié au document »**. Mesuré
+  sur la coquille : sous `app://`, `navigator.wakeLock` fonctionne parfaitement et la
+  permission est accordée — mais le sentinel passe à `released: true` **dès que la
+  fenêtre est masquée**, et n'est repris qu'au retour à la visibilité. Or le cas
+  qu'on veut couvrir est exactement celui-là : le host réduit l'app et s'éloigne
+  pendant que ses amis regardent. Un flux WebRTC sortant ne compte pas comme activité
+  pour le minuteur d'inactivité de Windows. (Le cas « il réduit pour jouer » est plus
+  faible : un jeu en plein écran tient déjà l'écran allumé tout seul.)
+
+  `prevent-display-sleep` n'est pas lié à un document, donc il survit ; il implique
+  aussi `prevent-app-suspension`.
+
+  **Pas de nouveau mode dans la classe `WakeLock`** : une factory `createWakeLock()`
+  rend soit la classe existante, soit un objet de deux lignes qui bascule le blocker.
+  Tout ce qui justifie cette classe — le sentinel, la garde d'acquisition, la
+  ré-acquisition sur `visibilitychange` — est mort sur le chemin natif, et la garder
+  à l'écart laisse la classe **et ses tests** strictement inchangés.
+
+  Un piège mesuré, encodé dans le code : `powerSaveBlocker.start()` rend l'id **0**
+  pour le premier blocker. Une garde en `if (id)` conclurait que rien n'est tenu et
+  en démarrerait un nouveau à chaque demande — d'où le `=== null` explicite. Les
+  blockers s'empilent (ids 0 et 1 vivants simultanément), et `stop()` sur un id
+  inconnu ne lève pas.
+
+  Le blocker est relâché à la fermeture de la fenêtre, au crash du renderer, à la
+  navigation et au quit : un verrou qui survit à sa session garde la machine éveillée
+  sans aucune UI pour le révéler. Un seul blocker pour le process suffit —
+  `teardown()` (`app.ts`) détruit un contrôleur avant d'en construire un autre, donc
+  host et viewer sont mutuellement exclusifs et rien n'a besoin de compter les
+  références.
+
+  **Le piège côté viewer, trouvé en revue.** `destroy()` — donc `release()` — ne
+  tourne que sur un **clic** (les boutons « retour à l'accueil »). Un viewer dont le
+  host arrête de partager atterrit sur l'écran « ended » sans rien toucher : le
+  verrou restait tenu. Avec `navigator.wakeLock` ce bug était inoffensif, le sentinel
+  mourait dès la fenêtre masquée — le blocker natif est justement construit pour ne
+  pas mourir là, ce qui transformait une fuite dormante en machine qui ne dort plus.
+  La libération est donc accrochée au rendu des états terminaux (`ended`, `error`),
+  à côté de la sortie du Picture-in-Picture, qui est la même classe de ressource.
 - **Notifications natives** ✅, et **seulement ces trois** :
   1. un viewer **rejoint** le stream ;
   2. un viewer **quitte** le stream ;

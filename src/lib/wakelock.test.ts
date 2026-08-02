@@ -1,6 +1,39 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { WakeLock } from './wakelock.ts';
+import { WakeLock, createWakeLock } from './wakelock.ts';
+
+// createWakeLock picks between two things that are NOT interchangeable: a document-scoped sentinel
+// that dies when the window hides, and the shell's process-level blocker that does not. Picking
+// wrong on the desktop is silent — the display just sleeps mid-stream.
+
+/** Install/remove a fake `window` for one test. `globalThis.window` is absent under node:test,
+ *  which is also the branch the web build takes. */
+function withWindow(native: { setWakeLock(on: boolean): void } | undefined, run: () => void): void {
+  const g = globalThis as unknown as { window?: unknown };
+  g.window = { native };
+  try {
+    run();
+  } finally {
+    delete g.window;
+  }
+}
+
+test('createWakeLock uses the shell blocker when running inside it', () => {
+  const calls: boolean[] = [];
+  withWindow({ setWakeLock: (on) => calls.push(on) }, () => {
+    const wl = createWakeLock();
+    assert.ok(!(wl instanceof WakeLock), 'the sentinel machinery must not be in play at all');
+    void wl.request();
+    wl.release();
+  });
+  assert.deepEqual(calls, [true, false]);
+});
+
+test('createWakeLock falls back to the browser sentinel with no shell', () => {
+  // Both the plain web build (no `window.native`) and a `window` that has no shell bridge.
+  assert.ok(createWakeLock() instanceof WakeLock, 'no window at all');
+  withWindow(undefined, () => assert.ok(createWakeLock() instanceof WakeLock, 'window without native'));
+});
 
 function fakeSentinel() {
   const s = {

@@ -1,6 +1,56 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseAudioApps } from './config.ts';
+import { parseAudioApps, createWakeLockToggle, type PowerBlocker } from './config.ts';
+
+// The wake-lock bookkeeping fails silently by construction: get it wrong and the only symptom is a
+// machine that stopped sleeping, with nothing on screen tying it back to us. Hence tests on ten
+// lines. `start()` returning 0 for the first blocker is measured, not hypothetical.
+function fakeBlocker(firstId = 0) {
+  const log: string[] = [];
+  let next = firstId;
+  const blocker: PowerBlocker = {
+    start: () => {
+      const id = next++;
+      log.push(`start->${id}`);
+      return id;
+    },
+    stop: (id) => log.push(`stop(${id})`),
+  };
+  return { blocker, log };
+}
+
+test('createWakeLockToggle holds exactly one blocker, even though the first id is 0', () => {
+  // The trap: `if (!id)` reads id 0 as "nothing held" and stacks a new blocker on every request,
+  // leaving all but the last with no id anyone can stop.
+  const { blocker, log } = fakeBlocker(0);
+  const setWakeLock = createWakeLockToggle(blocker);
+  setWakeLock(true);
+  setWakeLock(true);
+  setWakeLock(true);
+  assert.deepEqual(log, ['start->0'], 'repeats must collapse onto the id already held');
+  setWakeLock(false);
+  assert.deepEqual(log, ['start->0', 'stop(0)'], 'and it must stop THAT id, not a truthy stand-in');
+});
+
+test('createWakeLockToggle releasing what it never took is a no-op', () => {
+  const { blocker, log } = fakeBlocker();
+  const setWakeLock = createWakeLockToggle(blocker);
+  setWakeLock(false);
+  setWakeLock(false);
+  assert.deepEqual(log, [], 'teardown paths fire on sessions that never asked for a lock');
+});
+
+test('createWakeLockToggle can be re-taken after release, with the new id', () => {
+  // Reload, then a fresh session: the second blocker gets a different id and must be the one
+  // stopped. Tracking the first id forever would leak it.
+  const { blocker, log } = fakeBlocker();
+  const setWakeLock = createWakeLockToggle(blocker);
+  setWakeLock(true);
+  setWakeLock(false);
+  setWakeLock(true);
+  setWakeLock(false);
+  assert.deepEqual(log, ['start->0', 'stop(0)', 'start->1', 'stop(1)']);
+});
 
 // The payload is stdout from a PowerShell process — a trust boundary of its own kind: the shape
 // depends on the shell, the locale and how many processes matched. Its pid then goes straight to

@@ -7,7 +7,7 @@ import { Signaling, type ServerMessage, type ConnectionStatus, type RoomViewer }
 import { Peer, type PeerSignal } from './peer.ts';
 import { AudioMixer } from './audio.ts';
 import { serial } from './serial.ts';
-import { WakeLock } from './wakelock.ts';
+import { createWakeLock } from './wakelock.ts';
 import { reconcileRoster } from './roster.ts';
 import { el, hook, show, hide, setText, initials } from './dom.ts';
 import { pickSource } from './source-picker.ts';
@@ -89,7 +89,7 @@ export class HostController {
   private pickedResolution: ResolutionTarget = this.quality.resolution;
   private readonly mixer = new AudioMixer();
   private readonly audioQueue = serial(); // serializes outgoing rebuilds — no interleaving
-  private readonly wakeLock = new WakeLock(); // keep the screen awake while hosting
+  private readonly wakeLock = createWakeLock(); // keep the screen awake while hosting
   private readonly viewers = new Map<string, ViewerEntry>();
   private readonly offMessage: () => void;
   private readonly offStatus: () => void;

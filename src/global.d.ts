@@ -36,6 +36,10 @@ interface StreamShareNative {
   listSources(): Promise<NativeSource[]>;
   /** Names the source the next getDisplayMedia call must capture. */
   selectSource(id: string): Promise<void>;
+  /** Keep the display awake while a session is live — a process-level `powerSaveBlocker`, which
+   *  unlike `navigator.wakeLock` survives a hidden window (see src/lib/wakelock.ts). Repeats
+   *  collapse in the shell, and it is dropped on reload, window close, crash and quit. */
+  setWakeLock(on: boolean): void;
   /** Apps with a visible window, each with its root pid. */
   listAudioApps(): Promise<NativeAudioApp[]>;
   /**

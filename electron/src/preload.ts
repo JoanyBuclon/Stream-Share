@@ -10,6 +10,10 @@ contextBridge.exposeInMainWorld('native', {
   // Awaited by the renderer: main must hold the id before getDisplayMedia is called.
   selectSource: (id: string) => ipcRenderer.invoke('ss:select-source', id),
 
+  // Fire-and-forget: main collapses repeats, and there is nothing for the caller to do about a
+  // failure — the display sleeping is a degradation, not an error.
+  setWakeLock: (on: boolean) => ipcRenderer.send('ss:wake-lock', on),
+
   listAudioApps: () => ipcRenderer.invoke('ss:audio-apps'),
   setAudioCapture: (spec: { sourceId: string } | { exclude: string } | { include: string[] } | null) =>
     ipcRenderer.invoke('ss:audio-capture', spec),
