@@ -2,12 +2,17 @@
 // "running in the desktop app". The preload and this bundle always ship together, so the methods
 // are required, not optional — only `window.native` itself needs a guard.
 
-/** One capturable surface, as the shell reports it to the source picker. */
+/** One capturable surface, as the shell reports it to the source picker.
+ *
+ *  `camera` is the exception: those are NOT reported by the shell. The renderer enumerates video
+ *  inputs itself (`listCameras` in source-picker.ts) and merges them into the same grid, so the
+ *  picker has one shape for everything it can offer. Their ids are `camera:<deviceId>` and they are
+ *  captured through getUserMedia, not getDisplayMedia. */
 interface NativeSource {
   readonly id: string;
   readonly name: string;
-  readonly kind: 'screen' | 'window';
-  /** Physical resolution for a screen ("2560×1440"); empty for a window. */
+  readonly kind: 'screen' | 'window' | 'camera';
+  /** Physical resolution for a screen ("2560×1440"); empty for a window or a camera. */
   readonly meta: string;
   /** data: URL. A still taken when the list was requested — not a live preview. */
   readonly thumbnail: string;

@@ -10,7 +10,7 @@ import { serial } from './serial.ts';
 import { createWakeLock } from './wakelock.ts';
 import { reconcileRoster } from './roster.ts';
 import { el, hook, show, hide, setText, initials } from './dom.ts';
-import { pickSource } from './source-picker.ts';
+import { pickSource, cameraDeviceId } from './source-picker.ts';
 import { NativeAudio } from './native-audio.ts';
 import {
   applyPreset,
@@ -157,7 +157,7 @@ export class HostController {
         picked = await pickSource(native, {
           signal: this.ac.signal,
           currentId: this.sourceId,
-          share: () => this.capture(), // the picker already told the shell which source this is
+          share: (source) => this.capture(source), // the shell already holds the id; the source says which API to use
         });
       } catch (e) {
         // pickSource throws only on a wiring bug (a missing id or data-hook). This method is a
@@ -193,8 +193,14 @@ export class HostController {
   };
 
   /** Capture whatever the platform resolves the request to, and install it. Throws on failure:
-   *  each caller surfaces the error where the user is actually looking. */
-  private async capture(): Promise<void> {
+   *  each caller surfaces the error where the user is actually looking.
+   *
+   *  `source` is only passed by the desktop picker, and only matters for a camera: those are not a
+   *  display surface, so they come through getUserMedia. Everything downstream — setStream, the
+   *  quality ladder, the peers — treats the result as any other MediaStream. */
+  private async capture(source?: NativeSource): Promise<void> {
+    const deviceId = source ? cameraDeviceId(source.id) : null;
+    if (deviceId) return this.captureCamera(deviceId);
     const constraints: DisplayMediaStreamOptions = {
       video: { frameRate: { ideal: this.quality.fps } },
       // Left to its defaults, the browser runs its voice-tuned processing (AGC / noise suppression /
@@ -207,6 +213,22 @@ export class HostController {
     const stream = await navigator.mediaDevices.getDisplayMedia(constraints);
     // The prompt can resolve after the controller was destroyed (Stop/leave while it was open):
     // don't run setStream on a torn-down controller — it would repaint the DOM and recreate peers.
+    if (this.ac.signal.aborted) return void stream.getTracks().forEach((t) => t.stop());
+    await this.setStream(stream);
+  }
+
+  /** A video input as the shared source — today, the HDR pilot's OBS Virtual Camera.
+   *
+   *  No audio requested: a camera would hand back its microphone, which is not what "share this
+   *  source" means here. System sound still works through the per-app capture, which is
+   *  independent of the video source — but with nothing muted there is no native session, and a
+   *  camera brings no loopback track, so viewers get silence until a box is ticked.
+   *  `exact`: falling back to another camera because the chosen one is busy would silently share
+   *  the wrong thing, and a webcam is the worst possible wrong thing to share by accident. */
+  private async captureCamera(deviceId: string): Promise<void> {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { deviceId: { exact: deviceId }, frameRate: { ideal: this.quality.fps } },
+    });
     if (this.ac.signal.aborted) return void stream.getTracks().forEach((t) => t.stop());
     await this.setStream(stream);
   }

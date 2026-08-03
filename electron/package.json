@@ -9,6 +9,8 @@
   "main": "out/main.cjs",
   "scripts": {
     "build": "esbuild src/main.ts src/preload.ts --bundle --platform=node --format=cjs --target=node22 --external:electron --out-extension:.js=.cjs --outdir=out",
+    "//build:native": "Windows only. The target/dist-url pair is not optional: an addon built against Node's ABI loads in `node` and fails inside Electron, which is the only place it ever runs. Keep --target in step with the electron devDependency.",
+    "build:native": "node-gyp rebuild --directory=native --target=43.2.0 --dist-url=https://electronjs.org/headers --arch=x64",
     "start": "pnpm build && electron .",
     "typecheck": "tsc --noEmit",
     "test": "node --test src/config.test.ts",

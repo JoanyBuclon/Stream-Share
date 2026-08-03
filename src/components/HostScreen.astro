@@ -416,6 +416,17 @@
           <div id="source-grid-window" class="grid grid-cols-3 gap-3 max-sm:grid-cols-2"></div>
         </div>
 
+        <!-- Video inputs, enumerated in the renderer rather than by the shell (web API, no IPC).
+             Present for the HDR pilot: OBS's Virtual Camera does the scRGB capture + tone-map that
+             Chromium's own capturer will not, and arrives here as an ordinary camera. -->
+        <div id="source-group-camera" class="flex flex-col gap-3">
+          <div class="flex items-baseline gap-2.5">
+            <span class="font-mono text-[10px] uppercase tracking-[0.12em] text-muted-2">Cameras</span>
+            <span id="source-count-camera" class="font-mono text-[10px] text-[#5a5a5a]"></span>
+          </div>
+          <div id="source-grid-camera" class="grid grid-cols-3 gap-3 max-sm:grid-cols-2"></div>
+        </div>
+
         <!-- one line for all three transient states: loading, no match, capture failure -->
         <div id="source-status" aria-live="polite" class="py-10 text-center font-mono text-xs text-muted-3"></div>
       </div>

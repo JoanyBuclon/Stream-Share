@@ -15,7 +15,50 @@ export function matchesQuery(name: string, query: string): boolean {
 }
 
 // Element ids are derived from the kind, so the markup and this list can't drift apart.
-const KINDS = ['screen', 'window'] as const;
+const KINDS = ['screen', 'window', 'camera'] as const;
+
+/** 1×1 transparent GIF. A camera has no still to show, and an empty `src` renders as a broken
+ *  image — the tile falls back to its initials badge, like a window with no app icon. */
+const NO_THUMBNAIL = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+
+export const CAMERA_PREFIX = 'camera:';
+
+/** The deviceId behind a `camera:<id>` source id, or null for anything else. Lets the caller pick
+ *  getUserMedia over getDisplayMedia without re-parsing the id format in two places. */
+export function cameraDeviceId(sourceId: string): string | null {
+  return sourceId.startsWith(CAMERA_PREFIX) ? sourceId.slice(CAMERA_PREFIX.length) : null;
+}
+
+/**
+ * Video inputs, offered next to the shell's screens and windows.
+ *
+ * Here for the HDR pilot (cf. docs/desktop.md § HDR): OBS's Virtual Camera performs the WGC scRGB
+ * capture and the BT.2390 tone-map that Chromium's own capturer refuses to do, and surfaces the
+ * result as an ordinary video input. Because that makes it a getUserMedia track, it also reaches
+ * the hardware encoder like any other camera — which is precisely the question a native frame
+ * injection path would still have to answer.
+ *
+ * A web API, so it costs the shell nothing. Labels stay empty until a capture has been granted
+ * once in this origin, hence the numbered fallback.
+ */
+export async function listCameras(): Promise<NativeSource[]> {
+  if (!navigator.mediaDevices?.enumerateDevices) return [];
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    return devices
+      .filter((d) => d.kind === 'videoinput')
+      .map((d, i) => ({
+        id: `${CAMERA_PREFIX}${d.deviceId}`,
+        name: d.label || `Camera ${i + 1}`,
+        kind: 'camera' as const,
+        meta: '',
+        thumbnail: NO_THUMBNAIL,
+        icon: null,
+      }));
+  } catch {
+    return []; // never let a camera enumeration failure take down the screen/window grid
+  }
+}
 
 interface Tile {
   source: NativeSource;
@@ -27,8 +70,10 @@ export interface PickOptions {
   signal: AbortSignal;
   /** Source shared right now, preselected on open. */
   currentId: string | null;
-  /** Capture the chosen source. Throwing keeps the dialog open with an error. */
-  share: () => Promise<void>;
+  /** Capture the chosen source. Throwing keeps the dialog open with an error.
+   *  Receives the source because the caller cannot read it from anywhere else yet: `share` runs
+   *  BEFORE pickSource resolves, so the host's own `sourceId` still holds the previous pick. */
+  share: (source: NativeSource) => Promise<void>;
 }
 
 export function pickSource(native: StreamShareNative, opts: PickOptions): Promise<string | null> {
@@ -53,7 +98,8 @@ export function pickSource(native: StreamShareNative, opts: PickOptions): Promis
   // Search filters in place: rebuilding the grid would swap every <img src="data:…"> and force a
   // JPEG re-decode of every thumbnail on each keystroke.
   const filter = (): void => {
-    const shown = { screen: 0, window: 0 };
+    // Derived from KINDS rather than spelled out, so adding a kind cannot leave a counter behind.
+    const shown: Record<(typeof KINDS)[number], number> = { screen: 0, window: 0, camera: 0 };
     for (const t of tiles) {
       t.node.hidden = !matchesQuery(t.source.name, search.value);
       if (!t.node.hidden) shown[t.source.kind]++;
@@ -107,7 +153,11 @@ export function pickSource(native: StreamShareNative, opts: PickOptions): Promis
 
   const load = async (): Promise<void> => {
     try {
-      const sources = await native.listSources();
+      // In parallel: the shell listing costs a ~300-550 ms IPC round trip, enumerateDevices is
+      // local. Cameras resolve to [] on failure rather than rejecting, so they can never be the
+      // reason the screen and window grids come back empty.
+      const [shellSources, cameras] = await Promise.all([native.listSources(), listCameras()]);
+      const sources = [...shellSources, ...cameras];
       // `signal`, not `modal.open`: the dialog element is shared, so `modal.open` answers "is *a*
       // picker open". Dismiss during the ~300-550 ms listing and reopen, and this call would
       // repaint the NEW picker with tiles whose listeners are bound to this dead signal —
@@ -141,8 +191,10 @@ export function pickSource(native: StreamShareNative, opts: PickOptions): Promis
     capturing = true;
     confirmBtn.disabled = true;
     try {
-      await native.selectSource(selected.id); // awaited: main must hold the id before we capture
-      await opts.share();
+      // Awaited: main must hold the id before we capture. A camera id fails main's shape check and
+      // clears the selection, which is what we want — nothing stale left for getDisplayMedia.
+      await native.selectSource(selected.id);
+      await opts.share(selected);
     } catch (err) {
       // The source may have closed or be locked by another app. Say it here — the settings hint
       // the browser path writes to is behind this dialog.
