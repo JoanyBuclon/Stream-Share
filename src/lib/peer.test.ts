@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Peer, tuneOpus, tuneStartBitrate, type PeerCallbacks, type PeerSignal } from './peer.ts';
+import { Peer, tuneOpus, tuneStartBitrate, orderCodecs, type PeerCallbacks, type PeerSignal } from './peer.ts';
 
 // Fake RTCPeerConnection : enregistre les appels, laisse le test déclencher les évènements.
 // `failOnIce` permet de simuler un candidat ICE que addIceCandidate rejette (comme le vrai).
@@ -382,16 +382,77 @@ test('tuneStartBitrate ajoute start/min aux fmtp vidéo (VP9/AV1), épargne audi
     'a=fmtp:45 level-idx=5;profile=0',
     'a=rtpmap:99 rtx/90000', // pas de fmtp → intouché
   ].join('\r\n');
-  const out = tuneStartBitrate(sdp, 10_000); // min=4000, start=8000
-  assert.match(out, /a=fmtp:98 profile-id=0;x-google-start-bitrate=8000;x-google-min-bitrate=4000/);
-  assert.match(out, /a=fmtp:45 level-idx=5;profile=0;x-google-start-bitrate=8000;x-google-min-bitrate=4000/);
+  const out = tuneStartBitrate(sdp, 10_000); // start=8000
+  assert.match(out, /a=fmtp:98 profile-id=0;x-google-start-bitrate=8000/);
+  assert.match(out, /a=fmtp:45 level-idx=5;profile=0;x-google-start-bitrate=8000/);
   assert.match(out, /a=fmtp:111 minptime=10\r\n/); // audio inchangé
   assert.doesNotMatch(out, /rtx.*x-google/s); // rtx sans fmtp non touché
+  // Le plancher a été retiré volontairement : il ne recule pas sous congestion, et il est devenu
+  // atteignable le jour où un encodeur matériel a pu le produire. Cf. le commentaire sur la fonction.
+  assert.doesNotMatch(out, /x-google-min-bitrate/);
 });
 
 test('tuneStartBitrate est un no-op sans section vidéo ou sans bitrate', () => {
   assert.equal(tuneStartBitrate('m=audio 9 RTP\r\na=rtpmap:111 opus/48000/2', 10_000), 'm=audio 9 RTP\r\na=rtpmap:111 opus/48000/2');
   assert.equal(tuneStartBitrate('m=video 9 RTP\r\na=rtpmap:98 VP9/90000', 0), 'm=video 9 RTP\r\na=rtpmap:98 VP9/90000');
+});
+
+// H.265 est devenu le codec préféré : si le hack cessait de s'y appliquer, le chemin dominant
+// perdrait son démarrage haut sans que rien ne le signale.
+test('tuneStartBitrate couvre aussi H265 et H264', () => {
+  const sdp = [
+    'm=video 9 UDP/TLS/RTP/SAVPF 49 102',
+    'a=rtpmap:49 H265/90000',
+    'a=fmtp:49 level-id=180;profile-id=1;tier-flag=0;tx-mode=SRST',
+    'a=rtpmap:102 H264/90000',
+    'a=fmtp:102 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f',
+  ].join('\r\n');
+  const out = tuneStartBitrate(sdp, 10_000);
+  assert.match(out, /a=fmtp:49 level-id=180;profile-id=1;tier-flag=0;tx-mode=SRST;x-google-start-bitrate=8000/);
+  assert.match(out, /a=fmtp:102 .*profile-level-id=42e01f;x-google-start-bitrate=8000/);
+});
+
+// EXTRAIT de la liste mesurée sur Chrome 151 / Windows — un représentant par codec, dans l ordre
+// où Chrome les annonce. Ce n est PAS la liste complète (Chrome offre 8 variantes H.264, 4 profils
+// VP9, 2 profils H.265) : elle suffit à exercer le classement, et l honnêteté sur ce point compte
+// parce que l ordre des profils, lui, n est pas décidé ici (cf. docs/webrtc-media.md § Codec).
+const CHROME_CODECS: RTCRtpCodec[] = [
+  { mimeType: 'video/VP8', clockRate: 90000 },
+  { mimeType: 'video/rtx', clockRate: 90000 },
+  { mimeType: 'video/VP9', clockRate: 90000, sdpFmtpLine: 'profile-id=0' },
+  { mimeType: 'video/H264', clockRate: 90000, sdpFmtpLine: 'level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f' },
+  { mimeType: 'video/AV1', clockRate: 90000, sdpFmtpLine: 'level-idx=5;profile=0;tier=0' },
+  { mimeType: 'video/H265', clockRate: 90000, sdpFmtpLine: 'level-id=180;profile-id=1;tier-flag=0;tx-mode=SRST' },
+  { mimeType: 'video/red', clockRate: 90000 },
+  { mimeType: 'video/ulpfec', clockRate: 90000 },
+];
+
+test('orderCodecs: H265 en tête, puis VP9, AV1, H264, VP8 ; le reste après, dans l ordre', () => {
+  const out = orderCodecs(CHROME_CODECS).map((c) => c.mimeType);
+  assert.deepEqual(out, [
+    'video/H265',
+    'video/VP9',
+    'video/AV1',
+    'video/H264',
+    'video/VP8',
+    // rtx/red/ulpfec après, dans leur ordre d origine. La régression que ça attrape : un rank()
+    // qui renverrait -1 au lieu de length pour l inconnu les mettrait EN TÊTE de la préférence.
+    'video/rtx',
+    'video/red',
+    'video/ulpfec',
+  ]);
+});
+
+// La garantie de non-régression du changement de codecs : Firefox n offre pas H.265 (vérifié sur
+// 153, prefs forcés compris), il doit donc atterrir sur VP9 exactement comme aujourd hui.
+test('orderCodecs: un viewer sans H265 (Firefox) reste sur VP9', () => {
+  const firefox: RTCRtpCodec[] = [
+    { mimeType: 'video/VP8', clockRate: 90000 },
+    { mimeType: 'video/rtx', clockRate: 90000 },
+    { mimeType: 'video/VP9', clockRate: 90000 },
+    { mimeType: 'video/AV1', clockRate: 90000 },
+  ];
+  assert.deepEqual(orderCodecs(firefox).map((c) => c.mimeType), ['video/VP9', 'video/AV1', 'video/VP8', 'video/rtx']);
 });
 
 test('tuneOpus force stéréo + bitrate sur les fmtp opus, épargne la vidéo', () => {

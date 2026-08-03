@@ -55,10 +55,10 @@ d'ensemble, puis le détail des trois qui portent le produit.
 | **Réglages mémorisés** ✅        | Rien ne survit proprement d'une session à l'autre                  | 2 — livré    |
 | **Wake lock fiable** ✅          | `navigator.wakeLock` est relâché dès que la fenêtre est masquée    | 2 — livré    |
 | **Notifications natives** ✅     | Pas d'alerte hors fenêtre : viewer qui rejoint/quitte, mise à jour | 2 — livré    |
+| **Encodage hardware** ⚠️         | *(faux plafond — c'était notre ordre de codecs, cf. spike)*        | 3 — livré NVIDIA/Windows³ |
 | **Tone-map HDR correct**        | `getDisplayMedia` écrase le HDR par un clamp brutal, sans tone-map | 3 — natif    |
-| **FPS élevé garanti (120/144)** | `getDisplayMedia` best-effort, souvent non honoré                  | 3 — natif    |
-| **Encodage hardware**           | Le navigateur n'expose ni NVENC ni QuickSync ni AMF                | 3 — natif    |
-| **Contrôle du curseur**         | La contrainte `cursor` est ignorée par les navigateurs             | 3 — natif²   |
+| ~~FPS élevé garanti (120/144)~~ | *(faux plafond — mesuré à 119 fps en 1080p, cf. spike)*            | ~~3~~ — n/a³ |
+| ~~Contrôle du curseur~~         | —                                                                  | abandonné³   |
 
 La **phase 1** n'apporte aucune de ces fonctionnalités : elle emballe l'app web
 actuelle dans Electron + page `/download` + auto-update. ¹ En phase 1, faute de
@@ -68,10 +68,13 @@ cette béquille est levée depuis que le sélecteur existe (cf.
 ² Envisagé en phase 2, écarté sur vérification : **Electron 43.2 n'expose rien**
 pour le curseur de capture — ni sur `desktopCapturer`, ni dans les options de
 `setDisplayMediaRequestHandler`. Le levier (`IsCursorCaptureEnabled` de WGC) vit
-sous Chromium, hors de portée du JS. Les quatre dernières lignes partagent donc
-le même prérequis lourd de **phase 3** — **reprendre la main sur les frames
-vidéo** (cf. [Capture native](#capture-native-fps-hdr-encodage-curseur)). Détail
-des phases : [Chemin d'exécution](#chemin-dexécution).
+sous Chromium, hors de portée du JS.
+³ **Trois des quatre lignes de la phase 3 sont tombées au spike** (2026-08-03).
+Elles étaient présentées comme partageant un même prérequis lourd — reprendre la
+main sur les frames vidéo. À la mesure, deux n'avaient pas ce prérequis du tout et
+la troisième n'avait pas de valeur. Détail :
+[Capture native](#capture-native-le-spike-a-r%C3%A9duit-le-p%C3%A9rim%C3%A8tre-%C3%A0-une-seule-feature).
+Détail des phases : [Chemin d'exécution](#chemin-dexécution).
 
 > **Abandonnés après usage réel (2026-08-01)**, pas reportés :
 > **les raccourcis globaux** — le contrôle sans alt-tab n'a jamais manqué en
@@ -372,31 +375,49 @@ ci-dessous.
 > un binding natif de plus pour du texte. Si le HDR gêne vraiment, la réponse est
 > le tone-map ci-dessus, pas un bandeau.
 
-### Capture native : FPS, HDR, encodage, curseur
+### Capture native : le spike a réduit le périmètre à une seule feature
 
-Quatre fonctionnalités partagent un même prérequis : **sortir du pipeline
-`getDisplayMedia`→track géré par Chromium** et reprendre la main sur les frames
-(capture native Windows Graphics Capture / DXGI → traitement → injection via
-`VideoTrackGenerator` (worker) / `canvas.captureStream`). C'est un fork
-architectural, **pas le MVP** — mais il débloque d'un coup :
+La phase 3 était décrite comme **une brique commune** — sortir du pipeline
+`getDisplayMedia`→track de Chromium et reprendre la main sur les frames (WGC/DXGI →
+traitement → injection) — débloquant d'un coup quatre fonctionnalités. Un spike de
+pure mesure (2026-08-03) avant toute ligne de C++ en a tué trois. Aucune n'est
+tombée pour la raison qu'on attendait.
 
-- **FPS élevé garanti** : vrai 120/144 Hz, là où `getDisplayMedia` plafonne en
-  best-effort.
-- **Tone-map HDR** (cf. ci-dessus).
-- **Encodage hardware** : NVENC / QuickSync / AMF, qui recule le plafond host du
-  mesh ([`webrtc-media.md`](./webrtc-media.md) § coût host).
-- **Contrôle du curseur** : inclure / exclure, via `IsCursorCaptureEnabled` de WGC.
+| Ligne annoncée         | Ce que la mesure a dit                                                                                                                            | Devenu                     |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- |
+| **Encodage hardware**  | Le blocage n'était **pas** la capture : c'était `CODEC_PREFERENCE` (VP9 en tête). **NVENC n'encode pas VP9**, jamais. H.265 et H.264 atteignent le MFT NVIDIA sur une track `getDisplayMedia` ordinaire. | **Livré** — un tableau réordonné |
+| **FPS garanti 120/144**| `getSettings().frameRate` rend bien **120**, et VP9 *software* tient **119 fps en 1080p avec 0 s de limitation CPU**. Le plafond réel était la source (un bureau immobile produit ~28 fps) et le débit. | **Faux problème**          |
+| **Contrôle du curseur**| En jeu, le curseur est rendu **par le jeu**, pas par le curseur matériel de l'OS : `IsCursorCaptureEnabled` n'y changerait rien. Ne sert qu'à le retirer en bureautique, ce que personne n'a demandé. | **Abandonné**              |
+| **Tone-map HDR**       | Inchangé : le clamp arrive **au capteur**, aucun post-traitement JS ne récupère quoi que ce soit. Seule ligne réellement web-impossible.            | **Reste** — cf. [HDR](#hdr) |
 
 ```
-// ponytail: la capture native est UNE brique commune à ces 4 features, pas 4
-// chantiers. On ne l'ouvre que quand l'une d'elles est réellement demandée —
-// le MVP tient entièrement sur getDisplayMedia + desktopCapturer.
+// ponytail: la phase 3 promettait 4 features pour une brique. Après mesure il
+// reste 1 feature pour 1 brique, et 2 des 3 disparues se sont livrées en
+// réordonnant un tableau. Mesurer avant de construire a économisé le chantier.
 ```
 
-**Point à mesurer, pas à supposer** : l'encodage hardware sur une track
-**injectée** (frames produites hors du pipeline natif) n'est pas garanti —
-Chromium peut retomber en software selon le backing GPU des frames. À valider sur
-Chromium réel avant de promettre le gain d'encodage.
+**L'erreur d'analyse, pour mémoire** : on soupçonnait le *backing* des frames —
+Chromium retombant en software sur une track injectée dont les `VideoFrame` sont
+CPU-backed. C'était la mauvaise variable. La bonne était le codec, et elle se
+testait sans écrire une ligne de natif. Chiffres, tableau des viewers et limites du
+banc : [`webrtc-media.md`](./webrtc-media.md) § Codec.
+
+**Ce qui reste vrai et non mesuré**, le jour où le HDR ouvrira le chantier natif :
+
+- L'encodage hardware sur une track **injectée** n'est pas garanti — c'est la
+  question d'origine, toujours ouverte, mais elle ne bloque plus rien puisque le
+  gain d'encodage est déjà acquis sans injection.
+- **Le coût de déplacement d'une frame** décide de l'architecture : 1080p NV12 =
+  3,1 Mo/frame → 186 Mo/s à 60 fps, 4K à 120 → 1,5 Go/s. L'audio par app, lui, fait
+  0,192 Mo/s. Si l'IPC ne tient pas, l'addon doit vivre dans le **renderer**, ce qui
+  coûte `sandbox: false` — et le vecteur alors exposé n'est pas la page (verrouillée
+  sur `app://`) mais les **SDP / ICE / messages `control` venus des viewers**.
+- **La latence** : GPU → readback CPU → IPC → `VideoFrame` → ré-upload GPU par
+  l'encodeur, soit trois traversées de bus pour des pixels déjà sur le GPU. Seuil à
+  poser avant de coder : au-delà d'une frame à 60 Hz, la brique casse ce qu'elle
+  prétend livrer.
+- **WGC est Windows-only.** Cette brique est 100 % non portable ; la seconde moitié
+  de la phase 3 (macOS/Linux) repart de zéro là-dessus.
 
 ### Confort système
 
@@ -504,7 +525,7 @@ raccourcis globaux (abandonnés) il n'y aurait de toute façon rien à y piloter
 > **2.13** / v3 alpha, Deno **2.9**.
 
 **Critère n°1 : réutiliser `src/lib/` tel quel.** Le protocole est écrit et testé,
-et le tuning WebRTC a coûté cher (`setCodecPreferences` VP9>AV1>VP8,
+et le tuning WebRTC a coûté cher (`setCodecPreferences` H.265>VP9>AV1>H.264>VP8,
 `setParameters` par viewer, `tuneOpus` stéréo 128k, mixage WebAudio). Une techno
 qui oblige à revalider tout ça est disqualifiée, quel que soit son poids disque.
 

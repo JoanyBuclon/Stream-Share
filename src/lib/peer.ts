@@ -71,7 +71,7 @@ export class Peer {
         // and since replaceTrack does not renegotiate, the association NEVER happens. Permanent black
         // screen for anyone who joins during a pause (no video track in `outgoing`).
         const transceiver = this.pc.addTransceiver(track ?? kind, { direction: 'sendonly', streams: [stream] });
-        if (kind === 'video') preferVideoCodecs(transceiver); // VP9/AV1 before VP8 (better quality/bit)
+        if (kind === 'video') preferVideoCodecs(transceiver); // hardware H.265 first, cf. CODEC_PREFERENCE
         this.senders.set(kind, transceiver.sender);
       }
       const offer = await this.pc.createOffer();
@@ -203,22 +203,40 @@ export class Peer {
   }
 }
 
-// VP9 then AV1 before VP8: both have a "screen content coding" mode and a much better
-// quality/bit on screen sharing. VP9 first (not AV1) — real-time software AV1 encoding
-// struggles at 4K60, VP9 is the reliable compromise; reorder here to change it. VP8 stays the
-// universal fallback. Via the `setCodecPreferences` API (no SDP munging → not rejected by the browser).
-const CODEC_PREFERENCE = ['video/VP9', 'video/AV1', 'video/VP8'];
-function preferVideoCodecs(transceiver: RTCRtpTransceiver): void {
-  if (!('setCodecPreferences' in transceiver) || typeof RTCRtpSender === 'undefined') return;
-  const caps = RTCRtpSender.getCapabilities('video');
-  if (!caps) return;
+/**
+ * Preference order, applied per transceiver — which in a mesh means PER VIEWER, since there is one
+ * peer connection each. Nothing forces a codec on anyone: negotiation keeps the intersection with
+ * what that viewer can decode, so the list degrades on its own, one person at a time.
+ *
+ * H.265 first because it moves the host ceiling — in a mesh the host encodes once per viewer, and
+ * hardware encoding is ~8× cheaper per frame. VP9 before AV1 even though AV1 reaches a higher frame
+ * rate, because AV1 buys it with CPU on the machine that can least spare it. H.264 fourth despite
+ * ALSO being hardware: browsers announce their Baseline entry first, which negotiates level 3.1
+ * (720p30) and collapses to 14 fps at 1440p — and Firefox, the only audience that would benefit,
+ * offers nothing but Baseline. Measurements, per-browser support and the limits of the bench:
+ * docs/webrtc-media.md § Codec.
+ *
+ * ponytail: sorted by mimeType only. Ranking H.264 by profile as well would triple this function to
+ * serve a codec that, in 4th place, is only ever reached when H.265, VP9 AND AV1 are all missing.
+ */
+const CODEC_PREFERENCE = ['video/H265', 'video/VP9', 'video/AV1', 'video/H264', 'video/VP8'];
+
+/** Codecs reordered by CODEC_PREFERENCE, everything unlisted kept after in its original order.
+ *  Split out from the DOM call below so the ranking is testable without a browser. */
+export function orderCodecs(codecs: readonly RTCRtpCodec[]): RTCRtpCodec[] {
   const rank = (mimeType: string): number => {
     const i = CODEC_PREFERENCE.indexOf(mimeType);
     return i === -1 ? CODEC_PREFERENCE.length : i; // rtx/red/ulpfec and unknowns: after, order preserved (stable sort)
   };
-  const ordered = [...caps.codecs].sort((a, b) => rank(a.mimeType) - rank(b.mimeType));
+  return [...codecs].sort((a, b) => rank(a.mimeType) - rank(b.mimeType));
+}
+
+function preferVideoCodecs(transceiver: RTCRtpTransceiver): void {
+  if (!('setCodecPreferences' in transceiver) || typeof RTCRtpSender === 'undefined') return;
+  const caps = RTCRtpSender.getCapabilities('video');
+  if (!caps) return;
   try {
-    transceiver.setCodecPreferences(ordered);
+    transceiver.setCodecPreferences(orderCodecs(caps.codecs));
   } catch {
     // order rejected by the browser (missing required codec…) — we keep the default order
   }
@@ -277,23 +295,41 @@ function mergeOpusParams(existing: string): string {
   return [...params].map(([key, value]) => `${key}=${value}`).join(';');
 }
 
-// ponytail: Chrome/VPx path only. The `x-google-*` params are honored by Chrome (VP8/VP9),
-// ignored by Firefox and by AV1 — they raise the start/floor bitrate on the dominant path
-// (Chrome+VP9) and are a harmless no-op elsewhere. Added only to codecs that already carry
-// an fmtp line (VP9/AV1 always have one; a bare VP8 without fmtp is skipped — going through
-// setParameters/maxBitrate is enough for the ceiling, this only touches start/min).
+// ponytail: Chrome path only. The `x-google-*` params are honored by Chrome, ignored by Firefox —
+// they raise the start/floor bitrate on the dominant path and are a harmless no-op elsewhere. Added
+// only to codecs that already carry an fmtp line (a bare VP8 without fmtp is skipped — going
+// through setParameters/maxBitrate is enough for the ceiling, this only touches start/min).
+//
+// H264/H265 are in the list because H.265 is now the preferred codec (see CODEC_PREFERENCE): a
+// hack that silently stopped applying the moment the default path changed would be a regression by
+// omission. Verified that tagging an H.265 fmtp line still negotiates (unknown fmtp params are
+// ignorable per spec, and Chromium does ignore them).
+//
+// NOT verified: that start-bitrate helps. Measured over loopback at 5 runs per condition, the
+// effect is −4%/+3%/−1% for VP9/H265/H264 — pure noise, INCLUDING for VP9 where this has always
+// shipped. That is a limit of the measurement, not a result: with no congestion the estimator
+// reaches ~4.8 Mbps in 2.5 s on its own, which is exactly the slow start this exists to skip. Only
+// a real network can answer it. Kept because its blast radius is bounded — a starting point the
+// estimator overrides within seconds.
+//
+// `x-google-min-bitrate` was REMOVED here, and that is the important half. It is not a hint but an
+// encoder allocation FLOOR (40% of the ceiling — 8 Mbps at the default 20, PER VIEWER), and a floor
+// is precisely what refuses to back off under congestion. It only ever looked harmless because it
+// applied to libvpx: VP9 at 42-48 ms per 1440p frame never sustained that anyway. Hardware HEVC at
+// ~4 ms per frame does, so the floor became genuinely reachable the moment the codec order changed.
+// Loopback has no congestion, so the bench above measured the benign parameter and was blind to
+// this one by construction — an unmeasured risk backing a benefit that has never been demonstrated.
 export function tuneStartBitrate(sdp: string, maxKbps: number): string {
   if (maxKbps <= 0) return sdp;
-  const min = Math.max(300, Math.round(maxKbps * 0.4)); // floor: no collapse on a brief dip
   const start = Math.min(maxKbps, Math.round(maxKbps * 0.8)); // starts high instead of crawling up from ~300k
-  const extra = `x-google-start-bitrate=${start};x-google-min-bitrate=${min}`;
+  const extra = `x-google-start-bitrate=${start}`;
   const lines = sdp.split('\r\n');
   let inVideo = false;
   const videoPts = new Set<string>();
   for (const line of lines) {
     if (line.startsWith('m=')) inVideo = line.startsWith('m=video');
     else if (inVideo) {
-      const m = /^a=rtpmap:(\d+) (VP8|VP9|AV1)\//.exec(line);
+      const m = /^a=rtpmap:(\d+) (VP8|VP9|AV1|H264|H265)\//.exec(line);
       if (m) videoPts.add(m[1]);
     }
   }
