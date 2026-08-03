@@ -253,7 +253,7 @@ export class ViewerController {
       const peer = this.peer;
       const report = await peer?.stats();
       if (!report || this.peer !== peer) return; // peer swapped mid-poll (reconnect) → drop this sample
-      const { sample, fps, width, height, rttMs } = readStats([...report.values()] as RtcStat[]);
+      const { sample, fps, width, height, rttMs, codec } = readStats([...report.values()] as RtcStat[]);
       const rate = this.prevSample ? rateStats(sample, this.prevSample) : { bitrateMbps: 0, lossPct: 0 };
       this.prevSample = sample;
       setText('stat-latency', `${rttMs} ms`);
@@ -261,6 +261,7 @@ export class ViewerController {
       setText('stat-bitrate', `${rate.bitrateMbps} mbps`);
       setText('stat-res', width && height ? `${width}×${height}` : '—');
       setText('stat-loss', `${rate.lossPct}%`);
+      setText('stat-codec', codec || '—');
     } catch {
       // getStats can reject on a closing pc — ignore
     }

@@ -108,7 +108,8 @@ puis `render()`, testable sans DOM.
   plafonnés au flux host — les paliers au-dessus n'apparaissent pas).
 - Audio : **volume** + **mute**.
 - Vue : **picture-in-picture**, **plein écran**, **quitter**.
-- Stats : latency / fps / bitrate / packet loss + état de connexion (`getStats`).
+- Stats : latency / fps / bitrate / résolution / packet loss / codec + état de
+  connexion (`getStats`).
 
 Le détail des contrôles (quels réglages, comment ils agissent) est dans
 [`webrtc-media.md`](./webrtc-media.md#contrôles).
@@ -158,7 +159,13 @@ Ce qui est **câblé et testé en réel** (host ↔ viewer direct) :
   flux host, cap annoncé par l'host) ; la demande est relayée à l'host, qui applique
   `scaleResolutionDownBy` sur **le sender de ce viewer** (`effectiveScale`).
 - Viewer — **overlay stats** : toggle → polling `getStats()` (latence / fps / bitrate
-  / résolution / packet loss ; parsing pur dans `stats.ts`).
+  / résolution / packet loss / **codec** ; parsing pur dans `stats.ts`). Le codec y
+  figure depuis que la négociation est **par viewer** : deux personnes de la même room
+  ne reçoivent plus forcément le même (H.265 sur Chrome, VP9 sur Firefox — cf.
+  [`webrtc-media.md`](./webrtc-media.md) § Codec), et c'est le seul endroit du produit
+  où la réponse réelle est visible. Il vient d'un stat **séparé** que l'`inbound-rtp`
+  désigne par `codecId` — d'où la garde sur ce champ, sans laquelle le premier stat
+  `codec` du rapport (celui de l'audio) s'afficherait comme codec vidéo.
 - **Wake lock** host + viewer, sans UI (`wakelock.ts`). `createWakeLock()` choisit :
   `navigator.wakeLock` sur le web (ré-acquis à la visibilité, best-effort), ou le
   `powerSaveBlocker` de la coquille desktop, qui n'est pas lié au document et tient

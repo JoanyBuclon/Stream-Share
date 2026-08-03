@@ -43,6 +43,11 @@ test('host shares a source and a viewer connects to a live stream', async ({ bro
   await expect
     .poll(() => viewerPage.locator('#stat-fps').textContent().then((t) => parseInt(t ?? '0', 10)))
     .toBeGreaterThan(0);
+  // The codec follows codecId into a separate stat, so it is the one row that can silently stay on
+  // its placeholder. Matched loosely on purpose: Playwright's Chromium ships without the
+  // proprietary codecs and negotiates VP9 here, while a real Chrome would show H265 — asserting the
+  // name would pin this test to the build rather than to the wiring.
+  await expect(viewerPage.locator('#stat-codec')).toHaveText(/^[A-Za-z0-9]+$/);
 
   // --- host sees the viewer in its sidebar ---
   await expect(hostPage.locator('#viewer-count')).toHaveText('1');

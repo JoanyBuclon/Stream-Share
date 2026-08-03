@@ -21,6 +21,28 @@ test('readStats: valeurs par défaut si le rapport est incomplet', () => {
   assert.deepEqual(r.sample, { bytes: 0, packets: 0, lost: 0, ts: 0 });
   assert.equal(r.fps, 0);
   assert.equal(r.rttMs, 0);
+  assert.equal(r.codec, '');
+});
+
+test('readStats: suit codecId jusqu au stat codec, et ignore celui de l audio', () => {
+  const report = [
+    { type: 'codec', id: 'C-audio', mimeType: 'audio/opus' },
+    { type: 'codec', id: 'C-video', mimeType: 'video/H265' },
+    { type: 'inbound-rtp', kind: 'audio', codecId: 'C-audio' },
+    { type: 'inbound-rtp', kind: 'video', codecId: 'C-video', bytesReceived: 1 },
+  ];
+  assert.equal(readStats(report).codec, 'H265'); // le préfixe video/ tombe
+});
+
+// Le stat codec est ici SANS id — cas représentable puisque `id` est optionnel dans RtcStat. Sans
+// la garde sur codecId, le find comparerait undefined === undefined, retiendrait ce stat et
+// afficherait "opus" comme codec vidéo. Muté pour vérifier : la garde retirée, ce test tombe.
+test('readStats: pas de codecId → rien, surtout pas un stat sans id', () => {
+  const report = [
+    { type: 'codec', mimeType: 'audio/opus' },
+    { type: 'inbound-rtp', kind: 'video', bytesReceived: 1 },
+  ];
+  assert.equal(readStats(report).codec, '');
 });
 
 test('rateStats: bitrate (mbps) et perte (%) depuis le delta', () => {
