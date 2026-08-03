@@ -21,8 +21,15 @@ const WINDOWS_INSTALLER_URL = `${REPO_URL}/releases/download/v${version}/StreamS
 // `soon: true` renders the same "Coming soon" treatment as the macOS/Linux rows below, and it is
 // the ONLY way an unshipped feature may appear here. This is the one page a stranger reads before
 // trusting us with an unsigned installer, so a promise has to look like a promise — the page used
-// to present tone-mapped HDR and global shortcuts as if they already worked. The shortcuts were
-// dropped outright; these two are phase 3 (cf. docs/desktop.md § Capture native).
+// to present tone-mapped HDR, guaranteed frame rate and global shortcuts as if they already worked.
+// The shortcuts were dropped, "guaranteed 120 fps" turned out to be a non-problem when measured
+// (the browser already honours it), and HDR is the last real phase-3 item.
+//
+// The bar is narrower than "is it good": it has to be something the BROWSER cannot do — that is
+// the page's title and the whole argument for downloading anything. Hardware H.265 encoding was
+// drafted as a fourth card and pulled for exactly this reason: the codec order lives in
+// src/lib/peer.ts, which the web app shares, so a Chrome host on the site already gets it without
+// installing a thing. A real benefit, just not one that belongs on this page.
 const benefits = [
   {
     tag: 'AUD',
@@ -42,11 +49,18 @@ const benefits = [
     soon: true,
     body: 'Tone-mapped capture so HDR games keep their contrast instead of arriving washed out on your friends’ screens.',
   },
+  // The catch-all. `items` is rendered as a short list under the body — the only card that uses it,
+  // and the reason the field is optional rather than a second component.
   {
-    tag: 'FPS',
-    title: 'Guaranteed high frame rate',
-    soon: true,
-    body: 'A capture locked to 120 fps, instead of the browser’s best-effort rate that quietly settles for less.',
+    tag: '···',
+    title: 'And the small stuff',
+    soon: false,
+    body: '',
+    items: [
+      'Desktop notifications when someone joins or leaves',
+      'A screen that stays awake even minimised, unlike the browser’s',
+      'Updates that install themselves',
+    ],
   },
 ];
 
@@ -116,6 +130,18 @@ const platforms = [
                   {b.title}
                 </div>
                 <p class={`mt-1.5 text-[13.5px] leading-[1.6] ${b.soon ? 'text-muted-3' : 'text-muted-2'}`}>{b.body}</p>
+                {b.items && (
+                  <ul class='mt-3 flex flex-col gap-1.5'>
+                    {b.items.map((item) => (
+                      <li class='flex gap-2.5 text-[13.5px] leading-[1.5] text-muted-2'>
+                        <span class='select-none text-muted-3' aria-hidden='true'>
+                          ·
+                        </span>
+                        {item}
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
             ))
           }
