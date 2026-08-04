@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseAudioApps, createWakeLockToggle, type PowerBlocker } from './config.ts';
+import { parseAudioApps, createWakeLockToggle, nativeDisplayFor, type PowerBlocker, type NativeDisplay } from './config.ts';
 
 // The wake-lock bookkeeping fails silently by construction: get it wrong and the only symptom is a
 // machine that stopped sleeping, with nothing on screen tying it back to us. Hence tests on ten
@@ -129,4 +129,41 @@ test('isInternalUrl: only app:// is internal, everything else opens externally',
   assert.equal(isInternalUrl('https://evil.example/'), false);
   assert.equal(isInternalUrl('file:///etc/passwd'), false);
   assert.equal(isInternalUrl('not a url'), false);
+});
+
+// The real layout of the machine this was developed on: a 2560x1440 HDR primary at the origin and
+// a 1920x1080 SDR secondary to its right. Both were verified against the addon's own output.
+const DISPLAYS: NativeDisplay[] = [
+  { deviceName: String.raw`\\.\DISPLAY1`, hdr: true, sdrWhiteNits: 80, maxLuminanceNits: 760, left: 0, top: 0, right: 2560, bottom: 1440 },
+  { deviceName: String.raw`\\.\DISPLAY5`, hdr: false, sdrWhiteNits: 80, maxLuminanceNits: 270, left: 2560, top: 0, right: 4480, bottom: 1080 },
+];
+
+test('nativeDisplayFor: associe par origine physique, pas par ordre', () => {
+  const primary = nativeDisplayFor(DISPLAYS, { bounds: { x: 0, y: 0, width: 2560, height: 1440 }, scaleFactor: 1 });
+  const second = nativeDisplayFor(DISPLAYS, { bounds: { x: 2560, y: 0, width: 1920, height: 1080 }, scaleFactor: 1 });
+  assert.equal(primary?.deviceName, String.raw`\\.\DISPLAY1`);
+  assert.equal(primary?.hdr, true);
+  assert.equal(second?.deviceName, String.raw`\\.\DISPLAY5`);
+  assert.equal(second?.hdr, false, 'le second écran ne doit pas hériter du HDR du premier');
+});
+
+// Le piège du scaling : Electron rend des DIP, DXGI des pixels physiques. Sans la multiplication
+// par scaleFactor, un écran à 150 % ne serait jamais retrouvé — et l'app resterait silencieusement
+// sur le chemin clampé alors que l'écran est bien en HDR.
+test('nativeDisplayFor: convertit les DIP en pixels physiques', () => {
+  const scaled = { bounds: { x: 0, y: 0, width: 1707, height: 960 }, scaleFactor: 1.5 };
+  assert.equal(nativeDisplayFor(DISPLAYS, scaled)?.deviceName, String.raw`\\.\DISPLAY1`);
+  // 2560 DIP à 150 % = 3840 physiques : aucune origine ne correspond, et inventer une association
+  // serait pire que n'en rendre aucune.
+  const nowhere = { bounds: { x: 2560, y: 0, width: 1920, height: 1080 }, scaleFactor: 1.5 };
+  assert.equal(nativeDisplayFor(DISPLAYS, nowhere), null);
+});
+
+test('nativeDisplayFor: tolère un pixel d écart, et rend null sans correspondance', () => {
+  // 1706.67 DIP x 1.5 = 2560.005 → l arrondi peut tomber à 1 près dans un sens ou dans l autre.
+  const rounded = { bounds: { x: 1706.67, y: 0, width: 100, height: 100 }, scaleFactor: 1.5 };
+  assert.equal(nativeDisplayFor(DISPLAYS, rounded)?.deviceName, String.raw`\\.\DISPLAY5`);
+  assert.equal(nativeDisplayFor([], { bounds: { x: 0, y: 0, width: 1, height: 1 }, scaleFactor: 1 }), null);
+  // scaleFactor 0 ne doit pas écraser toutes les origines sur 0 et faire matcher le premier écran.
+  assert.equal(nativeDisplayFor(DISPLAYS, { bounds: { x: 2560, y: 0, width: 1920, height: 1080 }, scaleFactor: 0 })?.deviceName, String.raw`\\.\DISPLAY5`);
 });

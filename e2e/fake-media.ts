@@ -57,13 +57,15 @@ export async function fakeNotifications(page: Page, opts: { focused?: boolean } 
 
 /** Sources the fake desktop shell reports; `thumbnail`/`icon` stay tiny so the grid renders. */
 const FAKE_SOURCES = [
-  { id: 'screen:0:0', name: 'Screen 1', kind: 'screen', meta: '2560×1440' },
-  { id: 'screen:1:0', name: 'Screen 2', kind: 'screen', meta: '1920×1080' },
+  // Screen 1 is flagged HDR: the shell reports this per source, and a suite where nothing is ever
+  // HDR could not tell "the flag is plumbed" from "the flag is always false".
+  { id: 'screen:0:0', name: 'Screen 1', kind: 'screen', meta: '2560×1440', hdr: true },
+  { id: 'screen:1:0', name: 'Screen 2', kind: 'screen', meta: '1920×1080', hdr: false },
   // 4242 is the one whose owning process resolves (see setAudioCapture); the others stand in for
   // a window that is not its process's main window, where app-only sound is impossible.
-  { id: 'window:4242:0', name: 'Elden Ring', kind: 'window', meta: '' },
-  { id: 'window:11:0', name: 'Google Chrome', kind: 'window', meta: '' },
-  { id: 'window:12:0', name: 'Discord', kind: 'window', meta: '' },
+  { id: 'window:4242:0', name: 'Elden Ring', kind: 'window', meta: '', hdr: false },
+  { id: 'window:11:0', name: 'Google Chrome', kind: 'window', meta: '', hdr: false },
+  { id: 'window:12:0', name: 'Discord', kind: 'window', meta: '', hdr: false },
 ];
 
 /**
@@ -108,7 +110,8 @@ export async function fakeNative(page: Page, opts: { delaysMs?: number[]; fail?:
             const w = window as unknown as { __listed: number[] };
             (w.__listed ??= []).push(n);
             if (fail) throw new Error('e2e: listSources refused');
-            return (sources as Array<Record<string, string>>).map((s) => ({ ...s, thumbnail: px, icon: null }));
+            // `unknown`, not `string`: the source list is no longer all strings since `hdr` landed.
+            return (sources as Array<Record<string, unknown>>).map((s) => ({ ...s, thumbnail: px, icon: null }));
           },
           selectSource: async (id: string) => {
             (window as unknown as { __picked?: string }).__picked = id;

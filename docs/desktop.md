@@ -402,20 +402,100 @@ CPU-backed. C'était la mauvaise variable. La bonne était le codec, et elle se
 testait sans écrire une ligne de natif. Chiffres, tableau des viewers et limites du
 banc : [`webrtc-media.md`](./webrtc-media.md) § Codec.
 
-**Ce qui reste vrai et non mesuré**, le jour où le HDR ouvrira le chantier natif :
+#### Le pilote OBS : la valeur, prouvée avant le C++ (2026-08-03)
 
-- L'encodage hardware sur une track **injectée** n'est pas garanti — c'est la
-  question d'origine, toujours ouverte, mais elle ne bloque plus rien puisque le
-  gain d'encodage est déjà acquis sans injection.
-- **Le coût de déplacement d'une frame** décide de l'architecture : 1080p NV12 =
-  3,1 Mo/frame → 186 Mo/s à 60 fps, 4K à 120 → 1,5 Go/s. L'audio par app, lui, fait
-  0,192 Mo/s. Si l'IPC ne tient pas, l'addon doit vivre dans le **renderer**, ce qui
-  coûte `sandbox: false` — et le vecteur alors exposé n'est pas la page (verrouillée
-  sur `app://`) mais les **SDP / ICE / messages `control` venus des viewers**.
-- **La latence** : GPU → readback CPU → IPC → `VideoFrame` → ré-upload GPU par
-  l'encodeur, soit trois traversées de bus pour des pixels déjà sur le GPU. Seuil à
-  poser avant de coder : au-delà d'une frame à 60 Hz, la brique casse ce qu'elle
-  prétend livrer.
+Avant d'écrire une ligne de natif, on a fait faire le travail à OBS — qui exécute
+exactement le pipeline visé (WGC scRGB → tone-map → SDR) — et mesuré le résultat
+avec le même outil des deux côtés (`tools/hdr-acceptance.mjs`) :
+
+| Sur la même source, à la même seconde | Chromium | OBS (WGC + tone-map) |
+| -------------------------------------- | -------- | -------------------- |
+| Hautes lumières écrêtées à blanc pur   | **81,1 %** | **0 %**            |
+| Valeurs de luma distinctes             | 21       | *(rien au-dessus de 235)* |
+| Luma max                               | 255      | 209                  |
+
+**La prémisse est vérifiée** : le HDR n'est pas détruit par WGC, il l'est par le
+convertisseur de Chromium — donc l'information est là et un tone-map la récupère.
+Deux effets de bord relevés : le tone-map remonte aussi les **noirs** du contenu SDR
+autour (49,7 % de la frame sous 16 devient 0,7 %), et la plage haute reste
+inutilisée avec les réglages par défaut. C'est le « niveau de blanc SDR », le bouton
+de calibration que **seul un œil peut régler**.
+
+Sous-produit gardé : le sélecteur accepte désormais les **caméras**
+(`listCameras` dans `source-picker.ts`, capture par `getUserMedia`). Une source
+caméra n'apporte **aucun son** — les viewers n'entendent rien tant qu'aucune app
+n'est cochée dans le panneau audio, qui passe par WASAPI indépendamment de la vidéo.
+
+#### Les portes du chantier natif, mesurées
+
+- **G1 — une track injectée atteint-elle l'encodeur matériel ? ✅ Oui.** La question
+  la plus lourde depuis qu'on préfère H.265, qui **n'a aucun repli logiciel** dans
+  Chromium : une track qui n'atteint pas NVENC ne dégrade pas, elle peut **noircir**.
+  Mesuré sur la *même* source WebGL injectée : H.265 à **2,5 ms/frame**, VP9 à
+  **15,5** — un facteur 6,2, impossible en software. Vrai pour les frames CPU
+  (`VideoFrame` depuis un `ArrayBuffer`) **comme** GPU. À noter : Chromium 150
+  n'expose pas `VideoTrackGenerator`, seulement `MediaStreamTrackGenerator`.
+- **G2 — le coût de transport d'une frame. ❌ L'IPC ne suffit pas.** Mesuré à
+  **~102 Mo/s** (`webContents.send`, frames de 3,1 Mo : 0 perdue, mais 30,5 ms entre
+  chacune au lieu de 16,7 — la file grandit sans borne). Un addon dans le main
+  process plafonne donc à **720p60 ou 1080p30** ; 1080p60 exige 187 Mo/s, la 4K60
+  en exige 746. Détail utile : **Electron convertit un `Buffer` en `Uint8Array`** à
+  la traversée, il y a bien recopie et non transfert.
+
+  **Décision : l'addon vivra dans le preload, avec `sandbox: false`.** Aucune
+  traversée, donc aucun plafond. Ce qu'on accepte, en toutes lettres : on retire le
+  bac à sable OS du process qui parse les **SDP, ICE et messages `control` venus de
+  viewers arbitraires**. La page reste verrouillée sur `app://`, `contextIsolation`
+  et `nodeIntegration: false` restent en place — le vecteur n'est pas la page, c'est
+  ce parseur-là. L'alternative était de livrer une capture native **moins fluide**
+  que le `getDisplayMedia` actuel (mesuré à 119 fps en 1080p), ce qui vidait la
+  feature de son sens.
+
+#### Ce qui est construit
+
+`electron/native/` — addon N-API brut (pas de `node-addon-api` : une fonction ne
+justifie pas une dépendance). `pnpm build:native` fige le couple
+`--target` / `--dist-url`, et ce n'est pas cosmétique : un addon compilé contre
+l'ABI de Node se charge sous `node` et **échoue dans Electron**, le seul endroit où
+il tourne.
+
+Première pièce, l'**interrupteur** : `IDXGIOutput6::GetDesc1` rend l'espace
+colorimétrique *courant* du compositeur (`G2084` = HDR allumé). Le web ne sait pas
+répondre à ça — `matchMedia('(dynamic-range: high)')` donne la **capacité** de
+l'écran, jamais son état. Le drapeau remonte **par source** dans `ss:sources`, parce
+que partager l'écran SDR d'une machine qui en a aussi un HDR ne doit pas emprunter
+le chemin natif.
+
+L'association écran Electron ↔ sortie DXGI vit dans `nativeDisplayFor`
+(`config.ts`, testée) : Electron n'expose jamais le nom de périphérique Windows d'un
+`Display`, et DXGI ignore l'id d'Electron, donc **le rectangle du bureau est la
+seule chose que les deux connaissent**. On associe par **origine** et non par
+taille — deux écrans ne partagent pas une origine, alors que deux moniteurs
+identiques partagent une taille. Extraite et testée parce que son mode de panne est
+**silencieux** : rendre `null` pour un écran réellement en HDR laisserait l'app sur
+le chemin clampé, avec un sélecteur d'apparence normale et aucune erreur nulle part.
+
+> ⚠️ `sdrWhiteNits` est **codé en dur à 80** et ment dès que l'utilisateur touche le
+> curseur de luminosité SDR de Windows. C'est la valeur que le tone-map doit viser.
+> Vraie source : `DisplayConfigGetDeviceInfo` /
+> `DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL`. Le champ existe pour que
+> l'interface ne bouge pas quand il sera branché.
+
+**Ce qui reste vrai et non mesuré**, pour la suite du chantier natif :
+
+- **La latence**, le seul risque des trois qui reste entier. GPU → readback CPU →
+  `VideoFrame` → ré-upload GPU par l'encodeur : des pixels déjà sur le GPU en
+  redescendent et y remontent. Le readback (`Map` sur une staging texture) **bloque**
+  sans double-buffer + fence. Seuil posé avant de coder : au-delà d'**une frame à
+  60 Hz** ajoutée, la brique casse la fluidité qu'elle prétend préserver, et on
+  s'arrête — pas « on verra à l'optimisation ».
+- **La maintenance.** `loopback-capture` (audio) est le problème de quelqu'un
+  d'autre ; celui-ci est le nôtre : node-gyp en CI, prebuilds, un pin d'ABI à chaque
+  majeure d'Electron. Et le `--target` du script de build doit suivre la
+  devDependency `electron`, sinon l'addon se charge en dev et pas en packagé.
+- **WGC est Windows-only.** Cette brique est 100 % non portable ; la seconde moitié
+  de la phase 3 (macOS/Linux) repart de zéro là-dessus — ce n'est pas un addon qu'on
+  construit, c'est le gabarit de trois.
 - **WGC est Windows-only.** Cette brique est 100 % non portable ; la seconde moitié
   de la phase 3 (macOS/Linux) repart de zéro là-dessus.
 

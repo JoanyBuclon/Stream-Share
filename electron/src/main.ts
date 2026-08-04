@@ -24,7 +24,9 @@ import {
   parseAudioApps,
   hwndFromSourceId,
   createWakeLockToggle,
+  nativeDisplayFor,
   type AudioApp,
+  type NativeDisplay,
 } from './config.ts';
 
 const execFile = promisify(execFileCb);
@@ -258,6 +260,47 @@ ipcMain.on('ss:config', (event) => {
   event.returnValue = { appOrigin };
 });
 
+// --- native capture addon (HDR) ---
+
+/** The half of the capture addon that exists today: which displays are in HDR mode right now.
+ *
+ *  Optional by construction. It is absent off Windows, absent when `pnpm build:native` has not been
+ *  run, and will be absent on any machine whose build failed — none of which may stop the app from
+ *  sharing a screen. Every caller treats "no addon" as "no display is HDR", which is the behaviour
+ *  that ships today. */
+interface CaptureAddon {
+  listDisplays(): NativeDisplay[];
+}
+const CAPTURE_ADDON = 'streamshare_capture.node';
+let captureAddon: CaptureAddon | null | undefined;
+function loadCaptureAddon(): CaptureAddon | null {
+  if (captureAddon !== undefined) return captureAddon;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    captureAddon = require(
+      app.isPackaged
+        ? path.join(process.resourcesPath, CAPTURE_ADDON)
+        : path.join(__dirname, '..', 'native', 'build', 'Release', CAPTURE_ADDON),
+    ) as CaptureAddon;
+  } catch (err) {
+    // Once, at the first request: a missing addon is a permanent condition, not a transient one.
+    console.error('stream-share: native capture addon unavailable, HDR detection is off', err);
+    captureAddon = null;
+  }
+  return captureAddon;
+}
+
+/** Displays in HDR mode, or [] when the addon is missing. Never throws: this sits on the path of
+ *  "open the source picker", which must keep working whatever the native side is doing. */
+function nativeDisplays(): NativeDisplay[] {
+  try {
+    return loadCaptureAddon()?.listDisplays() ?? [];
+  } catch (err) {
+    console.error('stream-share: querying displays failed', err);
+    return [];
+  }
+}
+
 // Everything the picker grid needs, already serialisable (NativeImage doesn't cross IPC).
 ipcMain.handle('ss:sources', async (event) => {
   // Defence in depth: only our own bundle may enumerate windows. A thumbnail of every open
@@ -267,6 +310,7 @@ ipcMain.handle('ss:sources', async (event) => {
   // the exact id desktopCapturer will report, so no name heuristic.
   const own = BrowserWindow.fromWebContents(event.sender)?.getMediaSourceId();
   const displays = screen.getAllDisplays();
+  const native = nativeDisplays();
   const sources = await desktopCapturer.getSources({
     types: SOURCE_TYPES,
     thumbnailSize: { width: 320, height: 180 },
@@ -286,6 +330,10 @@ ipcMain.handle('ss:sources', async (event) => {
         meta: display
           ? `${Math.round(display.size.width * display.scaleFactor)}×${Math.round(display.size.height * display.scaleFactor)}`
           : '',
+        // Whether THIS screen is in HDR mode right now — the switch that decides between the
+        // native capture path and getDisplayMedia. Per source, not per machine: sharing the SDR
+        // monitor of a machine that also has an HDR one must not take the native path.
+        hdr: display ? (nativeDisplayFor(native, display)?.hdr ?? false) : false,
         // JPEG, not toDataURL()'s lossless PNG: a real Windows session has 30-60 windows, and
         // each one is a synchronous encode on the main thread plus base64 through IPC. The tile
         // is a lossy preview anyway. The icon keeps PNG — it needs the alpha channel.

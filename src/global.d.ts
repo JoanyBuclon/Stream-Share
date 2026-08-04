@@ -14,6 +14,10 @@ interface NativeSource {
   readonly kind: 'screen' | 'window' | 'camera';
   /** Physical resolution for a screen ("2560×1440"); empty for a window or a camera. */
   readonly meta: string;
+  /** This screen is in HDR mode **right now** — the shell's live reading, not the panel's
+   *  capability, and not something the web can answer. False for windows, cameras, non-Windows,
+   *  and whenever the native addon is unavailable. */
+  readonly hdr: boolean;
   /** data: URL. A still taken when the list was requested — not a live preview. */
   readonly thumbnail: string;
   /** data: URL of the app icon, when the OS exposes one. */

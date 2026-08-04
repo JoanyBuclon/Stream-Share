@@ -34,6 +34,51 @@ export function createWakeLockToggle(blocker: PowerBlocker): (on: boolean) => vo
   };
 }
 
+/** One display as the native addon reports it (see electron/native/src/addon.cc). Coordinates are
+ *  PHYSICAL pixels; `hdr` is the compositor's live state, not the panel's capability. */
+export interface NativeDisplay {
+  deviceName: string;
+  hdr: boolean;
+  sdrWhiteNits: number;
+  maxLuminanceNits: number;
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+/** The bits of an Electron `Display` this needs. `bounds` is in DIP; multiplying by `scaleFactor`
+ *  gives the physical rectangle the addon speaks in. */
+export interface DipDisplay {
+  bounds: { x: number; y: number; width: number; height: number };
+  scaleFactor: number;
+}
+
+/**
+ * The native display a given Electron `Display` refers to, or null.
+ *
+ * Electron never exposes a Display's Windows device name, and DXGI never reports Electron's display
+ * id, so the desktop rectangle is the only thing both sides know. Matching on it is the whole
+ * reason this function exists.
+ *
+ * Extracted and tested because **its failure mode is silent**: return null for a screen that IS in
+ * HDR and the app quietly stays on the clamped path, with a correct-looking picker and no error
+ * anywhere. Nobody would find that from a bug report saying "colours are still washed out".
+ *
+ * Origin first, size second. Two displays cannot share an origin, whereas two identical monitors
+ * share a size — matching on size alone would pick whichever came first and be wrong exactly half
+ * the time on the most ordinary dual-monitor setup there is.
+ */
+export function nativeDisplayFor(displays: readonly NativeDisplay[], display: DipDisplay): NativeDisplay | null {
+  const scale = display.scaleFactor || 1;
+  const x = Math.round(display.bounds.x * scale);
+  const y = Math.round(display.bounds.y * scale);
+  // A pixel of slack: DIP→physical rounds, and a 150% scaled 1707-DIP bound comes back as 2560 or
+  // 2561 depending on which way the division fell. Demanding equality would drop such a display.
+  const near = (a: number, b: number): boolean => Math.abs(a - b) <= 1;
+  return displays.find((d) => near(d.left, x) && near(d.top, y)) ?? null;
+}
+
 /** An app the user could exclude from the shared audio. `pid` is the ROOT process — WASAPI
  *  excludes a process *tree*, and a Chromium app renders its audio in a child service process. */
 export interface AudioApp {
