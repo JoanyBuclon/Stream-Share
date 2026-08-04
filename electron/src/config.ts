@@ -73,6 +73,9 @@ export interface NativeDisplay {
   deviceName: string;
   hdr: boolean;
   sdrWhiteNits: number;
+  /** False means `sdrWhiteNits` is the 80-nit fallback, not a reading. The distinction matters:
+   *  the tone map divides by it, and on a real HDR desktop the fallback is wrong by up to 6x. */
+  sdrWhiteMeasured: boolean;
   maxLuminanceNits: number;
   left: number;
   top: number;

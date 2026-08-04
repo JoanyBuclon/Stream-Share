@@ -141,8 +141,8 @@ test('isInternalUrl: only app:// is internal, everything else opens externally',
 // The real layout of the machine this was developed on: a 2560x1440 HDR primary at the origin and
 // a 1920x1080 SDR secondary to its right. Both were verified against the addon's own output.
 const DISPLAYS: NativeDisplay[] = [
-  { deviceName: String.raw`\\.\DISPLAY1`, hdr: true, sdrWhiteNits: 80, maxLuminanceNits: 760, left: 0, top: 0, right: 2560, bottom: 1440 },
-  { deviceName: String.raw`\\.\DISPLAY5`, hdr: false, sdrWhiteNits: 80, maxLuminanceNits: 270, left: 2560, top: 0, right: 4480, bottom: 1080 },
+  { deviceName: String.raw`\\.\DISPLAY1`, hdr: true, sdrWhiteNits: 480, sdrWhiteMeasured: true, maxLuminanceNits: 760, left: 0, top: 0, right: 2560, bottom: 1440 },
+  { deviceName: String.raw`\\.\DISPLAY5`, hdr: false, sdrWhiteNits: 80, sdrWhiteMeasured: true, maxLuminanceNits: 270, left: 2560, top: 0, right: 4480, bottom: 1080 },
 ];
 
 test('nativeDisplayFor: associe par origine physique, pas par ordre', () => {

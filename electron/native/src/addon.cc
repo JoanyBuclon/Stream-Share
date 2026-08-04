@@ -30,6 +30,7 @@
 #include <winrt/Windows.Graphics.Capture.h>
 #include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
 
+#include <atomic>
 #include <chrono>
 #include <memory>
 #include <optional>
@@ -232,7 +233,11 @@ struct CaptureStats {
   // handler at all, so nothing here can count them. The signal for those is `gap` — a drop shows up
   // as an inter-frame delta that is a multiple of the vsync interval.
   uint64_t failed = 0;
-  uint64_t empty = 0;  // FrameArrived with nothing behind it (pool closed mid-flight)
+  uint64_t empty = 0;    // FrameArrived with nothing behind it (pool closed mid-flight)
+  uint64_t dropped = 0;      // tone-mapped but JS was behind. THE backpressure signal.
+  // Tone-mapped but never handed to JS (no buffer, or a detached one). Separate from `failed`
+  // because the symptom differs: this one leaves every other counter green and the picture black.
+  uint64_t undelivered = 0;
   // The capture item went away: monitor unplugged, RDP session, HDR toggled off with Win+Alt+B.
   // Without this the frames simply stop, `running()` keeps saying true, and a viewer stares at a
   // frozen picture with no error anywhere.
@@ -305,6 +310,14 @@ struct ShaderParams {
   float uv_scale[2] = {1.0f, 1.0f};
 };
 
+/** One tone-mapped frame on its way to JS. Heap-allocated and owned by the threadsafe function's
+ *  queue, so the WGC thread never waits for the JS thread to catch up. */
+struct FramePayload {
+  std::vector<uint8_t> pixels;  // BGRA8, tightly packed
+  int32_t width = 0, height = 0;
+  int64_t timestamp_us = 0;
+};
+
 /**
  * One capture, and the threading rule that makes it safe.
  *
@@ -329,11 +342,20 @@ struct ShaderParams {
  */
 class CaptureSession {
  public:
-  bool Start(HMONITOR monitor, float sdr_white, float knee, std::string* err);
+  bool Start(HMONITOR monitor, float sdr_white, float knee, napi_threadsafe_function sink, std::string* err);
   void Stop();
-  /** Live tone-map parameters. Cheap enough to call per keystroke from a settings slider. */
-  void SetParams(float sdr_white, float knee);
   CaptureStats Snapshot();
+  /** A frame that was tone-mapped but could not be handed to JS (no buffer, or a detached one).
+   *  Counted separately from `failed`, which is about the GPU path, because the symptom differs:
+   *  this one delivers a green dashboard and a black picture. */
+  void CountBufferFailure() {
+    std::lock_guard<std::mutex> lock(stats_m_);
+    stats_.undelivered++;
+  }
+  /** Called by the threadsafe function's finalizer. Node runs env cleanup hooks LIFO, and the
+   *  function registers its own when created — i.e. AFTER ours — so on teardown it is destroyed
+   *  first and our hook would release a dead pointer. Forgetting it here makes order irrelevant. */
+  void ForgetSink() { sink_.store(nullptr, std::memory_order_release); }
   bool running() const { return session_ != nullptr; }
   /** Moved out, not copied: the caller gets the buffer and the session allocates a fresh one. */
   std::vector<uint8_t> TakeFrame(int32_t* w, int32_t* h);
@@ -372,8 +394,22 @@ class CaptureSession {
   // --- Readable from either thread ---
   std::mutex stats_m_;
   CaptureStats stats_;
+  // Only filled when nobody is subscribed: with a sink, frames go straight out and keeping a copy
+  // here would be a second memcpy of 8 MB per frame for a debug accessor nobody is reading.
   std::vector<uint8_t> frame_;  // BGRA8, tightly packed
   int32_t frame_w_ = 0, frame_h_ = 0;
+
+  // Set once in Start, released in Stop, called from the WGC thread. Its queue holds ONE frame and
+  // is non-blocking, so the property is NEVER QUEUE — not "newest wins", which is what this said
+  // until someone read it against the API: with the queue full, `napi_tsfn_nonblocking` rejects the
+  // ARRIVING frame and keeps the one already queued. Under sustained overload we therefore deliver
+  // a frame that is one late, not the freshest. That is still the right trade against a growing
+  // queue, which turns a momentary stall into latency that never comes back — but it is not what
+  // the old wording promised.
+  // Atomic because the WGC thread reads it while the JS thread (Start, Stop, and the threadsafe
+  // function's own finalizer) writes it.
+  std::atomic<napi_threadsafe_function> sink_{nullptr};
+  int64_t first_frame_100ns_ = 0;
 };
 
 bool CaptureSession::BuildPipeline(std::string* err) {
@@ -430,11 +466,16 @@ bool CaptureSession::EnsureTargets(int32_t width, int32_t height) {
   return true;
 }
 
-bool CaptureSession::Start(HMONITOR monitor, float sdr_white, float knee, std::string* err) {
+bool CaptureSession::Start(HMONITOR monitor, float sdr_white, float knee, napi_threadsafe_function sink,
+                           std::string* err) {
+  // Takes ownership of `sink` on every path, including the failures — split ownership between here
+  // and the caller is how a threadsafe function gets released twice.
   if (session_) {
     *err = "capture already running";
+    if (sink) napi_release_threadsafe_function(sink, napi_tsfn_release);
     return false;
   }
+  sink_.store(sink, std::memory_order_release);
   try {
     // COM has to be initialized on this thread; which apartment does not matter, because the frame
     // pool below is free-threaded and delivers on its own thread either way. RPC_E_CHANGED_MODE
@@ -447,6 +488,11 @@ bool CaptureSession::Start(HMONITOR monitor, float sdr_white, float knee, std::s
     }
     if (!wgc::GraphicsCaptureSession::IsSupported()) {
       *err = "Windows Graphics Capture is not supported on this machine";
+      // Stop(), not a bare return: `sink_` is already set, and this is the one failure path that
+      // used to skip the release — leaking the threadsafe function, which keeps a reference on the
+      // environment so the renderer can never tear down cleanly. And of course the machine that
+      // takes this path is the one nobody develops on.
+      Stop();
       return false;
     }
     UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
@@ -618,11 +664,27 @@ void CaptureSession::OnFrame(wgc::Direct3D11CaptureFramePool const& pool,
           copy_ms = elapsed(t1, clock::now());
           frame_w = size.Width;
           frame_h = size.Height;
-          std::lock_guard<std::mutex> lock(stats_m_);
-          frame_ = std::move(pixels);
-          frame_w_ = frame_w;
-          frame_h_ = frame_h;
           ok = true;
+          napi_threadsafe_function sink = sink_.load(std::memory_order_acquire);
+          if (sink) {
+            if (!first_frame_100ns_) first_frame_100ns_ = stamp;
+            auto* payload = new FramePayload{std::move(pixels), frame_w, frame_h,
+                                             (stamp - first_frame_100ns_) / 10};  // 100ns -> µs
+            // Non-blocking: a full queue means JS is behind, and the right answer there is to drop
+            // this frame, not to stall the compositor's thread waiting for it.
+            // Returns napi_closing rather than crashing once the environment is going away, which
+            // is the only reason a stale pointer here is survivable.
+            if (napi_call_threadsafe_function(sink, payload, napi_tsfn_nonblocking) != napi_ok) {
+              delete payload;
+              std::lock_guard<std::mutex> lock(stats_m_);
+              stats_.dropped++;
+            }
+          } else {
+            std::lock_guard<std::mutex> lock(stats_m_);
+            frame_ = std::move(pixels);
+            frame_w_ = frame_w;
+            frame_h_ = frame_h;
+          }
         }
       }
     }
@@ -657,13 +719,6 @@ void CaptureSession::OnFrame(wgc::Direct3D11CaptureFramePool const& pool,
   if (resized) stats_.recreated++;
 }
 
-void CaptureSession::SetParams(float sdr_white, float knee) {
-  std::lock_guard<std::mutex> pipeline(pipeline_m_);
-  if (sdr_white > 0) params_cpu_.sdr_white = sdr_white;
-  if (knee > 0 && knee < 1) params_cpu_.knee = knee;
-  UploadParams();
-}
-
 void CaptureSession::UploadParams() {
   if (!ctx_ || !params_) return;
   D3D11_MAPPED_SUBRESOURCE mapped{};
@@ -690,6 +745,12 @@ void CaptureSession::Stop() {
   frame_token_ = {};
   closed_token_ = {};
   std::lock_guard<std::mutex> pipeline(pipeline_m_);
+  if (napi_threadsafe_function sink = sink_.exchange(nullptr)) {
+    // After the lock, so no OnFrame can still be holding it: releasing a threadsafe function that a
+    // producer thread is about to call is how you get a callback into a destroyed environment.
+    napi_release_threadsafe_function(sink, napi_tsfn_release);
+  }
+  first_frame_100ns_ = 0;
   if (session_) session_.Close();
   if (pool_) pool_.Close();
   session_ = nullptr;
@@ -746,9 +807,81 @@ HMONITOR MonitorByDeviceName(const std::wstring& name) {
   return search.found;
 }
 
+/**
+ * The frame buffer handed to JS, REUSED across frames.
+ *
+ * Measured: allocating a fresh one per frame is 14.7 MB of garbage at 1440p, ~880 MB/s at 60 fps.
+ * The resulting GC pauses were long enough to miss the threadsafe function's one-slot queue, which
+ * showed up as 11.6% of frames dropped at the addon while the JS thread looked idle.
+ *
+ * Safe only because the subscriber copies synchronously: `new VideoFrame(buffer, …)` copies, and
+ * the preload does it inside the callback. **A subscriber that keeps the ArrayBuffer past the
+ * callback will watch it change under them.** Documented on the JS side too.
+ */
+napi_ref g_frame_buffer = nullptr;
+size_t g_frame_buffer_size = 0;
+
+napi_value FrameBuffer(napi_env env, size_t size) {
+  if (g_frame_buffer && g_frame_buffer_size == size) {
+    napi_value existing = nullptr;
+    bool detached = false;
+    if (napi_get_reference_value(env, g_frame_buffer, &existing) == napi_ok && existing &&
+        napi_is_detached_arraybuffer(env, existing, &detached) == napi_ok && !detached) {
+      return existing;
+    }
+    // Detached — someone transferred it. Reusing it would hand back a zero-length buffer on every
+    // frame from now on: the memcpy below is skipped, the object is still delivered, `frames` keeps
+    // climbing, `dropped` stays at 0, and the viewer watches black. Recreate instead.
+  }
+  if (g_frame_buffer) {
+    napi_delete_reference(env, g_frame_buffer);
+    g_frame_buffer = nullptr;
+  }
+  napi_value buffer;
+  void* unused = nullptr;
+  if (napi_create_arraybuffer(env, size, &unused, &buffer) != napi_ok) return nullptr;
+  napi_create_reference(env, buffer, 1, &g_frame_buffer);
+  g_frame_buffer_size = size;
+  return buffer;
+}
+
+/** Runs on the JS thread, once per frame. Hands the pixels over and frees the payload. */
+void DeliverFrame(napi_env env, napi_value callback, void*, void* data) {
+  std::unique_ptr<FramePayload> payload(static_cast<FramePayload*>(data));
+  // env is null when the environment is tearing down: free the payload, call nothing.
+  if (!env || !callback) return;
+  napi_value obj, width, height, timestamp;
+  napi_create_object(env, &obj);
+  napi_create_int32(env, payload->width, &width);
+  napi_create_int32(env, payload->height, &height);
+  napi_create_int64(env, payload->timestamp_us, &timestamp);
+  napi_value buffer = FrameBuffer(env, payload->pixels.size());
+  void* out = nullptr;
+  size_t len = 0;
+  if (buffer) napi_get_arraybuffer_info(env, buffer, &out, &len);
+  // Delivering an object whose `data` is empty or stale is the worst outcome available: every
+  // counter stays green and the picture is black. Count it and deliver nothing.
+  if (!buffer || !out || len != payload->pixels.size() || payload->pixels.empty()) {
+    g_capture.CountBufferFailure();
+    return;
+  }
+  memcpy(out, payload->pixels.data(), payload->pixels.size());
+  napi_set_named_property(env, obj, "width", width);
+  napi_set_named_property(env, obj, "height", height);
+  napi_set_named_property(env, obj, "timestampUs", timestamp);
+  napi_set_named_property(env, obj, "data", buffer);
+  napi_value global, unused;
+  napi_get_global(env, &global);
+  // Result ignored, exception swallowed: a throw in the subscriber must not kill the capture.
+  if (napi_call_function(env, global, callback, 1, &obj, &unused) == napi_pending_exception) {
+    napi_value err;
+    napi_get_and_clear_last_exception(env, &err);
+  }
+}
+
 napi_value StartCapture(napi_env env, napi_callback_info info) {
-  size_t argc = 3;
-  napi_value argv[3];
+  size_t argc = 4;
+  napi_value argv[4];
   napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
   size_t len = 0;
   if (argc < 1 || napi_get_value_string_utf16(env, argv[0], nullptr, 0, &len) != napi_ok) {
@@ -771,23 +904,34 @@ napi_value StartCapture(napi_env env, napi_callback_info info) {
   if (argc > 1) napi_get_value_double(env, argv[1], &sdr_white);
   if (argc > 2) napi_get_value_double(env, argv[2], &knee);
 
+  // Optional 4th argument: a function to push frames to. Without it the session only records the
+  // last frame for takeFrame(), which is what the measurement harness uses.
+  napi_threadsafe_function sink = nullptr;
+  napi_valuetype type = napi_undefined;
+  if (argc > 3) napi_typeof(env, argv[3], &type);
+  if (type == napi_function) {
+    napi_value name;
+    napi_create_string_utf8(env, "streamshare_frames", NAPI_AUTO_LENGTH, &name);
+    // Queue of ONE, and that is measured rather than assumed: depths of 1, 2 and 3 all dropped the
+    // same 9.7-9.9%, because the drops were never a queueing problem — they were a burst while the
+    // page set up its peer connection (37 in the first second, then 0 over the next six). Reusing
+    // the frame buffer later removed even that burst, so the current figure is 0 throughout. A
+    // deeper queue would only have bought latency for a case that never existed.
+    // Non-blocking at the call site, so the property is: never a backlog. (Not "newest wins" — a
+    // full queue rejects the ARRIVING frame, not the queued one.)
+    if (napi_create_threadsafe_function(env, argv[3], nullptr, name, 1, 1, nullptr,
+                                        [](napi_env, void*, void*) { g_capture.ForgetSink(); }, nullptr, DeliverFrame,
+                                        &sink) != napi_ok) {
+      napi_throw_error(env, nullptr, "could not create the frame callback");
+      return nullptr;
+    }
+  }
+
   std::string err;
-  if (!g_capture.Start(monitor, static_cast<float>(sdr_white), static_cast<float>(knee), &err)) {
-    napi_throw_error(env, nullptr, err.c_str());
+  if (!g_capture.Start(monitor, static_cast<float>(sdr_white), static_cast<float>(knee), sink, &err)) {
+    napi_throw_error(env, nullptr, err.c_str());  // Start already released the sink
     return nullptr;
   }
-  return nullptr;
-}
-
-/** Live tone-map parameters: setParams(sdrWhiteNits, knee). No restart. */
-napi_value SetParams(napi_env env, napi_callback_info info) {
-  size_t argc = 2;
-  napi_value argv[2];
-  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
-  double sdr_white = 0, knee = 0;
-  if (argc > 0) napi_get_value_double(env, argv[0], &sdr_white);
-  if (argc > 1) napi_get_value_double(env, argv[1], &knee);
-  g_capture.SetParams(static_cast<float>(sdr_white), static_cast<float>(knee));
   return nullptr;
 }
 
@@ -814,12 +958,26 @@ napi_value TakeFrame(napi_env env, napi_callback_info) {
   return obj;
 }
 
+void ReleaseFrameBuffer(napi_env env);  // defined below, next to the buffer it frees
+
 napi_value StopCapture(napi_env env, napi_callback_info) {
   g_capture.Stop();
+  // The reused frame buffer is up to 33 MB at 4K and was otherwise pinned for the life of the
+  // window, long after the capture it belonged to.
+  ReleaseFrameBuffer(env);
   return nullptr;
 }
 
 void StopCaptureForTeardown() { g_capture.Stop(); }
+
+/** Called from the env cleanup hook: the reused frame buffer must not outlive the environment that
+ *  owns it, and it is the one thing here that is not tied to a running session. */
+void ReleaseFrameBuffer(napi_env env) {
+  if (!g_frame_buffer) return;
+  napi_delete_reference(env, g_frame_buffer);
+  g_frame_buffer = nullptr;
+  g_frame_buffer_size = 0;
+}
 
 napi_value GetCaptureStats(napi_env env, napi_callback_info) {
   const CaptureStats s = g_capture.Snapshot();
@@ -843,6 +1001,8 @@ napi_value GetCaptureStats(napi_env env, napi_callback_info) {
   num("frames", static_cast<double>(s.frames));
   num("failed", static_cast<double>(s.failed));
   num("empty", static_cast<double>(s.empty));
+  num("dropped", static_cast<double>(s.dropped));
+  num("undelivered", static_cast<double>(s.undelivered));
   flag("closed", s.closed);
   num("recreated", static_cast<double>(s.recreated));
   num("width", s.width);
@@ -874,7 +1034,6 @@ napi_value StartCapture(napi_env env, napi_callback_info) {
   return nullptr;
 }
 napi_value StopCapture(napi_env, napi_callback_info) { return nullptr; }
-napi_value SetParams(napi_env, napi_callback_info) { return nullptr; }
 napi_value GetCaptureStats(napi_env env, napi_callback_info) {
   napi_value obj, running;
   napi_create_object(env, &obj);
@@ -888,6 +1047,7 @@ napi_value TakeFrame(napi_env env, napi_callback_info) {
   return obj;
 }
 void StopCaptureForTeardown() {}
+void ReleaseFrameBuffer(napi_env) {}
 }  // namespace
 #endif
 
@@ -897,7 +1057,6 @@ napi_value Init(napi_env env, napi_value exports) {
   for (const auto& [name, cb] : {std::pair<const char*, napi_callback>{"listDisplays", ListDisplays},
                                  {"startCapture", StartCapture},
                                  {"stopCapture", StopCapture},
-                                 {"setParams", SetParams},
                                  {"captureStats", GetCaptureStats},
                                  {"takeFrame", TakeFrame}}) {
     napi_value fn;
@@ -907,7 +1066,8 @@ napi_value Init(napi_env env, napi_value exports) {
   // Without this, closing the window or reloading the renderer leaves a capture running against a
   // dead environment, and the static destructor tears the D3D device down at process exit while a
   // WGC thread may still be inside the handler. Nobody remembers to call stopCapture().
-  napi_add_env_cleanup_hook(env, [](void*) { StopCaptureForTeardown(); }, nullptr);
+  napi_add_env_cleanup_hook(
+      env, [](void* e) { StopCaptureForTeardown(); ReleaseFrameBuffer(static_cast<napi_env>(e)); }, env);
   return exports;
 }
 

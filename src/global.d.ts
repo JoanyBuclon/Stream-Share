@@ -18,6 +18,13 @@ interface NativeSource {
    *  capability, and not something the web can answer. False for windows, cameras, non-Windows,
    *  and whenever the native addon is unavailable. */
   readonly hdr: boolean;
+  /** Windows device name (`\\.\DISPLAY1`) — what `startNativeCapture` takes. Empty for windows and
+   *  cameras, and for a screen the shell could not match to a DXGI output. */
+  readonly deviceName: string;
+  /** Reference white for SDR content, in nits — the tone map's divisor. Only trustworthy when
+   *  `sdrWhiteMeasured`; 0 means the shell has nothing to report. */
+  readonly sdrWhiteNits: number;
+  readonly sdrWhiteMeasured: boolean;
   /** data: URL. A still taken when the list was requested — not a live preview. */
   readonly thumbnail: string;
   /** data: URL of the app icon, when the OS exposes one. */
@@ -75,6 +82,51 @@ interface StreamShareNative {
   /** Raw PCM (48 kHz, 16-bit, stereo, interleaved) in ~10 ms chunks, tagged with the name of the
    *  app it came from — sessions are independent streams. Returns an unsubscribe. */
   onAudioChunk(cb: (key: string, chunk: Uint8Array) => void): () => void;
+
+  // --- native HDR capture ---
+  //
+  // Optional, unlike everything above: these arrived after the shell shipped, and an older
+  // installer paired with a newer web build would otherwise call an undefined function. They are
+  // also genuinely absent off Windows and whenever the addon failed to load.
+
+  /** Windows, and the addon actually loaded. False means there is no native path at all. */
+  canCaptureNative?(): boolean;
+  /**
+   * Start pushing tone-mapped frames for a screen, by its Windows device name, and hand over the
+   * MessagePort they arrive on — as a single `window.postMessage` tagged `{ streamShare: 'frames' }`,
+   * posted SYNCHRONOUSLY from inside this call. Listen before calling. See src/lib/native-video.ts.
+   *
+   * Throws if `deviceName` is not the display the user last confirmed in the picker: this path does
+   * not go through the OS consent handler, so the check lives here.
+   */
+  startNativeCapture?(deviceName: string, sdrWhiteNits?: number, knee?: number): void;
+  stopNativeCapture?(): void;
+  /** Capture counters, or null without the addon. `dropped` is the backpressure signal: frames
+   *  tone-mapped but never handed to the page because it was behind. */
+  nativeCaptureStats?(): NativeCaptureStats | null;
+}
+
+interface NativeCaptureStats {
+  readonly frames: number;
+  readonly failed: number;
+  readonly empty: number;
+  readonly dropped: number;
+  /** Tone-mapped but never handed to JS — the failure that leaves every other counter green. */
+  readonly undelivered: number;
+  /** Frames produced while no page was listening. */
+  readonly orphanedFrames: number;
+  /** The capture item went away: monitor unplugged, RDP session, HDR switched off. */
+  readonly closed: boolean;
+  readonly recreated: number;
+  readonly width: number;
+  readonly height: number;
+  readonly gapAvgMs: number;
+  readonly gapMaxMs: number;
+  readonly gpuAvgMs: number;
+  readonly gpuMaxMs: number;
+  readonly copyAvgMs: number;
+  readonly copyMaxMs: number;
+  readonly running: boolean;
 }
 
 interface Window {

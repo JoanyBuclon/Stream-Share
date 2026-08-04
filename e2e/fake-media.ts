@@ -59,13 +59,15 @@ export async function fakeNotifications(page: Page, opts: { focused?: boolean } 
 const FAKE_SOURCES = [
   // Screen 1 is flagged HDR: the shell reports this per source, and a suite where nothing is ever
   // HDR could not tell "the flag is plumbed" from "the flag is always false".
-  { id: 'screen:0:0', name: 'Screen 1', kind: 'screen', meta: '2560×1440', hdr: true },
-  { id: 'screen:1:0', name: 'Screen 2', kind: 'screen', meta: '1920×1080', hdr: false },
+  // `deviceName` and the SDR white level ride along for the same reason: only the shell can map a
+  // desktopCapturer id to a DXGI output, and the native path needs both.
+  { id: 'screen:0:0', name: 'Screen 1', kind: 'screen', meta: '2560×1440', hdr: true, deviceName: String.raw`\\.\DISPLAY1`, sdrWhiteNits: 480, sdrWhiteMeasured: true },
+  { id: 'screen:1:0', name: 'Screen 2', kind: 'screen', meta: '1920×1080', hdr: false, deviceName: String.raw`\\.\DISPLAY5`, sdrWhiteNits: 80, sdrWhiteMeasured: true },
   // 4242 is the one whose owning process resolves (see setAudioCapture); the others stand in for
   // a window that is not its process's main window, where app-only sound is impossible.
-  { id: 'window:4242:0', name: 'Elden Ring', kind: 'window', meta: '', hdr: false },
-  { id: 'window:11:0', name: 'Google Chrome', kind: 'window', meta: '', hdr: false },
-  { id: 'window:12:0', name: 'Discord', kind: 'window', meta: '', hdr: false },
+  { id: 'window:4242:0', name: 'Elden Ring', kind: 'window', meta: '', hdr: false, deviceName: '', sdrWhiteNits: 0, sdrWhiteMeasured: false },
+  { id: 'window:11:0', name: 'Google Chrome', kind: 'window', meta: '', hdr: false, deviceName: '', sdrWhiteNits: 0, sdrWhiteMeasured: false },
+  { id: 'window:12:0', name: 'Discord', kind: 'window', meta: '', hdr: false, deviceName: '', sdrWhiteNits: 0, sdrWhiteMeasured: false },
 ];
 
 /**

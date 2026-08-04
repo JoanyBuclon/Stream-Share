@@ -459,6 +459,18 @@ justifie pas une dépendance). `pnpm build:native` fige le couple
 l'ABI de Node se charge sous `node` et **échoue dans Electron**, le seul endroit où
 il tourne.
 
+> **L'addon doit être empaqueté, et il ne l'était pas.** `streamshare_capture.node`
+> ne figurait dans aucun `extraResources`, et ni `dist` ni `release` n'appelaient
+> `build:native`. Tout build installé prenait donc le `catch` du chargeur, écrivait
+> une ligne dans la console et **perdait le HDR sans que rien n'échoue** — la panne
+> exacte que l'en-tête de `native-addon.ts` prétendait empêcher. Corrigé et vérifié :
+> le fichier est présent dans `resources/` de l'app packagée.
+>
+> Note d'environnement : `electron-builder` échoue en `EPERM` quand il écrit dans
+> `release/` sur `H:` (au dépaquetage d'Electron, avant nos ressources). Pour
+> vérifier, sortir ailleurs :
+> `pnpm exec electron-builder --dir --config.directories.output=C:\Temp\ss-pack`.
+
 Première pièce, l'**interrupteur** : `IDXGIOutput6::GetDesc1` rend l'espace
 colorimétrique *courant* du compositeur (`G2084` = HDR allumé). Le web ne sait pas
 répondre à ça — `matchMedia('(dynamic-range: high)')` donne la **capacité** de
@@ -583,12 +595,89 @@ remontés.
 > qu'aucune mesure ne peut trancher à la place d'un œil. Le curseur de blanc SDR
 > dans la modale de réglages reste à faire.
 
-**Ce qui reste vrai et non mesuré**, pour la suite du chantier natif :
+#### G3 — la frontière preload → page, et la sortie vers l'encodeur
 
-- **La sortie vers l'encodeur.** Le readback produit du BGRA8 en mémoire ; il reste
-  à le faire entrer dans un `MediaStreamTrackGenerator` depuis le preload, et à
-  vérifier que cette track-là atteint bien NVENC (G1 l'a montré sur une source
-  WebGL, pas sur celle-ci).
+L'addon tourne dans le **preload** (c'est ce que `sandbox: false` avait acheté).
+Restait une frontière : `contextIsolation: true` sépare le preload de la page en
+deux contextes V8, et `contextBridge` **clone** tout ce qui passe. Mesuré
+(`tools/bridge-bench.cjs`) :
+
+| Voie | 1080p (8,3 Mo) | 1440p (14,7 Mo) |
+| ---- | -------------- | --------------- |
+| `contextBridge` (clone) | 7,98 ms/frame | 11,55 ms/frame |
+| `postMessage` + **transfert** | **1,17 ms/frame** en régime 60 fps | — |
+
+`postMessage` accepte une liste de transfert, `contextBridge` non. La `VideoFrame`
+est donc construite **dans le preload** et *déplacée* vers la page, sur un
+`MessagePort` dédié — pas `window.postMessage`, pour ne pas réveiller tous les
+écouteurs de la page 60 fois par seconde et pour que rien d'autre ne puisse
+injecter une frame. L'écriture dans la track coûte 0,019 ms.
+
+> Une `VideoFrame` tient un buffer matériel. En laisser filer une trentaine bloque
+> le renderer — mesuré, en dur, la première version du banc s'est plantée dessus.
+> Chaque chemin de `native-video.ts` écrit la frame (la track la ferme) ou la ferme
+> lui-même.
+
+**Acceptance de bout en bout** (`tools/native-track.cjs`, qui charge le *vrai*
+preload et importe le *vrai* `src/lib/native-video.ts`) :
+
+| Porte | Mesuré |
+| ----- | ------ |
+| Addon chargé dans le preload | ✅ |
+| Track vivante, reçue par un pair | ✅ |
+| Frames encodées | **367 sur ~7 s** (≈52 fps) |
+| Résolution | **2560×1440**, pleine |
+| **L'image est réelle et bouge** | ✅ |
+| Aucune perte silencieuse | `failed=0 undelivered=0 orphaned=0` |
+| **Arrêt puis redémarrage** | ✅ |
+| Encodeur matériel | **H265** |
+| Contre-pression | **0** |
+| `stop()` arrête vraiment | ✅ |
+
+> La fenêtre est de ~7 s (1 s d'échantillon + 6 s), pas 6 : `framesEncoded` est
+> cumulatif depuis l'ouverture du pair. Le premier jet de ce tableau divisait par 6
+> et annonçait 55 fps.
+
+Trois choses que cette mesure a corrigées :
+
+- **Les pertes venaient du démarrage, pas du débit.** 9,8 % de frames perdues au
+  total ; en séparant les phases : **37 pendant la seconde de négociation SDP, puis
+  0 sur les six suivantes**. Un balayage de la profondeur de file (1, 2, 3) donnait
+  le même taux — la preuve que ce n'était pas de la mise en file. La file reste donc
+  à **1**. Réutiliser le buffer de frame a ensuite supprimé jusqu'à cette rafale : le
+  chiffre actuel est 0 de bout en bout.
+- **Ce n'est pas « la plus récente gagne ».** Formulation fausse, écrite quatre fois
+  avant qu'une revue ne la lise contre l'API : une file pleine fait rejeter la frame
+  **entrante**, pas celle déjà en file. La propriété réelle est « on ne met jamais en
+  file » — sous charge soutenue on livre donc une frame de retard. C'est toujours le
+  bon compromis contre une file qui, elle, transforme un à-coup en latence définitive.
+- **`encoderImplementation` n'existe pas sous Electron 43.** Ni
+  `powerEfficientEncoder` — absents de l'objet stats, pas vides (vérifié via
+  `Object.keys`). L'encodage matériel s'établit donc par élimination : Chromium n'a
+  **aucun** encodeur HEVC logiciel. La porte est *sautée* — et non rouge — sur une
+  machine sans H.265 matériel : elle testerait la machine, pas le code.
+
+Et une porte qui manquait entièrement : **rien ne vérifiait que l'image contenait
+quelque chose**. Toutes les autres sont satisfaites par un flux noir ou par une image
+figée — c'est exactement la forme que prend la panne du buffer réutilisé. Le harness
+tire maintenant deux frames de la track *reçue*, à une seconde d'intervalle, et exige
+qu'elles soient non nulles et différentes.
+
+##### La porte de consentement du chemin natif
+
+`setDisplayMediaRequestHandler` est documenté dans `main.ts` comme **étant** la porte
+de consentement. Le chemin natif ne le traverse jamais : il nomme une sortie DXGI
+directement depuis le preload. Autrement dit, tel qu'écrit d'abord, un XSS dans le
+bundle suffisait à lancer une capture plein écran sans prompt et sans indicateur.
+`ss:select-source` mémorise désormais aussi le `deviceName` correspondant, et
+`startNativeCapture` refuse tout autre écran que celui que l'utilisateur vient de
+confirmer dans le sélecteur.
+
+> ⚠️ Ce contrôle n'est pas couvert par le harness, qui court-circuite
+> `ss:select-source` (il faudrait tout le main process). Il n'est exercé qu'en
+> production.
+
+**Ce qui reste vrai et non mesuré**, pour la suite du chantier natif :
 - **WGC ne livre que sur changement.** Un bureau immobile rend ~24 fps, et 0,2 fps
   quand plus rien ne bouge. C'est une qualité (aucun encodage gaspillé) mais le
   chemin natif doit répéter la dernière frame si l'encodeur a besoin d'une cadence.

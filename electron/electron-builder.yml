@@ -24,6 +24,12 @@ extraResources:
   # main.ts requires this path directly instead — no asar, no asarUnpack, no pnpm symlinks.
   - from: node_modules/loopback-capture/build/Release/loopback_capture_addon.node
     to: loopback_capture_addon.node
+  # Our own capture addon (HDR detection in main, WGC capture in the preload). Same bare-.node
+  # treatment, and it must stay in step with `packaged ? resourcesPath : ...` in native-addon.ts.
+  # Without this entry the packaged app silently loses HDR entirely — the addon's own loader logs
+  # and returns null, so nothing fails, the feature is just never there. `pnpm dist` builds it.
+  - from: native/build/Release/streamshare_capture.node
+    to: streamshare_capture.node
 
 win:
   target: nsis

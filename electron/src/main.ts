@@ -29,6 +29,7 @@ import {
   type AudioApp,
   type NativeDisplay,
 } from './config.ts';
+import { loadCaptureAddon } from './native-addon.ts';
 
 const execFile = promisify(execFileCb);
 
@@ -54,6 +55,9 @@ const kindOf = (id: string): 'screen' | 'window' => (id.startsWith('screen:') ? 
 // Single-window app: one selection for the whole process is enough. Per-webContents state would
 // be required the day a second window can capture.
 let selectedSourceId: string | null = null;
+// The DXGI device name matching `selectedSourceId`, or '' — the native capture path's consent gate.
+// It has to be tracked separately because that path bypasses setDisplayMediaRequestHandler entirely.
+let approvedDeviceName = '';
 // The local build carries no CSP (nginx sets it in prod), so we attach the mirrored policy to
 // every app:// response — more robust than a webRequest listener, which doesn't reliably see
 // protocol.handle responses across Electron versions.
@@ -125,7 +129,11 @@ function createWindow(): void {
     }
   });
 
-  // A native capture must not outlive the page that asked for it. Registered here, once: doing it
+  // The native AUDIO capture and the wake lock must not outlive the page that asked for them.
+  // (Native VIDEO capture is not main's to stop — it runs in the preload and is torn down by the
+  // addon's own env cleanup hook when the renderer environment goes away. Saying "native capture"
+  // here without that distinction made it look like main owned both.)
+  // Registered here, once: doing it
   // inside the IPC handler added a pair per click, which trips MaxListenersExceededWarning after a
   // handful of checkbox toggles. A reload keeps the SAME WebContents, so isDestroyed() stays false
   // and the sessions would go on feeding a page that has lost its listener and its state — but
@@ -256,44 +264,20 @@ app.whenReady().then(() => {
 
 // The renderer asks (synchronously, once, from the preload) for the web origin it should target.
 ipcMain.on('ss:config', (event) => {
-  event.returnValue = { appOrigin };
+  // `packaged` is here because the preload loads the capture addon itself and needs to know where
+  // to look for it — `app.isPackaged` is main-only, and guessing from `__dirname` is how a build
+  // works in dev and not once installed.
+  event.returnValue = { appOrigin, packaged: app.isPackaged };
 });
 
 // --- native capture addon (HDR) ---
 
-/** The half of the capture addon that exists today: which displays are in HDR mode right now.
- *
- *  Optional by construction. It is absent off Windows, absent when `pnpm build:native` has not been
- *  run, and will be absent on any machine whose build failed — none of which may stop the app from
- *  sharing a screen. Every caller treats "no addon" as "no display is HDR", which is the behaviour
- *  that ships today. */
-interface CaptureAddon {
-  listDisplays(): NativeDisplay[];
-}
-const CAPTURE_ADDON = 'streamshare_capture.node';
-let captureAddon: CaptureAddon | null | undefined;
-function loadCaptureAddon(): CaptureAddon | null {
-  if (captureAddon !== undefined) return captureAddon;
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    captureAddon = require(
-      app.isPackaged
-        ? path.join(process.resourcesPath, CAPTURE_ADDON)
-        : path.join(__dirname, '..', 'native', 'build', 'Release', CAPTURE_ADDON),
-    ) as CaptureAddon;
-  } catch (err) {
-    // Once, at the first request: a missing addon is a permanent condition, not a transient one.
-    console.error('stream-share: native capture addon unavailable, HDR detection is off', err);
-    captureAddon = null;
-  }
-  return captureAddon;
-}
 
 /** Displays in HDR mode, or [] when the addon is missing. Never throws: this sits on the path of
  *  "open the source picker", which must keep working whatever the native side is doing. */
 function nativeDisplays(): NativeDisplay[] {
   try {
-    return loadCaptureAddon()?.listDisplays() ?? [];
+    return loadCaptureAddon(__dirname, app.isPackaged, process.resourcesPath)?.listDisplays() ?? [];
   } catch (err) {
     console.error('stream-share: querying displays failed', err);
     return [];
@@ -320,6 +304,7 @@ ipcMain.handle('ss:sources', async (event) => {
     .map((s) => {
       // display_id is documented as possibly empty — no match just means no resolution label.
       const display = displays.find((d) => String(d.id) === s.display_id);
+      const output = display ? nativeDisplayFor(native, display) : null;
       return {
         id: s.id,
         name: s.name,
@@ -332,7 +317,16 @@ ipcMain.handle('ss:sources', async (event) => {
         // Whether THIS screen is in HDR mode right now — the switch that decides between the
         // native capture path and getDisplayMedia. Per source, not per machine: sharing the SDR
         // monitor of a machine that also has an HDR one must not take the native path.
-        hdr: display ? (nativeDisplayFor(native, display)?.hdr ?? false) : false,
+        hdr: output?.hdr ?? false,
+        // What `startNativeCapture` needs to name this screen to the addon — DXGI speaks device
+        // names, `desktopCapturer` speaks its own ids, and only main sees both. Empty for windows,
+        // and for a screen the addon could not match.
+        deviceName: output?.deviceName ?? '',
+        // The tone map's divisor, carried alongside so the renderer never has to guess it. Only
+        // meaningful when `sdrWhiteMeasured` is true; the 80 fallback is a plausible-looking number
+        // that would be wrong by up to 6x.
+        sdrWhiteNits: output?.sdrWhiteNits ?? 0,
+        sdrWhiteMeasured: output?.sdrWhiteMeasured ?? false,
         // JPEG, not toDataURL()'s lossless PNG: a real Windows session has 30-60 windows, and
         // each one is a synchronous encode on the main thread plus base64 through IPC. The tile
         // is a lossy preview anyway. The icon keeps PNG — it needs the alpha channel.
@@ -588,11 +582,24 @@ app.on('before-quit', () => {
 
 // handle (awaited), not send: the id and the getDisplayMedia call travel on different IPC pipes,
 // so nothing orders them — fire-and-forget would capture the previous source now and then.
-ipcMain.handle('ss:select-source', (_event, id: unknown) => {
+ipcMain.handle('ss:select-source', (event, id: unknown) => {
   // Shape-checked, not just typed: the empty string is a string AND falsy, so a bare
   // `typeof id === 'string'` would let `selectSource('')` through as "nothing selected".
   selectedSourceId =
     typeof id === 'string' && (id.startsWith('screen:') || id.startsWith('window:')) ? id : null;
+  // The native path does not go through setDisplayMediaRequestHandler — it names a DXGI output
+  // directly from the preload — so this is where its consent gate has to live too. Without it the
+  // renderer could start a full-screen capture of any display without ever passing the picker,
+  // which is exactly the fallback the handler above refuses to have.
+  approvedDeviceName = '';
+  if (!selectedSourceId || !isInternalUrl(event.senderFrame?.url ?? '')) return;
+  const display = screen.getAllDisplays().find((d) => `screen:${d.id}:0` === selectedSourceId);
+  if (display) approvedDeviceName = nativeDisplayFor(nativeDisplays(), display)?.deviceName ?? '';
+});
+
+/** Reply to `ss:approved-device`: the ONE device name the preload may capture natively. */
+ipcMain.on('ss:approved-device', (event) => {
+  event.returnValue = isInternalUrl(event.senderFrame?.url ?? '') ? approvedDeviceName : '';
 });
 
 // Decision: close = quit. No tray, no background — including on macOS, against its usual

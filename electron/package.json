@@ -14,8 +14,9 @@
     "start": "pnpm build && electron .",
     "typecheck": "tsc --noEmit",
     "test": "node --test src/config.test.ts",
-    "dist": "pnpm build && electron-builder --publish never",
-    "release": "pnpm build && electron-builder --publish always"
+    "dist": "pnpm build && pnpm build:native && electron-builder --publish never",
+    "release": "pnpm build && pnpm build:native && electron-builder --publish always",
+    "//dist": "build:native is not optional here: electron-builder copies native/build/Release/streamshare_capture.node as an extraResource, and a clean checkout has never built it. Without this the installer ships without HDR and says nothing."
   },
   "dependencies": {
     "electron-updater": "^6.3.9",
