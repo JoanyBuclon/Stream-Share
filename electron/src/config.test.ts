@@ -1,6 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseAudioApps, createWakeLockToggle, nativeDisplayFor, type PowerBlocker, type NativeDisplay } from './config.ts';
+import {
+  parseAudioApps,
+  createWakeLockToggle,
+  nativeDisplayFor,
+  rendererSecurity,
+  type PowerBlocker,
+  type NativeDisplay,
+} from './config.ts';
 
 // The wake-lock bookkeeping fails silently by construction: get it wrong and the only symptom is a
 // machine that stopped sleeping, with nothing on screen tying it back to us. Hence tests on ten
@@ -166,4 +173,15 @@ test('nativeDisplayFor: tolère un pixel d écart, et rend null sans corresponda
   assert.equal(nativeDisplayFor([], { bounds: { x: 0, y: 0, width: 1, height: 1 }, scaleFactor: 1 }), null);
   // scaleFactor 0 ne doit pas écraser toutes les origines sur 0 et faire matcher le premier écran.
   assert.equal(nativeDisplayFor(DISPLAYS, { bounds: { x: 2560, y: 0, width: 1920, height: 1080 }, scaleFactor: 0 })?.deviceName, String.raw`\\.\DISPLAY5`);
+});
+
+// The renderer's sandbox is OFF (so the HDR addon can run in the preload), which promotes the other
+// two flags from Electron defaults to the last thing standing between a hostile SDP and Node. This
+// test exists to make a future "just flip contextIsolation to debug something" loud.
+test('rendererSecurity: sandbox off, mais isolation et nodeIntegration verrouillés', () => {
+  const prefs = rendererSecurity('C:/app/preload.cjs');
+  assert.equal(prefs.preload, 'C:/app/preload.cjs');
+  assert.equal(prefs.sandbox, false, 'délibéré : l addon HDR tourne dans le preload');
+  assert.equal(prefs.contextIsolation, true, 'sans bac à sable, c est ce qui sépare le preload de la page');
+  assert.equal(prefs.nodeIntegration, false, 'sinon la page — et notre CSP a unsafe-inline — obtient Node');
 });

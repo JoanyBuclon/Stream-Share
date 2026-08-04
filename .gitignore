@@ -8,6 +8,11 @@ test-results/
 playwright-report/
 .playwright/
 
+# measurement output (tools/wgc-latency.cjs, tools/hdr-acceptance.mjs)
+tools/*.json
+tools/*.bmp
+hdr-*.jpg
+
 # dependencies
 node_modules/
 

@@ -475,20 +475,133 @@ identiques partagent une taille. Extraite et testée parce que son mode de panne
 **silencieux** : rendre `null` pour un écran réellement en HDR laisserait l'app sur
 le chemin clampé, avec un sélecteur d'apparence normale et aucune erreur nulle part.
 
-> ⚠️ `sdrWhiteNits` est **codé en dur à 80** et ment dès que l'utilisateur touche le
-> curseur de luminosité SDR de Windows. C'est la valeur que le tone-map doit viser.
-> Vraie source : `DisplayConfigGetDeviceInfo` /
-> `DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL`. Le champ existe pour que
-> l'interface ne bouge pas quand il sera branché.
+Deuxième pièce, la **capture** : `Direct3D11CaptureFramePool::CreateFreeThreaded`
+en `R16G16B16A16Float` (scRGB — les hautes lumières arrivent **au-dessus de 1.0** au
+lieu d'être clampées), tone-map en HLSL sur le GPU, readback BGRA8. Le pool
+free-threaded livre sur un thread du pool WinRT, ce qui évite d'avoir à faire tourner
+un `DispatcherQueue`.
+
+**Et c'est la contrainte structurante de ce fichier.** `ID3D11DeviceContext` n'est
+pas thread-safe (le *device* l'est, le contexte immédiat non), rien ne promet que
+deux `FrameArrived` ne se chevauchent pas, et `stopCapture()` arrive du thread JS
+pendant tout ça. Retirer le handler arrête les **nouvelles** livraisons ; ça ne
+**joint** pas celui qui tourne déjà, et ça ne débloque surtout pas celui qui attend
+dans `Map()`. Libérer le device sous ses pieds est un use-after-free avec une
+fenêtre assez large pour toucher un utilisateur et assez étroite pour manquer un
+banc. Donc : un mutex sérialise **tout** le chemin de frame et la destruction, et
+`Stop()` retire le handler **avant** de prendre le verrou — c'est le verrou qui
+attend la frame en vol, et le prendre d'abord se bloquerait contre elle.
+Les statistiques ont leur propre verrou, pour que les lire ne freine jamais la
+capture.
+
+Deux détails qui se voient à l'image : la texture du pool est seulement **au moins**
+aussi grande que le contenu, donc le shader échantillonne un sous-rect (sinon
+l'image s'étire entre un changement de résolution et le `Recreate` qui suit — c'est
+-à-dire pile quand un jeu passe en plein écran) ; et `sdrWhiteNits` est accompagné
+de `sdrWhiteMeasured`, parce que le repli à 80 est un nombre parfaitement crédible
+et que rien ne distinguerait sinon une mesure d'un échec de lecture.
+
+##### Les portes, mesurées (`tools/wgc-latency.cjs`)
+
+La sonde **sort en code non nul** si une porte lâche. Deux propriétés sans
+lesquelles ce ne serait qu'un rapport :
+
+1. **L'absence de donnée échoue.** La première version faisait l'inverse : sans
+   aucune frame, `gpuAvg + copyAvg` valait 0 (sous le budget), `failed` valait 0
+   et `!image` court-circuitait l'écrêtage à `true`. Trois feux verts sur une
+   capture vide — et c'est exactement le run qu'elle a validé une fois.
+2. **La sonde crée son propre mouvement.** WGC ne livre que sur changement : sur
+   un bureau immobile on mesure ~24 fps, parfois 0,2. Elle ouvre donc une petite
+   fenêtre qui repeint à la fréquence de l'écran, en gris sombres pour ne pas
+   polluer les statistiques de hautes lumières.
+
+Mesuré sur **255 frames à 51 fps**, écran 2560×1440 HDR :
+
+| Porte | Seuil | Mesuré |
+| ----- | ----- | ------ |
+| Assez de frames pour conclure | ≥ 20/s | **255 en 5 s** |
+| Écran réellement en HDR | vrai | `\\.\DISPLAY1` |
+| **Pire** frame dans le budget | < 16,7 ms | **10,81 ms** (moyenne 7,51) |
+| Échecs du chemin GPU | 0 | **0** |
+| Frame sautée par le pool (`gap`) | ≤ 40 ms | **20,9 ms** |
+| Hautes lumières écrêtées | ~0 % | **0 %** |
+| Détail des hautes lumières | ≥ 8 valeurs | **10** sur 157 906 px |
+| Survit à un `stop()` en pleine frame | 8/8 | **8/8** |
+
+La porte du budget prend le **maximum**, pas la moyenne : un budget par frame se
+viole avec une seule frame à 40 ms, et une moyenne l'efface.
+
+La dernière porte vise le use-after-free décrit plus haut : elle arrête la capture
+à huit instants différents pendant que les frames arrivent, et appelle `stop()` deux
+fois. Son symptôme d'échec n'est pas une assertion, c'est un process mort — pas de
+JSON, pas de verdict.
+
+Et l'ensemble est falsifiable, vérifié en le cassant : `SS_SDR=80` (le mauvais blanc
+SDR) donne **70,2 % d'écrêtage** et un code de sortie 1.
+
+> **Ce que ces chiffres ne disent pas.** Le GPU est par ailleurs oisif : personne
+> ne joue pendant la mesure. Or le seul contexte où quelqu'un a du HDR à partager
+> est précisément un GPU chargé, et `Map()` y attend derrière le travail du jeu.
+> Le « il reste ~6 ms pour l'encodeur » ne suit que si capture et encodage sont
+> concurrents — ce que rien ici ne mesure encore. La porte reste utile (elle échoue
+> si le chemin GPU se dégrade), elle n'est pas une garantie de fluidité en jeu.
+
+> **« 0 % d'écrêtage » seul ne prouve presque rien.** L'épaule est asymptotique :
+> pour sortir 255 il faut ~1,96× le blanc SDR, soit 940 nits sur une dalle qui
+> plafonne à 760. N'importe quelle courbe compressive monotone passerait cette
+> porte, y compris une qui écrase toutes les hautes lumières sur deux valeurs.
+> C'est `distinctHighlightLuma` qui départage — d'où la dernière ligne du tableau.
+
+##### Le niveau de blanc SDR : le placeholder mentait de 6×
+
+`sdrWhiteNits` n'est plus codé en dur. Il vient de `DisplayConfigGetDeviceInfo` /
+`DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL` — DXGI ne le donne pas, et il faut
+traduire un nom GDI en couple adaptateur/cible pour l'obtenir. Sur la machine de
+dev il vaut **480 nits**, pas 80. Ce n'est pas un détail de calibration, c'est le
+diviseur dont dépend toute la courbe :
+
+| Blanc SDR utilisé | Écrêtage | Luma max |
+| ----------------- | -------- | -------- |
+| 80 (l'ancien placeholder) | **70,1 %** | 255 |
+| 160 | 41,2 % | 255 |
+| **480 (mesuré)** | **0 %** | 244 |
+
+##### La courbe : épaule exponentielle, pas Reinhard
+
+Premier jet en Reinhard étendu. Mesure : blanc SDR rendu à **219 au lieu de 255**,
+luma moyenne 11. Reinhard est un opérateur *scene-referred* — il assombrit les 99 %
+de l'image qui n'ont jamais été HDR pour faire de la place aux 1 % qui le sont.
+
+Remplacé par `1 - (1-k)·exp(-(c-k)/(1-k))` au-dessus d'un genou fixe à 0,75 :
+identité en dessous (un bureau SDR fait un aller-retour **inchangé**), asymptote
+vers 1 au-dessus, et C¹ au genou donc aucune bande visible. Face au pilote OBS que
+l'utilisateur avait validé : même 0 % d'écrêtage, **plus** de plage haute conservée
+(luma max 244 contre 209) et, contrairement à OBS, les noirs ne sont **pas**
+remontés.
+
+> Ce que la sonde ne dit pas : le genou à 0,75 et le blanc SDR restent des réglages
+> qu'aucune mesure ne peut trancher à la place d'un œil. Le curseur de blanc SDR
+> dans la modale de réglages reste à faire.
 
 **Ce qui reste vrai et non mesuré**, pour la suite du chantier natif :
 
-- **La latence**, le seul risque des trois qui reste entier. GPU → readback CPU →
-  `VideoFrame` → ré-upload GPU par l'encodeur : des pixels déjà sur le GPU en
-  redescendent et y remontent. Le readback (`Map` sur une staging texture) **bloque**
-  sans double-buffer + fence. Seuil posé avant de coder : au-delà d'**une frame à
-  60 Hz** ajoutée, la brique casse la fluidité qu'elle prétend préserver, et on
-  s'arrête — pas « on verra à l'optimisation ».
+- **La sortie vers l'encodeur.** Le readback produit du BGRA8 en mémoire ; il reste
+  à le faire entrer dans un `MediaStreamTrackGenerator` depuis le preload, et à
+  vérifier que cette track-là atteint bien NVENC (G1 l'a montré sur une source
+  WebGL, pas sur celle-ci).
+- **WGC ne livre que sur changement.** Un bureau immobile rend ~24 fps, et 0,2 fps
+  quand plus rien ne bouge. C'est une qualité (aucun encodage gaspillé) mais le
+  chemin natif doit répéter la dernière frame si l'encodeur a besoin d'une cadence.
+- **Le chemin GPU sous charge réelle.** Voir l'encadré du tableau : tout est mesuré
+  GPU oisif.
+- **`startCapture` bloque 171 ms** (device D3D, deux compilations HLSL au runtime,
+  pool, session). Dans le preload c'est le thread du renderer, donc le clic sur
+  « partager » les paiera. À passer en `napi_async_work`, ou à précompiler les
+  shaders avec `fxc` au build.
+- **Le repli quand l'item se ferme.** `GraphicsCaptureItem::Closed` est abonné et
+  remonte dans `captureStats().closed` (écran débranché, session RDP, HDR coupé au
+  `Win+Alt+B`), mais personne ne le consomme encore — il faudra rebasculer sur
+  `getDisplayMedia` à ce moment-là.
 - **La maintenance.** `loopback-capture` (audio) est le problème de quelqu'un
   d'autre ; celui-ci est le nôtre : node-gyp en CI, prebuilds, un pin d'ABI à chaque
   majeure d'Electron. Et le `--target` du script de build doit suivre la
@@ -496,8 +609,6 @@ le chemin clampé, avec un sélecteur d'apparence normale et aucune erreur nulle
 - **WGC est Windows-only.** Cette brique est 100 % non portable ; la seconde moitié
   de la phase 3 (macOS/Linux) repart de zéro là-dessus — ce n'est pas un addon qu'on
   construit, c'est le gabarit de trois.
-- **WGC est Windows-only.** Cette brique est 100 % non portable ; la seconde moitié
-  de la phase 3 (macOS/Linux) repart de zéro là-dessus.
 
 ### Confort système
 
@@ -740,6 +851,13 @@ sont dans `electron/src/main.ts`, commentés sur place.
   `explorer.exe`. Diagnostic : comparer la cible et l'`AppUserModelId` des `.lnk` de
   `%APPDATA%\Microsoft\Windows\Start Menu\Programs` — l'exe installé, lui, porte son
   icône et son `ProductName` en interne et se vérifie indépendamment.
+- **`sandbox: false`, et les deux autres drapeaux deviennent porteurs.** Le bac à
+  sable OS du renderer est retiré depuis le 2026-08-03 pour que l'addon HDR tourne
+  dans le preload (mesure et raisonnement : § Les portes du chantier natif). Les
+  quatre `webPreferences` vivent donc dans `rendererSecurity` (`config.ts`), avec un
+  test : `contextIsolation` et `nodeIntegration` n'étaient que des défauts d'Electron,
+  ils sont désormais **la dernière barrière** entre un SDP hostile et Node. Vérifié
+  sur la coquille : `window.native` répond, et la page n'a ni `require` ni `process`.
 - **Le scheme privilégié conditionne `localStorage`.** Il est enregistré `standard`
   + `secure` avant `app.ready` pour que l'origine ne soit pas opaque ; sans ça,
   `getDisplayMedia`, le presse-papiers **et le stockage** tombent. Les réglages

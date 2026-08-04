@@ -34,6 +34,39 @@ export function createWakeLockToggle(blocker: PowerBlocker): (on: boolean) => vo
   };
 }
 
+/** The security-relevant slice of Electron's webPreferences. Named so the invariant below has
+ *  something to be checked against. */
+export interface RendererSecurity {
+  preload: string;
+  contextIsolation: boolean;
+  nodeIntegration: boolean;
+  sandbox: boolean;
+}
+
+/**
+ * How the renderer is locked down. A function with a test, not four literals inline, because one of
+ * the three flags is deliberately OFF and the other two are now load-bearing because of it.
+ *
+ * **`sandbox: false` is a decision, taken 2026-08-03, and it is not free.** The HDR capture addon
+ * has to hand raw frames to the renderer, and measurement settled where it can live: Electron's IPC
+ * tops out around 102 MB/s, while 1080p60 NV12 needs 187 — so a main-process addon would cap native
+ * capture at 720p60 or 1080p30, i.e. *less fluid than the getDisplayMedia path it replaces*
+ * (measured at 119 fps in 1080p). Running the addon in the preload removes the boundary entirely.
+ *
+ * What that costs, stated plainly: the renderer loses its OS sandbox. The page is not the vector —
+ * it only ever loads our own bundle over app://, navigation is locked by isInternalUrl, and every
+ * external link opens in the system browser. The vector is what the renderer *parses*: SDP, ICE
+ * candidates and `control` messages arriving from arbitrary viewers over WebRTC.
+ *
+ * Which is exactly why the other two flags stop being defaults and become the last line: with the
+ * sandbox off, `contextIsolation: false` or `nodeIntegration: true` would hand that same parser's
+ * process full Node to the page's main world — and our CSP still carries `unsafe-inline`. Flipping
+ * either is what this function exists to make loud instead of silent.
+ */
+export function rendererSecurity(preload: string): RendererSecurity {
+  return { preload, contextIsolation: true, nodeIntegration: false, sandbox: false };
+}
+
 /** One display as the native addon reports it (see electron/native/src/addon.cc). Coordinates are
  *  PHYSICAL pixels; `hdr` is the compositor's live state, not the panel's capability. */
 export interface NativeDisplay {

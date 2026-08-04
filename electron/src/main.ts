@@ -25,6 +25,7 @@ import {
   hwndFromSourceId,
   createWakeLockToggle,
   nativeDisplayFor,
+  rendererSecurity,
   type AudioApp,
   type NativeDisplay,
 } from './config.ts';
@@ -105,12 +106,10 @@ function createWindow(): void {
     // build/icon.png). Unpackaged (`pnpm desktop`) there is no such resource, so point at the same
     // source file or the run shows Electron's default icon.
     ...(app.isPackaged ? {} : { icon: path.join(__dirname, '..', 'build', 'icon.png') }),
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.cjs'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-    },
+    // Deliberately not spelled out here: the three flags form one invariant (sandbox is off so the
+    // HDR addon can run in the preload, which makes the other two load-bearing). config.ts holds
+    // the reasoning and a test that fails if any of them moves.
+    webPreferences: rendererSecurity(path.join(__dirname, 'preload.cjs')),
   });
 
   // In-app navigation stays within our bundled content; every external link opens in the
