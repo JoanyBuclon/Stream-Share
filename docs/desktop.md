@@ -712,15 +712,27 @@ index `screen:N:0` ne désigne pas forcément le même moniteur une fois qu'un �
 parti. Pas sur `display-metrics-changed`, qui se déclenche aussi pour un changement de
 zone de travail : les ids nomment toujours les mêmes panneaux.
 
-> Couverture : `pickerSources` et `approvedDeviceFor` sont testées unitairement
+> Couverture unitaire : `pickerSources` et `approvedDeviceFor`
 > (`electron/src/config.test.ts`) — le HDR par source, la table réduite aux écrans HDR
 > appariés, une fenêtre qui rapporterait un écran, un id jamais listé, une liste
-> invalidée. Ce que ça ne couvre pas : **le câblage IPC**, qui reste le point aveugle
-> du projet — rien ne chargeait `electron/src/main.ts`, et c'est ce qui a laissé passer
-> un `screen.on()` au niveau module (interdit avant `app.ready`) : suite verte,
-> application morte au lancement. D'où `tools/main-boots.cjs`, qui charge le vrai
-> bundle sous Electron et vérifie qu'une fenêtre s'ouvre sur `app://`. Vérifié capable
-> d'échouer en réintroduisant le bug.
+> invalidée.
+
+**Et le câblage, lui, est enfin exercé.** C'était le point aveugle du projet : rien ne
+chargeait `electron/src/main.ts`, ce qui a laissé passer un `screen.on()` au niveau
+module (interdit avant `app.ready`) — suite entièrement verte, application morte au
+lancement. Deux scripts comblent ça, tous deux sur le **vrai** bundle sous Electron :
+
+- **`tools/main-boots.cjs`** — l'app démarre-t-elle ? Charge `out/main.cjs`, attend une
+  fenêtre sur `app://`. Vérifié capable d'échouer en réintroduisant le bug.
+- **`tools/consent-gate.cjs`** — 10 portes qui pilotent la vraie page à travers le vrai
+  preload : refus sans choix, refus sur un id jamais listé, refus sur une fenêtre,
+  refus après rechargement, aucun nom DXGI dans le payload, et surtout **un écran HDR
+  qui démarre pour de bon** (68 frames, 2560×1440, `closed=false`). Une porte de refus
+  passe au vert pour n'importe quelle raison, donc la suite a été mutation-testée : en
+  faisant approuver n'importe quel id, exactement les deux portes concernées tombent.
+  Ce test a d'ailleurs trouvé un défaut dans lui-même — une capture laissée en cours
+  fait répondre « capture already running » aux étapes suivantes, ce qui se lit comme
+  un refus ; chaque tentative nettoie maintenant derrière elle.
 
 #### Branché dans le produit
 
@@ -729,10 +741,12 @@ zone de travail : les ids nomment toujours les mêmes panneaux.
 plutôt que par l'intuition :
 
 - **Le cap de résolution ne s'appliquait pas.** `getSettings()` sur une track générée
-  rend `{deviceId, resizeMode}` — ni largeur ni hauteur. `applyVideoQualityTo` lisait
-  donc 0, `effectiveScale` rendait 1, et toute l'échelle ne faisait **rien**. La
-  hauteur vient maintenant de la première frame reçue : `videoHeight` du `<video>`
-  serait arrivé un événement trop tard, après le premier `applyVideoQualityAll()`.
+  rend `{deviceId, resizeMode}` — ni largeur ni hauteur — **tant qu'aucune frame n'y a
+  été écrite**. Elle finit par rapporter `width`/`height`/`frameRate` (mesuré dans
+  l'app en marche : 2560×1440 à 2,07 fps), mais trop tard : `applyVideoQualityTo`
+  s'exécute avant la première frame, lisait donc 0, `effectiveScale` rendait 1, et
+  toute l'échelle ne faisait **rien**. La hauteur vient maintenant de la première frame
+  reçue ; `videoHeight` du `<video>` serait arrivé un événement trop tard lui aussi.
 - **Le cap de fps ne peut pas passer par `applyConstraints`** — la track le refuse
   (`OverconstrainedError`). Il vit dans l'addon, avant le tone-map : une frame
   refusée ne coûte ni GPU ni readback. Mesuré : 9/s pour un cap à 10, 84 refusées.

@@ -483,11 +483,12 @@ export class HostController {
   // Applies the host cap AND this viewer's requested tier (the more aggressive downscale wins).
   private applyVideoQualityTo(entry: ViewerEntry): void {
     if (!entry.peer) return;
-    // `sourceHeight()`, not `getSettings().height`: a MediaStreamTrackGenerator reports neither
-    // width nor height (measured — its settings are `{deviceId, resizeMode}` and nothing else), so
-    // reading the track directly yielded 0 on the native path, effectiveScale returned 1, and the
-    // whole resolution ladder silently did nothing. sourceHeight() falls back to the preview
-    // element's videoHeight, which is populated for any track that renders.
+    // `sourceHeight()`, not `getSettings().height`: a MediaStreamTrackGenerator answers
+    // `{deviceId, resizeMode}` and nothing else until frames have been written to it (measured at
+    // creation; it does report dimensions later, measured in the running app). This runs first —
+    // before any frame — so reading the track directly yielded 0 on the native path, effectiveScale
+    // returned 1, and the whole resolution ladder silently did nothing. sourceHeight() falls back to
+    // the preview element's videoHeight, which is populated for any track that renders.
     const height = this.sourceHeight();
     void entry.peer.setVideoParameters({
       maxBitrate: maxBitrateBps(this.quality.bitrate),

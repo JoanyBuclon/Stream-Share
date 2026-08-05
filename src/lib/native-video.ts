@@ -24,9 +24,13 @@ export interface NativeCapture {
   /** Cap the capture rate; 0 means uncapped. Goes to the addon, which refuses frames before the
    *  tone map — the generated track rejects `applyConstraints` outright. */
   setFps(fps: number): void;
-  /** Height of the frames actually arriving, or 0 before the first one. The generated track reports
-   *  NO dimensions at all (getSettings() is {deviceId, resizeMode}), so this is the only source of
-   *  truth the quality ladder has that does not depend on a <video> element having rendered. */
+  /** Height of the frames actually arriving, or 0 before the first one.
+   *
+   *  The generated track cannot answer this when it matters: `getSettings()` is
+   *  `{deviceId, resizeMode}` until frames have been written to it (measured at creation), and only
+   *  then picks up width/height/frameRate (measured in the running app). The quality ladder runs its
+   *  first pass before any frame exists, so this is the only source of truth it has that does not
+   *  depend on a <video> element having rendered. */
   height(): number;
   stop(): void;
 }
