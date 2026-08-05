@@ -11,6 +11,7 @@ import { createWakeLock } from './wakelock.ts';
 import { reconcileRoster } from './roster.ts';
 import { el, hook, show, hide, setText, initials } from './dom.ts';
 import { pickSource, cameraDeviceId } from './source-picker.ts';
+import { captureNative, canCaptureNative, type NativeCapture } from './native-video.ts';
 import { NativeAudio } from './native-audio.ts';
 import {
   applyPreset,
@@ -30,6 +31,17 @@ import {
   type ResolutionTarget,
   type ViewerTier,
 } from './settings.ts';
+
+/** Left to its defaults, the browser runs its voice-tuned processing (AGC / noise suppression /
+ *  echo cancellation) on tab & screen audio: it downmixes to mono and mangles music and games.
+ *  Off + explicit stereo 48 kHz = the raw capture. The mic keeps its processing (cf. AudioMixer). */
+const SYSTEM_AUDIO_CONSTRAINTS: MediaTrackConstraints = {
+  echoCancellation: false,
+  noiseSuppression: false,
+  autoGainControl: false,
+  channelCount: 2,
+  sampleRate: 48000,
+};
 
 /** Screen capture only exists on desktop browsers — mobile has no getDisplayMedia at all. */
 export const supportsDisplayMedia = (): boolean => typeof navigator.mediaDevices?.getDisplayMedia === 'function';
@@ -54,6 +66,9 @@ export class HostController {
   private readonly hostToken: string;
   private config: RTCConfiguration;
   private readonly onEnd: () => void;
+  // The live native HDR capture, when that path is the one running. Held because it owns a WGC
+  // session and a frame port that nothing else can reach to shut down.
+  private nativeCapture: NativeCapture | null = null;
   private stream: MediaStream | null = null; // raw capture (video + system audio), used for the preview
   private outgoing: MediaStream | null = null; // what peers receive (video + processed audio)
   private paused = false; // when true, buildOutgoing drops the video track
@@ -199,22 +214,103 @@ export class HostController {
    *  display surface, so they come through getUserMedia. Everything downstream — setStream, the
    *  quality ladder, the peers — treats the result as any other MediaStream. */
   private async capture(source?: NativeSource): Promise<void> {
+    // Every source change starts by ending the native session, whatever the new source turns out
+    // to be. Only one WGC session can exist at a time (the addon throws "capture already running"),
+    // and switching from an HDR screen to anything else would otherwise leave it feeding a track
+    // that has been replaced. One place, so no branch can forget.
+    this.stopNative();
     const deviceId = source ? cameraDeviceId(source.id) : null;
     if (deviceId) return this.captureCamera(deviceId);
+    if (source?.hdr && source.deviceName && canCaptureNative()) return this.captureHdr(source);
+    return this.captureDisplay();
+  }
+
+  /** The path that has always shipped: whatever `getDisplayMedia` resolves the request to. */
+  private async captureDisplay(): Promise<void> {
     const constraints: DisplayMediaStreamOptions = {
       video: { frameRate: { ideal: this.quality.fps } },
-      // Left to its defaults, the browser runs its voice-tuned processing (AGC / noise suppression /
-      // echo cancellation) on tab & screen audio: it downmixes to mono and mangles music and games.
-      // Off + explicit stereo 48 kHz = the raw capture. The mic keeps its processing (cf. AudioMixer).
-      audio: this.quality.systemAudio
-        ? { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, sampleRate: 48000 }
-        : false,
+      audio: this.quality.systemAudio ? SYSTEM_AUDIO_CONSTRAINTS : false,
     };
     const stream = await navigator.mediaDevices.getDisplayMedia(constraints);
     // The prompt can resolve after the controller was destroyed (Stop/leave while it was open):
     // don't run setStream on a torn-down controller — it would repaint the DOM and recreate peers.
     if (this.ac.signal.aborted) return void stream.getTracks().forEach((t) => t.stop());
     await this.setStream(stream);
+  }
+
+  /**
+   * A screen that is in HDR mode right now, captured natively.
+   *
+   * Why this path exists at all: Chromium's `getDisplayMedia` clamps HDR to [0,1] on the way in, so
+   * highlights arrive already destroyed — 81.1% of them crushed to pure white, measured. The shell
+   * captures in scRGB float and tone-maps on the GPU instead (docs/desktop.md § HDR).
+   *
+   * It produces VIDEO ONLY, so system audio is fetched separately and its video sibling dropped:
+   * turning HDR on must not silently mute the share. That a loopback track stays live and unmuted
+   * after its video sibling is stopped was measured in the harness, on localhost, against the
+   * harness's own request handler — NOT in the packaged app under app://.
+   *
+   * Order matters here. The audio is fetched FIRST: `getDisplayMedia` needs transient user
+   * activation (~5 s from the click), and `startNativeCapture` is synchronous C++ that compiles a
+   * shader and spins up a D3D device — on a cold machine that alone can eat the window. Asking for
+   * audio after it would fail on exactly the machines this feature targets.
+   *
+   * Any failure falls back to `getDisplayMedia`. A washed-out picture is a bad day; a screen-share
+   * button that does nothing because a C++ addon misbehaved is a broken product.
+   */
+  private async captureHdr(source: NativeSource): Promise<void> {
+    // Before the native start, while the click is still fresh — see the note above.
+    const audio = this.quality.systemAudio ? await this.loopbackAudioTrack() : null;
+    if (this.ac.signal.aborted) return audio?.stop();
+
+    let capture: NativeCapture;
+    try {
+      capture = await captureNative(
+        source.deviceName,
+        // Only when it was really read: the 80-nit fallback is a plausible-looking number that
+        // would make the tone map wrong by up to 6x, and the addon's own default is the same value.
+        source.sdrWhiteMeasured ? source.sdrWhiteNits : undefined,
+        this.quality.fps,
+      );
+    } catch (e) {
+      audio?.stop();
+      // The capture may have started before whatever failed; nothing else can reach it now.
+      window.native?.stopNativeCapture?.();
+      console.error('stream-share: native HDR capture failed, falling back to getDisplayMedia', e);
+      return this.captureDisplay();
+    }
+    if (this.ac.signal.aborted) {
+      audio?.stop();
+      return capture.stop();
+    }
+    // Only now, at the commit point, does the session become the controller's — and it is handed to
+    // setStream rather than assigned here, so `nativeCapture` swaps in the same place the old
+    // stream is stopped. Assigning it after an await was a real leak: destroy() ran in that window,
+    // found null, stopped nothing, and the WGC session outlived the app's own teardown.
+    await this.setStream(new MediaStream(audio ? [capture.track, audio] : [capture.track]), capture);
+  }
+
+  /** The system-audio track alone: ask for the usual A/V capture, keep the audio, drop the video.
+   *  Returns null rather than throwing — losing sound is a degradation, not a reason to abandon a
+   *  capture that is otherwise fine — but the toggle is turned off so the panel cannot claim sound
+   *  the viewers are not getting. */
+  private async loopbackAudioTrack(): Promise<MediaStreamTrack | null> {
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: true, // Chromium refuses an audio-only getDisplayMedia; the track is stopped below
+        audio: SYSTEM_AUDIO_CONSTRAINTS,
+      });
+      stream.getVideoTracks().forEach((t) => t.stop());
+      const track = stream.getAudioTracks()[0] ?? null;
+      if (track) return track;
+    } catch (e) {
+      console.error('stream-share: no system audio alongside the native capture', e);
+    }
+    // Same rule buildOutgoing applies when the mic is denied: the UI must not show a source the
+    // session does not have.
+    this.quality = { ...this.quality, systemAudio: false };
+    setText('settings-source-hint', 'shared in HDR, but system audio could not start');
+    return null;
   }
 
   /** A video input as the shared source — today, the HDR pilot's OBS Virtual Camera.
@@ -233,8 +329,14 @@ export class HostController {
     await this.setStream(stream);
   }
 
-  private setStream = async (capture: MediaStream): Promise<void> => {
+  /** `native` is the WGC session backing `capture`, when there is one. Swapped HERE rather than by
+   *  the caller, so that "the new source is committed" and "the old source dies" stay one event: a
+   *  capture that fails on the way in must leave the previous share running, not frozen — and a
+   *  session assigned before an await is a session `destroy()` cannot find. */
+  private setStream = async (capture: MediaStream, native: NativeCapture | null = null): Promise<void> => {
     const previous = this.stream;
+    const previousNative = this.nativeCapture;
+    this.nativeCapture = native;
     this.stream = capture;
     const video = capture.getVideoTracks()[0];
     if (video) {
@@ -262,6 +364,9 @@ export class HostController {
       for (const [peerId, entry] of this.viewers) if (!entry.peer) this.offerTo(peerId, entry);
       this.applyVideoQualityAll(); // existing viewers: re-apply with the new source's height
     } finally {
+      // The old session first: stopping only its track would leave WGC running and the frame port
+      // open, feeding a track nothing reads.
+      previousNative?.stop();
       previous?.getTracks().forEach((t) => t.stop()); // stop the old source even if the rebuild failed
       this.renderSettings();
       this.renderPause(); // a source change during a pause must keep the paused stage/badges
@@ -348,6 +453,7 @@ export class HostController {
 
   private togglePause = async (): Promise<void> => {
     this.paused = !this.paused;
+    this.applyPauseToNative();
     await this.pushOutgoing(); // rebuild outgoing (video gated by `paused`) + hot-swap all peers
     for (const peerId of this.viewers.keys()) this.sig.signal(peerId, { control: this.paused ? 'pause' : 'resume' });
     this.renderPause();
@@ -369,8 +475,12 @@ export class HostController {
   // Applies the host cap AND this viewer's requested tier (the more aggressive downscale wins).
   private applyVideoQualityTo(entry: ViewerEntry): void {
     if (!entry.peer) return;
-    // Re-read the height at apply time: getSettings().height can be 0 right after capture.
-    const height = this.stream?.getVideoTracks()[0]?.getSettings().height ?? 0;
+    // `sourceHeight()`, not `getSettings().height`: a MediaStreamTrackGenerator reports neither
+    // width nor height (measured — its settings are `{deviceId, resizeMode}` and nothing else), so
+    // reading the track directly yielded 0 on the native path, effectiveScale returned 1, and the
+    // whole resolution ladder silently did nothing. sourceHeight() falls back to the preview
+    // element's videoHeight, which is populated for any track that renders.
+    const height = this.sourceHeight();
     void entry.peer.setVideoParameters({
       maxBitrate: maxBitrateBps(this.quality.bitrate),
       scaleResolutionDownBy: effectiveScale(height, this.quality.resolution, entry.tier),
@@ -391,7 +501,16 @@ export class HostController {
   }
 
   private sourceHeight(): number {
-    return this.stream?.getVideoTracks()[0]?.getSettings().height || el<HTMLVideoElement>('host-video').videoHeight;
+    // The native capture first, and not as a nicety: a MediaStreamTrackGenerator reports no
+    // dimensions at all, and `videoHeight` is 0 until `loadedmetadata` — which fires AFTER the
+    // first applyVideoQualityAll(). Without this the first offer of every native share would go out
+    // uncapped at the panel's full resolution, whatever the host had selected, and self-correct a
+    // frame later for everyone except the viewer who joined in that window.
+    return (
+      this.nativeCapture?.height() ||
+      this.stream?.getVideoTracks()[0]?.getSettings().height ||
+      el<HTMLVideoElement>('host-video').videoHeight
+    );
   }
 
   // Once we know the source height: clamp the resolution cap to what the source can fill (so the
@@ -424,6 +543,10 @@ export class HostController {
   }
 
   private applyFps(): void {
+    // The native path first: a MediaStreamTrackGenerator rejects applyConstraints outright
+    // (OverconstrainedError, measured), so the cap has to reach the addon — where it is also worth
+    // more, since a refused frame costs no tone map and no readback.
+    if (this.nativeCapture) return this.nativeCapture.setFps(this.quality.fps);
     const video = this.stream?.getVideoTracks()[0];
     void video?.applyConstraints({ frameRate: { ideal: this.quality.fps } }).catch(() => {});
   }
@@ -885,8 +1008,22 @@ export class HostController {
   // (waiting) screen and the host returns to "choose source", able to pick a new source without
   // recreating the room. Wired to the Stop button and the track's `ended` (browser "Stop sharing",
   // or the shared window closing). Leaving the room for good goes through the brand logo (goHome).
+  /** End the native HDR session, if one is running. Stopping the generated track is not enough:
+   *  the WGC session and the frame port outlive it, producing frames nobody reads. */
+  /** Paused means nobody receives the video, but WGC, the tone map and the readback carry on at
+   *  full rate for nobody — ~7 ms of GPU per frame on a 4K HDR screen. The knob already exists. */
+  private applyPauseToNative(): void {
+    this.nativeCapture?.setFps(this.paused ? 1 : this.quality.fps);
+  }
+
+  private stopNative(): void {
+    this.nativeCapture?.stop();
+    this.nativeCapture = null;
+  }
+
   private stopSource = (): void => {
     if (!this.stream) return; // already sourceless
+    this.stopNative();
     this.stream.getTracks().forEach((t) => t.stop());
     this.stream = null;
     this.paused = false; // a fresh source starts live, not paused
@@ -952,6 +1089,7 @@ export class HostController {
     // and never stop. IPC is ordered, so this null reaches the handler first and cancels it.
     void window.native?.setAudioCapture(null);
     this.live = null;
+    this.stopNative();
     this.stream?.getTracks().forEach((t) => t.stop());
     this.stream = null;
     this.outgoing = null;

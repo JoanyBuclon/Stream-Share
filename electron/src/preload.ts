@@ -96,14 +96,14 @@ contextBridge.exposeInMainWorld('native', {
    *
    * The page must already be listening for `{ streamShare: 'frames' }` when it calls this.
    */
-  startNativeCapture: (deviceName: string, sdrWhiteNits?: number, knee?: number) => {
+  startNativeCapture: (deviceName: string, sdrWhiteNits?: number, knee?: number, fps?: number) => {
     if (!addon) throw new Error('native capture unavailable');
     // The consent gate for this path. `setDisplayMediaRequestHandler` — which main documents as THE
     // gate — is never consulted when frames come from the addon, so the device name is checked
     // against the last source the user actually confirmed in the picker.
     const approved = ipcRenderer.sendSync('ss:approved-device') as string;
     if (!approved || approved !== deviceName) throw new Error('that display was not picked by the user');
-    addon.startCapture(deviceName, sdrWhiteNits, knee, pushFrame);
+    addon.startCapture(deviceName, sdrWhiteNits, knee, pushFrame, fps);
     closeFramePort();
     const channel = new MessageChannel();
     framePort = channel.port1;
@@ -111,6 +111,7 @@ contextBridge.exposeInMainWorld('native', {
     // script that grabbed it first would both see every frame and strand the real consumer.
     window.postMessage({ streamShare: 'frames' }, location.origin, [channel.port2]);
   },
+  setCaptureFps: (fps: number) => addon?.setFps(fps),
   stopNativeCapture: () => {
     addon?.stopCapture();
     // Not optional: leaving the port open leaks it per session, and a later start would push 60

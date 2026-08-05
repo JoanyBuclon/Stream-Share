@@ -115,6 +115,10 @@ export async function fakeNative(page: Page, opts: { delaysMs?: number[]; fail?:
             // `unknown`, not `string`: the source list is no longer all strings since `hdr` landed.
             return (sources as Array<Record<string, unknown>>).map((s) => ({ ...s, thumbnail: px, icon: null }));
           },
+          // Explicit, not omitted: the suite exercises the getDisplayMedia path, and a future fake
+          // that returned true here would silently route every spec through the native branch —
+          // which needs a real addon, a MessagePort and VideoFrames that none of this provides.
+          canCaptureNative: () => false,
           selectSource: async (id: string) => {
             (window as unknown as { __picked?: string }).__picked = id;
           },

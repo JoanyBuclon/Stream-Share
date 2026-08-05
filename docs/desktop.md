@@ -677,12 +677,68 @@ confirmer dans le sélecteur.
 > `ss:select-source` (il faudrait tout le main process). Il n'est exercé qu'en
 > production.
 
+#### Branché dans le produit
+
+`capture()` route vers le natif quand l'écran choisi est en HDR, et retombe sur
+`getDisplayMedia` à la moindre erreur. Trois choses ont été décidées par la mesure
+plutôt que par l'intuition :
+
+- **Le cap de résolution ne s'appliquait pas.** `getSettings()` sur une track générée
+  rend `{deviceId, resizeMode}` — ni largeur ni hauteur. `applyVideoQualityTo` lisait
+  donc 0, `effectiveScale` rendait 1, et toute l'échelle ne faisait **rien**. La
+  hauteur vient maintenant de la première frame reçue : `videoHeight` du `<video>`
+  serait arrivé un événement trop tard, après le premier `applyVideoQualityAll()`.
+- **Le cap de fps ne peut pas passer par `applyConstraints`** — la track le refuse
+  (`OverconstrainedError`). Il vit dans l'addon, avant le tone-map : une frame
+  refusée ne coûte ni GPU ni readback. Mesuré : 9/s pour un cap à 10, 84 refusées.
+- **Le chemin natif ne produit que de la vidéo.** L'audio système est demandé
+  séparément, sa jumelle vidéo arrêtée — une piste loopback reste `live` et non mutée
+  après ça. Et la demande passe **avant** `startNativeCapture` : `getDisplayMedia`
+  exige une activation utilisateur transitoire, et démarrer l'addon (compilation du
+  shader, device D3D) est synchrone et peut manger la fenêtre sur une machine froide.
+
+##### Le répéteur, et ce qu'il a failli cacher
+
+WGC ne livre que sur changement. Sans rien, l'encodeur n'a pas d'entrée sur un écran
+immobile, ne peut pas répondre à une demande de keyframe, et **un viewer qui rejoint
+pendant que l'hôte lit un document reste sur du noir**. D'où une frame répétée toutes
+les 500 ms.
+
+Mais un répéteur sans limite rend une capture **morte** indistinguable d'un écran
+immobile : `Win+Alt+B` coupe le HDR, WGC s'arrête, et le flux continue d'afficher la
+dernière image avec des stats vertes et un badge « live ». Il s'arrête donc après 20
+répétitions consécutives, ou dès que l'addon signale `closed`, et termine la track —
+ce que `host.ts` écoute déjà comme « la source a disparu ».
+
+> Deux erreurs de conception attrapées en revue, toutes deux silencieuses : les frames
+> répétées portaient **le même timestamp** (rebasées sur une frame source qui ne bouge
+> pas), et la porte « écran immobile » passait au vert alors que le répéteur ne faisait
+> rien — un bureau réel n'est jamais parfaitement immobile. La porte compare maintenant
+> *encodées* et *capturées* : le surplus ne peut venir que des répétitions.
+
 **Ce qui reste vrai et non mesuré**, pour la suite du chantier natif :
 - **WGC ne livre que sur changement.** Un bureau immobile rend ~24 fps, et 0,2 fps
   quand plus rien ne bouge. C'est une qualité (aucun encodage gaspillé) mais le
   chemin natif doit répéter la dernière frame si l'encodeur a besoin d'une cadence.
 - **Le chemin GPU sous charge réelle.** Voir l'encadré du tableau : tout est mesuré
   GPU oisif.
+- **Le routage n'a aucune couverture automatisée.** `tools/native-track.cjs` prouve
+  la chaîne addon → track → encodeur, mais ne charge pas une ligne de `host.ts` ; et
+  l'e2e ne prend jamais la branche native (`canCaptureNative: () => false` dans le
+  faux shell, faute d'addon, de MessagePort et de `VideoFrame`). Donc `captureHdr`,
+  `loopbackAudioTrack`, le cycle de vie de `nativeCapture` et le repli de
+  `sourceHeight()` ne sont vérifiés que par revue et par essai manuel. Le chemin
+  praticable : un `fakeNative(page, { nativeCapture: true })` qui alimente un
+  MessagePort depuis un `captureStream` de canvas — ça couvre tout ce qui est
+  au-dessus du port, sans addon ni Electron.
+- **La porte de consentement du chemin natif n'est exercée qu'en production** : le
+  harness s'auto-approuve. Si `ss:select-source` n'arrive pas à relier l'id
+  `desktopCapturer` à une sortie DXGI, `startNativeCapture` refuse et on retombe sur
+  le chemin clampé — silencieusement, avec juste un `console.error`.
+- **Rallumer le son système après coup ne donne rien** (aucune piste audio dans le
+  flux natif). Comportement identique sur le chemin `getDisplayMedia`, donc
+  pré-existant — mais ici `loopbackAudioTrack()` existe déjà et rendrait le correctif
+  trivial.
 - **`startCapture` bloque 171 ms** (device D3D, deux compilations HLSL au runtime,
   pool, session). Dans le preload c'est le thread du renderer, donc le clic sur
   « partager » les paiera. À passer en `napi_async_work`, ou à précompiler les

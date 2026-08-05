@@ -15,7 +15,7 @@
 //   pnpm exec electron ../tools/native-track.cjs
 const fs = require('node:fs');
 const path = require('node:path');
-const { app, BrowserWindow, screen, ipcMain } = require('electron');
+const { app, BrowserWindow, screen, ipcMain, session, desktopCapturer } = require('electron');
 
 // The real preload asks main for this synchronously, before anything else. With no handler it gets
 // undefined, throws, and Electron fails the whole page load with a bare ERR_FAILED — which reads
@@ -27,6 +27,17 @@ let approved = '';
 ipcMain.on('ss:approved-device', (event) => { event.returnValue = approved; });
 ipcMain.on('ss:config', (event) => {
   event.returnValue = { appOrigin: process.env.SS_APP_ORIGIN || 'http://localhost:4321', packaged: false };
+});
+
+// Enough of main's consent gate to answer one question the routing work depends on: the native path
+// hands back video ONLY, so where does system audio come from? getDisplayMedia bundles a 'loopback'
+// track today, and this checks whether that audio survives stopping its video sibling.
+let audioProbeSource = null;
+app.whenReady().then(() => {
+  session.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
+    if (!audioProbeSource) return callback({});
+    callback({ video: audioProbeSource, audio: request.audioRequested ? 'loopback' : undefined });
+  });
 });
 
 const OUT = path.join(__dirname, 'native-track.json');
@@ -47,6 +58,7 @@ x.fillStyle='#3a3a44';x.fillRect((t%520)-40,0,40,270);requestAnimationFrame(f)})
 }
 
 const SCRIPT = (deviceName, sdrWhiteNits, seconds) => `(async () => {
+  const rtpIdOf = (stats) => { let id = null; stats.forEach((s) => { if (s.type === 'outbound-rtp' && s.kind === 'video') id = s.id; }); return id; };
   const DEVICE = ${JSON.stringify(deviceName)}, SDR_WHITE = ${sdrWhiteNits};
   const out = { deviceName: DEVICE, sdrWhiteNits: SDR_WHITE };
   try {
@@ -56,8 +68,21 @@ const SCRIPT = (deviceName, sdrWhiteNits, seconds) => `(async () => {
     if (!out.canCaptureNative) return JSON.stringify(out);
     out.h265Available = (RTCRtpSender.getCapabilities('video')?.codecs ?? []).some((c) => c.mimeType === 'video/H265');
 
-    const capture = await captureNative(DEVICE, SDR_WHITE, 0.75);
+    const capture = await captureNative(DEVICE, SDR_WHITE);
     out.trackReadyState = capture.track.readyState;
+
+    // What the generated track tells the rest of the app about itself. This decides where the
+    // quality settings have to be applied: host.ts caps resolution with scaleResolutionDownBy
+    // computed from getSettings().height, and caps fps with applyConstraints — neither of which a
+    // MediaStreamTrackGenerator is obliged to support. Reported, not gated: these are facts about
+    // the platform that the routing work needs, not pass/fail criteria.
+    out.trackFacts = { settings: capture.track.getSettings(), constraintsError: null, afterConstraints: null };
+    try {
+      await capture.track.applyConstraints({ frameRate: { max: 10 } });
+      out.trackFacts.afterConstraints = capture.track.getSettings();
+    } catch (err) {
+      out.trackFacts.constraintsError = String(err);
+    }
 
     // A loopback peer connection, the same shape host.ts builds per viewer. Without this the track
     // is never encoded and "it works" would mean "an object exists".
@@ -137,29 +162,115 @@ const SCRIPT = (deviceName, sdrWhiteNits, seconds) => `(async () => {
       powerEfficient: rtp?.powerEfficientEncoder ?? null,
       codec: (codec?.mimeType ?? '').replace(/^video\\//, ''),
     };
+    // Does loopback audio survive on its own? The native path produces no audio track, and turning
+    // HDR on must not silently kill the sound the getDisplayMedia path bundles for free.
+    try {
+      const withAudio = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, sampleRate: 48000 },
+      });
+      const a = withAudio.getAudioTracks()[0];
+      withAudio.getVideoTracks().forEach((t) => t.stop());
+      await new Promise((r) => setTimeout(r, 1200));
+      out.audioAlone = a
+        ? { readyState: a.readyState, muted: a.muted, enabled: a.enabled, label: a.label, settings: a.getSettings() }
+        : { none: true };
+      a?.stop();
+    } catch (err) {
+      out.audioAlone = { error: String(err) };
+    }
+
+    // The fps cap. It cannot go through applyConstraints (measured above), so it is enforced in
+    // the addon before any GPU work — which means the proof has to be that the DELIVERED rate
+    // actually falls and "skipped" climbs, not merely that a setter was called without throwing.
+    try {
+      const t0 = window.native.nativeCaptureStats();
+      capture.setFps(10);
+      await new Promise((r) => setTimeout(r, 2000));
+      const t1 = window.native.nativeCaptureStats();
+      out.fpsCap = {
+        deliveredPerSec: +(((t1.frames - t1.skipped) - (t0.frames - t0.skipped)) / 2).toFixed(1),
+        skippedDelta: t1.skipped - t0.skipped,
+      };
+      capture.setFps(0);
+    } catch (err) {
+      out.fpsCap = { error: String(err) };
+    }
+
+    // The still-screen repeater. The harness main process hides the mover for this window, so WGC
+    // stops producing (0.2 fps on an idle desktop, measured). Without the repeater the encoder gets
+    // nothing, cannot answer a keyframe request, and a viewer joining now would sit on black until
+    // the host moved something. What is asserted is that frames keep being ENCODED with no source
+    // activity — the addon's own counter deliberately does not move here.
+    // Stashed so the second script can pick the session up: only main can hide the mover, and the
+    // still-screen case has to be produced between two measurements. Hence two phases.
+    window.__ss = { capture, pc1, pc2, received: await received };
+
     out.droppedInPage = capture.droppedInPage();
     out.native = window.native.nativeCaptureStats();
     out.steady = { frames: out.native.frames - afterSetup.frames, dropped: out.native.dropped - afterSetup.dropped };
     out.duringSetup = { frames: afterSetup.frames, dropped: afterSetup.dropped };
+  } catch (err) {
+    out.error = String(err && err.stack ? err.stack : err);
+  }
+  return JSON.stringify(out);
+})()`;
+
+/**
+ * Phase two, run while main is hiding the mover: does anything still reach the encoder?
+ *
+ * WGC produces nothing on a still screen, so without the repeater in native-video.ts the encoder
+ * has no input, cannot answer a keyframe request, and a viewer joining right now would sit on black
+ * until the host moved something. `getDisplayMedia` does not behave that way, so the native path
+ * must not either. The native frame counter deliberately should NOT move here — that is the point.
+ */
+const IDLE = `(async () => {
+  const out = {};
+  try {
+    const rtpIdOf = (stats) => { let id = null; stats.forEach((s) => { if (s.type === 'outbound-rtp' && s.kind === 'video') id = s.id; }); return id; };
+    const encoded = async () => { const s = await window.__ss.pc1.getStats(); return s.get(rtpIdOf(s))?.framesEncoded ?? 0; };
+    await new Promise((r) => setTimeout(r, 800)); // let the last real frames drain
+    const before = await encoded();
+    const nativeBefore = window.native.nativeCaptureStats().frames;
+    await new Promise((r) => setTimeout(r, 2500));
+    out.encodedWhileStill = (await encoded()) - before;
+    // Repeated frames must carry INCREASING timestamps: rebasing them on the (unchanging) source
+    // frame produced identical ones, which an encoder is entitled to discard.
+    try {
+      const proc = new MediaStreamTrackProcessor({ track: window.__ss.received });
+      const reader = proc.readable.getReader();
+      const stamps = [];
+      for (let i = 0; i < 3; i++) { const { value } = await reader.read(); stamps.push(value.timestamp); value.close(); }
+      reader.cancel();
+      out.stamps = stamps;
+      out.stampsIncrease = stamps.every((v, i) => i === 0 || v > stamps[i - 1]);
+    } catch (err) { out.stampsError = String(err); }
+    out.nativeFramesWhileStill = window.native.nativeCaptureStats().frames - nativeBefore;
+  } catch (err) {
+    out.error = String(err);
+  }
+  return JSON.stringify(out);
+})()`;
+
+/** Phase three: shut down, then start again — "switch source", the flow real users hit. */
+const FINISH = (deviceName, sdrWhiteNits) => `(async () => {
+  const out = {};
+  try {
+    const { captureNative } = await import('/src/lib/native-video.ts');
+    const { capture, pc1, pc2 } = window.__ss;
     capture.stop();
     out.afterStop = { readyState: capture.track.readyState, running: window.native.nativeCaptureStats()?.running };
     pc1.close(); pc2.close();
-
-    // Restart, because "switch source" is the flow real users hit and no test ran it. The old
-    // two-call handshake closed the live frame port BEFORE the call that could fail, so a second
-    // capture threw "already running" and left the first one live and frozen. Happy paths never
+    // The old two-call handshake closed the live frame port BEFORE the call that could fail, so a
+    // second capture threw "already running" and left the first live and frozen. Happy paths never
     // saw it.
-    try {
-      const again = await captureNative(DEVICE, SDR_WHITE, 0.75);
-      await new Promise((r) => setTimeout(r, 800));
-      const s2 = window.native.nativeCaptureStats();
-      out.restart = { readyState: again.track.readyState, frames: s2.frames, running: s2.running };
-      again.stop();
-    } catch (err) {
-      out.restart = { error: String(err) };
-    }
+    const again = await captureNative(${JSON.stringify(deviceName)}, ${sdrWhiteNits});
+    await new Promise((r) => setTimeout(r, 800));
+    const s2 = window.native.nativeCaptureStats();
+    out.restart = { readyState: again.track.readyState, frames: s2.frames, running: s2.running };
+    again.stop();
   } catch (err) {
-    out.error = String(err && err.stack ? err.stack : err);
+    out.restart = { error: String(err) };
   }
   return JSON.stringify(out);
 })()`;
@@ -220,11 +331,25 @@ app.whenReady().then(async () => {
     await mover.loadURL(moverHtml());
     await new Promise((r) => setTimeout(r, 700));
 
-    const raced = await Promise.race([
-      win.webContents.executeJavaScript(SCRIPT(target.deviceName, target.sdrWhiteNits, SECONDS)),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('page timed out')), (SECONDS + 25) * 1000)),
-    ]);
-    Object.assign(result, JSON.parse(raced));
+    // A real DesktopCapturerSource for the audio probe above.
+    const caps = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 0, height: 0 } });
+    audioProbeSource = caps[0] ?? null;
+
+    const run = async (script, ms) =>
+      JSON.parse(
+        await Promise.race([
+          win.webContents.executeJavaScript(script),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('page timed out')), ms)),
+        ]),
+      );
+
+    Object.assign(result, await run(SCRIPT(target.deviceName, target.sdrWhiteNits, SECONDS), (SECONDS + 30) * 1000));
+    // Freeze the screen for the repeater test — only main can do this, which is why the page script
+    // is split in three rather than driving it itself.
+    mover.hide();
+    result.idle = await run(IDLE, 20_000);
+    mover.show();
+    Object.assign(result, await run(FINISH(target.deviceName, target.sdrWhiteNits), 20_000));
     result.verdict = verdict(result, SECONDS);
   } catch (err) {
     result.error = String(err && err.stack ? err.stack : err);
@@ -268,6 +393,28 @@ function verdict(r, seconds) {
       pass: r.restart?.readyState === 'live' && r.restart?.running === true,
       value: r.restart?.error ?? `readyState=${r.restart?.readyState} running=${r.restart?.running}`,
     },
+    // WGC produces nothing on a still screen. Without the repeater the encoder gets nothing either,
+    // and a viewer joining then waits for the host to move something before seeing anything.
+    {
+      gate: 'a still screen still feeds the encoder',
+      // STRICTLY more encoded than captured: the surplus can only be repeats. An absolute
+      // threshold was the wrong test — a real desktop is never perfectly still (a clock digit is
+      // enough), so the first version of this gate went green while the repeater did nothing.
+      pass: (r.idle?.encodedWhileStill ?? 0) > (r.idle?.nativeFramesWhileStill ?? 0),
+      value: r.idle?.error ?? `${r.idle?.encodedWhileStill} encoded from ${r.idle?.nativeFramesWhileStill} captured over 2.5s (surplus = repeats)`,
+    },
+    // Enforced in the addon, so the proof must be a real drop in the delivered rate.
+    {
+      gate: 'the fps cap actually caps',
+      pass: (r.fpsCap?.deliveredPerSec ?? 99) <= 11 && (r.fpsCap?.skippedDelta ?? 0) > 0,
+      value: r.fpsCap?.error ?? `${r.fpsCap?.deliveredPerSec}/s delivered at a cap of 10, ${r.fpsCap?.skippedDelta} skipped`,
+    },
+    // Video-only capture must not cost the share its sound.
+    {
+      gate: 'system audio survives the native path',
+      pass: r.audioAlone?.readyState === 'live' && r.audioAlone?.muted === false,
+      value: r.audioAlone?.error ?? `${r.audioAlone?.label} readyState=${r.audioAlone?.readyState} muted=${r.audioAlone?.muted}`,
+    },
     // Hardware encoding, established by elimination rather than by the field that should say so:
     // `encoderImplementation` and `powerEfficientEncoder` are NOT exposed by Electron 43's stats
     // (verified against Object.keys — absent, not empty), so there is nothing to read. But Chromium
@@ -291,5 +438,10 @@ function verdict(r, seconds) {
       value: `${r.steady?.dropped} steady (${r.duringSetup?.dropped} during setup), ${r.droppedInPage} in the page`,
     },
     { gate: 'stop() actually stops', pass: r.afterStop?.running === false, value: `running=${r.afterStop?.running}` },
+    {
+      gate: 'repeated frames advance in time',
+      pass: r.idle?.stampsIncrease === true,
+      value: r.idle?.stampsError ?? JSON.stringify(r.idle?.stamps ?? []),
+    },
   ];
 }

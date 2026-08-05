@@ -237,6 +237,7 @@ struct CaptureStats {
   uint64_t dropped = 0;      // tone-mapped but JS was behind. THE backpressure signal.
   // Tone-mapped but never handed to JS (no buffer, or a detached one). Separate from `failed`
   // because the symptom differs: this one leaves every other counter green and the picture black.
+  uint64_t skipped = 0;  // refused by the fps cap, before any GPU work
   uint64_t undelivered = 0;
   // The capture item went away: monitor unplugged, RDP session, HDR toggled off with Win+Alt+B.
   // Without this the frames simply stop, `running()` keeps saying true, and a viewer stares at a
@@ -356,6 +357,13 @@ class CaptureSession {
    *  function registers its own when created — i.e. AFTER ours — so on teardown it is destroyed
    *  first and our hook would release a dead pointer. Forgetting it here makes order irrelevant. */
   void ForgetSink() { sink_.store(nullptr, std::memory_order_release); }
+  /** Cap delivery to `fps` frames a second, or 0 for uncapped. Live, because the settings modal
+   *  changes fps mid-session and restarting a capture to honour a slider would be absurd. */
+  void SetFps(double fps) {
+    const double slack = 0.995;  // so a 60 Hz source is not decimated to 30 by rounding
+    min_interval_100ns_.store(fps > 0 ? static_cast<int64_t>(10000000.0 / fps * slack) : 0,
+                              std::memory_order_relaxed);
+  }
   bool running() const { return session_ != nullptr; }
   /** Moved out, not copied: the caller gets the buffer and the session allocates a fresh one. */
   std::vector<uint8_t> TakeFrame(int32_t* w, int32_t* h);
@@ -382,6 +390,7 @@ class CaptureSession {
   int32_t target_w_ = 0, target_h_ = 0;    // size of our own render/staging pair
   int32_t content_w_ = 0, content_h_ = 0;  // size the frame pool is currently configured for
   int64_t prev_frame_100ns_ = 0;
+  int64_t prev_kept_100ns_ = 0;  // last frame actually processed, for the fps cap
 
   // --- WinRT objects: written on the JS thread in Start/Stop, read in OnFrame under pipeline_m_ ---
   winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice rt_device_{nullptr};
@@ -409,6 +418,7 @@ class CaptureSession {
   // Atomic because the WGC thread reads it while the JS thread (Start, Stop, and the threadsafe
   // function's own finalizer) writes it.
   std::atomic<napi_threadsafe_function> sink_{nullptr};
+  std::atomic<int64_t> min_interval_100ns_{0};  // 0 = uncapped
   int64_t first_frame_100ns_ = 0;
 };
 
@@ -637,6 +647,21 @@ void CaptureSession::OnFrame(wgc::Direct3D11CaptureFramePool const& pool,
     size = frame.ContentSize();
     resized = size.Width != content_w_ || size.Height != content_h_;
 
+    // The fps cap, applied HERE — before the tone map and the readback, which is the whole point.
+    // Capping downstream (in the preload, or by dropping writes) would still pay ~7 ms of GPU per
+    // frame we then throw away. `applyConstraints({frameRate})` cannot do this for us: a
+    // MediaStreamTrackGenerator refuses it outright (OverconstrainedError, measured).
+    const int64_t min_interval = min_interval_100ns_.load(std::memory_order_relaxed);
+    if (min_interval > 0 && prev_kept_100ns_ && stamp - prev_kept_100ns_ < min_interval) {
+      std::lock_guard<std::mutex> lock(stats_m_);
+      stats_.frames++;
+      stats_.skipped++;
+      if (prev_frame_100ns_) stats_.gap.Add(static_cast<double>(stamp - prev_frame_100ns_) / 10'000.0);
+      prev_frame_100ns_ = stamp;
+      return;
+    }
+    prev_kept_100ns_ = stamp;
+
     auto access = frame.Surface().as<::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
     winrt::com_ptr<ID3D11Texture2D> texture;
     if (SUCCEEDED(access->GetInterface(winrt::guid_of<ID3D11Texture2D>(), texture.put_void()))) {
@@ -767,6 +792,10 @@ void CaptureSession::Stop() {
   target_w_ = target_h_ = 0;
   content_w_ = content_h_ = 0;
   prev_frame_100ns_ = 0;
+  prev_kept_100ns_ = 0;
+  // Reset too: the cap lives on a process-global session, and inheriting the last one's rate
+  // would silently throttle the next capture.
+  min_interval_100ns_.store(0, std::memory_order_relaxed);
   ctx_ = nullptr;
   d3d_ = nullptr;
   std::lock_guard<std::mutex> lock(stats_m_);
@@ -880,8 +909,8 @@ void DeliverFrame(napi_env env, napi_value callback, void*, void* data) {
 }
 
 napi_value StartCapture(napi_env env, napi_callback_info info) {
-  size_t argc = 4;
-  napi_value argv[4];
+  size_t argc = 5;
+  napi_value argv[5];
   napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
   size_t len = 0;
   if (argc < 1 || napi_get_value_string_utf16(env, argv[0], nullptr, 0, &len) != napi_ok) {
@@ -927,11 +956,22 @@ napi_value StartCapture(napi_env env, napi_callback_info info) {
     }
   }
 
+  // Optional fps cap. Read here, applied only AFTER a successful Start: `argc` is always 5
+  // (JS fills missing arguments with undefined rather than omitting them), so the old
+  // `argc > 4` guard was always true and left fps at 0 — and applying it up here meant a
+  // second startCapture that then failed with "capture already running" had already changed
+  // the cadence of the session it failed to replace.
+  double fps = 0;
+  napi_valuetype fps_type = napi_undefined;
+  if (argc > 4) napi_typeof(env, argv[4], &fps_type);
+  if (fps_type == napi_number) napi_get_value_double(env, argv[4], &fps);
+
   std::string err;
   if (!g_capture.Start(monitor, static_cast<float>(sdr_white), static_cast<float>(knee), sink, &err)) {
     napi_throw_error(env, nullptr, err.c_str());  // Start already released the sink
     return nullptr;
   }
+  g_capture.SetFps(fps);
   return nullptr;
 }
 
@@ -959,6 +999,17 @@ napi_value TakeFrame(napi_env env, napi_callback_info) {
 }
 
 void ReleaseFrameBuffer(napi_env env);  // defined below, next to the buffer it frees
+
+/** setFps(fps) — 0 for uncapped. Takes effect on the next frame. */
+napi_value SetFps(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  double fps = 0;
+  if (argc > 0) napi_get_value_double(env, argv[0], &fps);
+  g_capture.SetFps(fps);
+  return nullptr;
+}
 
 napi_value StopCapture(napi_env env, napi_callback_info) {
   g_capture.Stop();
@@ -1003,6 +1054,7 @@ napi_value GetCaptureStats(napi_env env, napi_callback_info) {
   num("empty", static_cast<double>(s.empty));
   num("dropped", static_cast<double>(s.dropped));
   num("undelivered", static_cast<double>(s.undelivered));
+  num("skipped", static_cast<double>(s.skipped));
   flag("closed", s.closed);
   num("recreated", static_cast<double>(s.recreated));
   num("width", s.width);
@@ -1034,6 +1086,7 @@ napi_value StartCapture(napi_env env, napi_callback_info) {
   return nullptr;
 }
 napi_value StopCapture(napi_env, napi_callback_info) { return nullptr; }
+napi_value SetFps(napi_env, napi_callback_info) { return nullptr; }
 napi_value GetCaptureStats(napi_env env, napi_callback_info) {
   napi_value obj, running;
   napi_create_object(env, &obj);
@@ -1057,6 +1110,7 @@ napi_value Init(napi_env env, napi_value exports) {
   for (const auto& [name, cb] : {std::pair<const char*, napi_callback>{"listDisplays", ListDisplays},
                                  {"startCapture", StartCapture},
                                  {"stopCapture", StopCapture},
+                                 {"setFps", SetFps},
                                  {"captureStats", GetCaptureStats},
                                  {"takeFrame", TakeFrame}}) {
     napi_value fn;

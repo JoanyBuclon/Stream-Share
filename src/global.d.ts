@@ -99,7 +99,11 @@ interface StreamShareNative {
    * Throws if `deviceName` is not the display the user last confirmed in the picker: this path does
    * not go through the OS consent handler, so the check lives here.
    */
-  startNativeCapture?(deviceName: string, sdrWhiteNits?: number, knee?: number): void;
+  startNativeCapture?(deviceName: string, sdrWhiteNits?: number, knee?: number, fps?: number): void;
+  /** Cap the capture rate, 0 for uncapped. The generated track refuses applyConstraints
+   *  (OverconstrainedError, measured), so this is the only way to honour the fps setting — and it
+   *  is the better one anyway: a frame refused here never costs a tone map or a readback. */
+  setCaptureFps?(fps: number): void;
   stopNativeCapture?(): void;
   /** Capture counters, or null without the addon. `dropped` is the backpressure signal: frames
    *  tone-mapped but never handed to the page because it was behind. */
@@ -113,6 +117,8 @@ interface NativeCaptureStats {
   readonly dropped: number;
   /** Tone-mapped but never handed to JS — the failure that leaves every other counter green. */
   readonly undelivered: number;
+  /** Refused by the fps cap, before any GPU work. */
+  readonly skipped: number;
   /** Frames produced while no page was listening. */
   readonly orphanedFrames: number;
   /** The capture item went away: monitor unplugged, RDP session, HDR switched off. */
