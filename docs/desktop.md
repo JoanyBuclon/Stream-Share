@@ -592,8 +592,9 @@ l'utilisateur avait validé : même 0 % d'écrêtage, **plus** de plage haute co
 remontés.
 
 > Ce que la sonde ne dit pas : le genou à 0,75 et le blanc SDR restent des réglages
-> qu'aucune mesure ne peut trancher à la place d'un œil. Le curseur de blanc SDR
-> dans la modale de réglages reste à faire.
+> qu'aucune mesure ne peut trancher à la place d'un œil. Le blanc SDR est **réglable
+> depuis la modale** (§ Le blanc de référence, réglable) ; le genou reste fixe, faute
+> d'un utilisateur capable de raisonner sur une forme de courbe.
 
 #### G3 — la frontière preload → page, et la sortie vers l'encodeur
 

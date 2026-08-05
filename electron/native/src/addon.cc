@@ -32,6 +32,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <memory>
 #include <optional>
 #include <mutex>
@@ -343,7 +344,7 @@ struct FramePayload {
  */
 class CaptureSession {
  public:
-  bool Start(HMONITOR monitor, float sdr_white, float knee, napi_threadsafe_function sink, std::string* err);
+  bool Start(HMONITOR monitor, float sdr_white, napi_threadsafe_function sink, std::string* err);
   void Stop();
   CaptureStats Snapshot();
   /** A frame that was tone-mapped but could not be handed to JS (no buffer, or a detached one).
@@ -364,6 +365,30 @@ class CaptureSession {
     min_interval_100ns_.store(fps > 0 ? static_cast<int64_t>(10000000.0 / fps * slack) : 0,
                               std::memory_order_relaxed);
   }
+  /**
+   * The tone map's divisor, live. Windows reports a reference white per display, but it is the
+   * user's own brightness slider — so the reading can be right and the result still not what they
+   * want, and there was no way to say so.
+   *
+   * Recorded here and applied in OnFrame, NOT written to the constant buffer from this thread:
+   * `ID3D11DeviceContext` is not free-threaded (the device is), and this is called from the JS
+   * thread while the WGC thread may be mid-frame. Taking `pipeline_m_` here instead would be legal
+   * but would park the renderer behind an in-flight `Map()` on every tick of a slider drag.
+   *
+   * Rejected rather than clamped when it is not a usable number: 0 divides the whole picture into
+   * infinities and a NaN propagates to every pixel, so the caller keeps whatever was set before —
+   * a control that refuses a bad value is better than one that invents a plausible one. `!(f >= …)`
+   * rather than `f < …` so NaN, which compares false against everything, is caught by the same test.
+   */
+  void SetSdrWhite(double nits) {
+    const float f = static_cast<float>(nits);
+    // Checked AFTER the cast, and against a physical range rather than just finiteness: 1e300 is a
+    // perfectly finite double that becomes +inf as a float, and 80/inf is a permanently black
+    // screen. 1 to 10000 nits covers every display that exists and every value the slider can
+    // produce; this method is on the contextBridge, so it is reachable with anything.
+    if (!(f >= 1.0f && f <= 10000.0f)) return;
+    want_sdr_white_.store(f, std::memory_order_relaxed);
+  }
   bool running() const { return session_ != nullptr; }
   /** Moved out, not copied: the caller gets the buffer and the session allocates a fresh one. */
   std::vector<uint8_t> TakeFrame(int32_t* w, int32_t* h);
@@ -373,7 +398,8 @@ class CaptureSession {
   bool BuildPipeline(std::string* err);
   bool EnsureTargets(int32_t width, int32_t height);
   bool ToneMap(ID3D11Texture2D* source, int32_t width, int32_t height, int32_t content_w, int32_t content_h);
-  void UploadParams();  // caller holds pipeline_m_
+  /** False when the constant buffer could not be mapped — see the call site in OnFrame. */
+  bool UploadParams();  // caller holds pipeline_m_
 
   // --- GPU pipeline: touched only under pipeline_m_ ---
   std::mutex pipeline_m_;
@@ -419,6 +445,10 @@ class CaptureSession {
   // function's own finalizer) writes it.
   std::atomic<napi_threadsafe_function> sink_{nullptr};
   std::atomic<int64_t> min_interval_100ns_{0};  // 0 = uncapped
+  /** Set from the JS thread by SetSdrWhite, consumed by the WGC thread in OnFrame. 0 = nothing
+   *  pending; the value in flight is never read back, so a store that lands between two frames
+   *  simply wins. */
+  std::atomic<float> want_sdr_white_{0.0f};
   int64_t first_frame_100ns_ = 0;
 };
 
@@ -476,7 +506,7 @@ bool CaptureSession::EnsureTargets(int32_t width, int32_t height) {
   return true;
 }
 
-bool CaptureSession::Start(HMONITOR monitor, float sdr_white, float knee, napi_threadsafe_function sink,
+bool CaptureSession::Start(HMONITOR monitor, float sdr_white, napi_threadsafe_function sink,
                            std::string* err) {
   // Takes ownership of `sink` on every path, including the failures — split ownership between here
   // and the caller is how a threadsafe function gets released twice.
@@ -516,17 +546,24 @@ bool CaptureSession::Start(HMONITOR monitor, float sdr_white, float knee, napi_t
       return false;
     }
     // DYNAMIC, not IMMUTABLE: the SDR white level is a live value. Windows lets the user move its
-    // slider mid-session, and our own settings modal will expose a knee. Baking it in would mean
+    // own slider mid-session, and ours exposes it too (see SetSdrWhite). Baking it in would mean
     // tearing down the device and the capture session to change one float.
     D3D11_BUFFER_DESC bd{};
     bd.ByteWidth = sizeof(ShaderParams);
     bd.Usage = D3D11_USAGE_DYNAMIC;
     bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-    const ShaderParams initial{sdr_white > 0 ? sdr_white : 80.0f, knee > 0 && knee < 1 ? knee : 0.75f, {1.0f, 1.0f}};
+    // The knee stays at the ShaderParams default. It was a parameter for a while and never had a
+    // caller: the settings modal exposes the reference white (which the user can judge by looking)
+    // and not the curve shape (which they cannot). Making it configurable again means a UI for it.
+    const ShaderParams initial{sdr_white > 0 ? sdr_white : 80.0f, ShaderParams{}.knee, {1.0f, 1.0f}};
     D3D11_SUBRESOURCE_DATA init{&initial, 0, 0};
     winrt::check_hresult(d3d_->CreateBuffer(&bd, &init, params_.put()));
     params_cpu_ = initial;
+    // Cleared HERE and not only in Stop(): setSdrWhite has no running() guard, so a value set
+    // before the first capture of the process would sit in the atomic and overwrite, on the very
+    // first frame, the one this Start was given.
+    want_sdr_white_.store(0.0f, std::memory_order_relaxed);
 
     winrt::com_ptr<::IInspectable> inspectable;
     winrt::check_hresult(CreateDirect3D11DeviceFromDXGIDevice(d3d_.as<IDXGIDevice>().get(), inspectable.put()));
@@ -583,10 +620,29 @@ bool CaptureSession::ToneMap(ID3D11Texture2D* source, int32_t width, int32_t hei
   // events that change it.
   const float u = width > 0 ? static_cast<float>(content_w) / static_cast<float>(width) : 1.0f;
   const float v = height > 0 ? static_cast<float>(content_h) / static_cast<float>(height) : 1.0f;
+  // The pending SDR white, if the settings slider moved since the last frame. Same
+  // compare-then-upload as uvScale below, and the same buffer, so a frame that changes both pays
+  // one Map instead of two.
+  // ponytail: applied on the next REAL frame. WGC is change-driven, so on a perfectly still screen
+  // the slider does nothing visible until something moves (the cursor is captured, so moving the
+  // mouse is enough). Forcing a redraw would mean keeping the source scRGB texture alive — ~33 MB
+  // at 4K plus a copy per frame, paid forever for a control used once.
+  bool params_dirty = false;
+  const float wanted = want_sdr_white_.exchange(0.0f, std::memory_order_relaxed);
+  if (wanted > 0 && wanted != params_cpu_.sdr_white) {
+    params_cpu_.sdr_white = wanted;
+    params_dirty = true;
+  }
   if (u != params_cpu_.uv_scale[0] || v != params_cpu_.uv_scale[1]) {
     params_cpu_.uv_scale[0] = u;
     params_cpu_.uv_scale[1] = v;
-    UploadParams();
+    params_dirty = true;
+  }
+  // Re-armed on failure, not dropped: `params_cpu_` has already been updated, so the next frame
+  // would see nothing dirty and the host's correction would be gone for good. WRITE_DISCARD only
+  // fails on a removed device, but "lost silently and for ever" is the wrong way to lose.
+  if (params_dirty && !UploadParams() && wanted > 0) {
+    want_sdr_white_.store(wanted, std::memory_order_relaxed);
   }
 
   D3D11_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(content_w), static_cast<float>(content_h), 0.0f, 1.0f};
@@ -744,12 +800,13 @@ void CaptureSession::OnFrame(wgc::Direct3D11CaptureFramePool const& pool,
   if (resized) stats_.recreated++;
 }
 
-void CaptureSession::UploadParams() {
-  if (!ctx_ || !params_) return;
+bool CaptureSession::UploadParams() {
+  if (!ctx_ || !params_) return false;
   D3D11_MAPPED_SUBRESOURCE mapped{};
-  if (FAILED(ctx_->Map(params_.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return;
+  if (FAILED(ctx_->Map(params_.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
   memcpy(mapped.pData, &params_cpu_, sizeof(params_cpu_));
   ctx_->Unmap(params_.get(), 0);
+  return true;
 }
 
 std::vector<uint8_t> CaptureSession::TakeFrame(int32_t* w, int32_t* h) {
@@ -794,8 +851,9 @@ void CaptureSession::Stop() {
   prev_frame_100ns_ = 0;
   prev_kept_100ns_ = 0;
   // Reset too: the cap lives on a process-global session, and inheriting the last one's rate
-  // would silently throttle the next capture.
+  // would silently throttle the next capture. Same for a tone-map change nobody consumed.
   min_interval_100ns_.store(0, std::memory_order_relaxed);
+  want_sdr_white_.store(0.0f, std::memory_order_relaxed);
   ctx_ = nullptr;
   d3d_ = nullptr;
   std::lock_guard<std::mutex> lock(stats_m_);
@@ -909,12 +967,12 @@ void DeliverFrame(napi_env env, napi_value callback, void*, void* data) {
 }
 
 napi_value StartCapture(napi_env env, napi_callback_info info) {
-  size_t argc = 5;
-  napi_value argv[5];
+  size_t argc = 4;
+  napi_value argv[4];
   napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
   size_t len = 0;
   if (argc < 1 || napi_get_value_string_utf16(env, argv[0], nullptr, 0, &len) != napi_ok) {
-    napi_throw_type_error(env, nullptr, "startCapture(deviceName, sdrWhiteNits, knee) expects a string");
+    napi_throw_type_error(env, nullptr, "startCapture(deviceName, sdrWhiteNits) expects a string");
     return nullptr;
   }
   // Sized to len+1 for the terminator napi writes, then trimmed: writing to data()[size()] is
@@ -928,16 +986,15 @@ napi_value StartCapture(napi_env env, napi_callback_info info) {
     napi_throw_error(env, nullptr, "no monitor with that device name");
     return nullptr;
   }
-  // Both optional: the shader falls back to the scRGB definition (80 nits) and a 0.75 knee.
-  double sdr_white = 0, knee = 0;
+  // Optional: the shader falls back to the scRGB definition (80 nits).
+  double sdr_white = 0;
   if (argc > 1) napi_get_value_double(env, argv[1], &sdr_white);
-  if (argc > 2) napi_get_value_double(env, argv[2], &knee);
 
   // Optional 4th argument: a function to push frames to. Without it the session only records the
   // last frame for takeFrame(), which is what the measurement harness uses.
   napi_threadsafe_function sink = nullptr;
   napi_valuetype type = napi_undefined;
-  if (argc > 3) napi_typeof(env, argv[3], &type);
+  if (argc > 2) napi_typeof(env, argv[2], &type);
   if (type == napi_function) {
     napi_value name;
     napi_create_string_utf8(env, "streamshare_frames", NAPI_AUTO_LENGTH, &name);
@@ -948,7 +1005,7 @@ napi_value StartCapture(napi_env env, napi_callback_info info) {
     // deeper queue would only have bought latency for a case that never existed.
     // Non-blocking at the call site, so the property is: never a backlog. (Not "newest wins" — a
     // full queue rejects the ARRIVING frame, not the queued one.)
-    if (napi_create_threadsafe_function(env, argv[3], nullptr, name, 1, 1, nullptr,
+    if (napi_create_threadsafe_function(env, argv[2], nullptr, name, 1, 1, nullptr,
                                         [](napi_env, void*, void*) { g_capture.ForgetSink(); }, nullptr, DeliverFrame,
                                         &sink) != napi_ok) {
       napi_throw_error(env, nullptr, "could not create the frame callback");
@@ -956,18 +1013,18 @@ napi_value StartCapture(napi_env env, napi_callback_info info) {
     }
   }
 
-  // Optional fps cap. Read here, applied only AFTER a successful Start: `argc` is always 5
-  // (JS fills missing arguments with undefined rather than omitting them), so the old
-  // `argc > 4` guard was always true and left fps at 0 — and applying it up here meant a
-  // second startCapture that then failed with "capture already running" had already changed
-  // the cadence of the session it failed to replace.
+  // Optional fps cap. Type-checked rather than counted, and applied only AFTER a successful Start.
+  // Both halves were bugs: `argc` is always the declared maximum (JS fills missing arguments with
+  // undefined rather than omitting them), so an `argc >` guard is always true and left fps at 0;
+  // and applying it before Start meant a second startCapture that then failed with "capture already
+  // running" had already changed the cadence of the session it failed to replace.
   double fps = 0;
   napi_valuetype fps_type = napi_undefined;
-  if (argc > 4) napi_typeof(env, argv[4], &fps_type);
-  if (fps_type == napi_number) napi_get_value_double(env, argv[4], &fps);
+  if (argc > 3) napi_typeof(env, argv[3], &fps_type);
+  if (fps_type == napi_number) napi_get_value_double(env, argv[3], &fps);
 
   std::string err;
-  if (!g_capture.Start(monitor, static_cast<float>(sdr_white), static_cast<float>(knee), sink, &err)) {
+  if (!g_capture.Start(monitor, static_cast<float>(sdr_white), sink, &err)) {
     napi_throw_error(env, nullptr, err.c_str());  // Start already released the sink
     return nullptr;
   }
@@ -1008,6 +1065,18 @@ napi_value SetFps(napi_env env, napi_callback_info info) {
   double fps = 0;
   if (argc > 0) napi_get_value_double(env, argv[0], &fps);
   g_capture.SetFps(fps);
+  return nullptr;
+}
+
+/** setSdrWhite(nits) — the tone map's divisor. Takes effect on the next frame; a value that is not
+ *  a positive finite number is ignored rather than clamped (see CaptureSession::SetSdrWhite). */
+napi_value SetSdrWhite(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  double nits = 0;
+  if (argc > 0) napi_get_value_double(env, argv[0], &nits);
+  g_capture.SetSdrWhite(nits);
   return nullptr;
 }
 
@@ -1087,6 +1156,7 @@ napi_value StartCapture(napi_env env, napi_callback_info) {
 }
 napi_value StopCapture(napi_env, napi_callback_info) { return nullptr; }
 napi_value SetFps(napi_env, napi_callback_info) { return nullptr; }
+napi_value SetSdrWhite(napi_env, napi_callback_info) { return nullptr; }
 napi_value GetCaptureStats(napi_env env, napi_callback_info) {
   napi_value obj, running;
   napi_create_object(env, &obj);
@@ -1111,6 +1181,7 @@ napi_value Init(napi_env env, napi_value exports) {
                                  {"startCapture", StartCapture},
                                  {"stopCapture", StopCapture},
                                  {"setFps", SetFps},
+                                 {"setSdrWhite", SetSdrWhite},
                                  {"captureStats", GetCaptureStats},
                                  {"takeFrame", TakeFrame}}) {
     napi_value fn;

@@ -1,6 +1,7 @@
 ---
 // Host view: pick a source, preview it locally, share the code, manage viewers.
 // MVP scope — no settings modal / pause / stats yet (see docs/frontend.md).
+import { SDR_STOPS_MAX } from '../lib/settings.ts';
 ---
 
 <section id="screen-host" tabindex="-1" class="flex min-h-0 flex-1 flex-col animate-fade focus:outline-none" hidden>
@@ -308,6 +309,22 @@
           <div class="flex max-w-[320px] flex-1 items-center gap-3">
             <input id="bitrate-range" type="range" min="2" max="60" value="20" aria-label="Bitrate (mbps)" class="flex-1 cursor-pointer accent-fg" />
             <span id="bitrate-value" class="w-16 text-right font-mono text-xs text-fg-dim">20 mbps</span>
+          </div>
+        </div>
+
+        <!-- HDR reference white. Shown only while a native HDR capture is running: it is the tone
+             map's divisor, so it means nothing on the getDisplayMedia path. Windows reports it per
+             display, but it is the user's own SDR brightness slider — the reading can be right and
+             the picture still not what they want. -->
+        <div id="sdrwhite-row" hidden class="flex flex-wrap items-center justify-between gap-4 gap-y-2">
+          <!-- "reference white", not "brightness": dragging right raises the divisor, so the picture
+               gets DARKER. Labelled as brightness the control would read backwards; labelled as the
+               white level it reads exactly as it behaves, and matches the number next to it. -->
+          <span class="text-[13px] text-fg-dim">HDR reference white</span>
+          <div class="flex max-w-[320px] flex-1 items-center gap-3">
+            <input id="sdrwhite-range" type="range" min={-SDR_STOPS_MAX} max={SDR_STOPS_MAX} step="0.05" value="0" aria-label="HDR reference white" class="flex-1 cursor-pointer accent-fg" />
+            <span id="sdrwhite-value" class="w-24 text-right font-mono text-xs text-fg-dim">80 nits</span>
+            <button id="btn-sdrwhite-auto" class="ss-seg shrink-0 px-2 text-[11px]">auto</button>
           </div>
         </div>
 

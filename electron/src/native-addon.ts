@@ -49,9 +49,12 @@ export interface CaptureStats {
 export interface CaptureAddon {
   listDisplays(): NativeDisplay[];
   /** `onFrame` is optional: without it the session only keeps the last frame for `takeFrame`. */
-  startCapture(deviceName: string, sdrWhiteNits?: number, knee?: number, onFrame?: (frame: NativeFrame) => void, fps?: number): void;
+  startCapture(deviceName: string, sdrWhiteNits?: number, onFrame?: (frame: NativeFrame) => void, fps?: number): void;
   /** 0 = uncapped. Applied before the tone map, so a capped frame costs nothing. */
   setFps(fps: number): void;
+  /** The tone map's divisor, live. Takes effect on the next frame the display produces — which on
+   *  a perfectly still screen is not immediately. A non-positive or non-finite value is ignored. */
+  setSdrWhite(nits: number): void;
   stopCapture(): void;
   captureStats(): CaptureStats;
   takeFrame(): { width: number; height: number; data: ArrayBuffer };

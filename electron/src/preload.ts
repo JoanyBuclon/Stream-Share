@@ -107,11 +107,11 @@ contextBridge.exposeInMainWorld('native', {
    *
    * The page must already be listening for `{ streamShare: 'frames' }` when it calls this.
    */
-  startNativeCapture: (sdrWhiteNits?: number, knee?: number, fps?: number) => {
+  startNativeCapture: (sdrWhiteNits?: number, fps?: number) => {
     if (!addon) throw new Error('native capture unavailable');
     const approved = ipcRenderer.sendSync('ss:approved-device') as string;
     if (!approved) throw new Error('no display was picked by the user');
-    addon.startCapture(approved, sdrWhiteNits, knee, pushFrame, fps);
+    addon.startCapture(approved, sdrWhiteNits, pushFrame, fps);
     closeFramePort();
     const channel = new MessageChannel();
     framePort = channel.port1;
@@ -120,6 +120,7 @@ contextBridge.exposeInMainWorld('native', {
     window.postMessage({ streamShare: 'frames' }, location.origin, [channel.port2]);
   },
   setCaptureFps: (fps: number) => addon?.setFps(fps),
+  setSdrWhite: (nits: number) => addon?.setSdrWhite(nits),
   stopNativeCapture: () => {
     addon?.stopCapture();
     // Not optional: leaving the port open leaks it per session, and a later start would push 60

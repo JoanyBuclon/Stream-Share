@@ -256,7 +256,67 @@ const IDLE = `(async () => {
   return JSON.stringify(out);
 })()`;
 
-/** Phase three: shut down, then start again — "switch source", the flow real users hit. */
+/**
+ * Phase three: does the HDR brightness control actually reach the GPU?
+ *
+ * The settings slider sets one float in a constant buffer that the pixel shader divides by. A
+ * uniform that never arrives is the quietest possible failure — the picture stays exactly as it
+ * was, the slider moves, every counter is green, and nothing anywhere says the knob is dead. So
+ * this measures the only thing that matters: the pixels.
+ *
+ * A quarter of the reference white is four times the exposure, which no amount of mover animation
+ * can imitate — the check is deliberately coarse so it cannot pass on noise.
+ */
+const TONE_MAP = (sdrWhiteNits) => `(async () => {
+  const out = {};
+  try {
+    // The LOCAL track, not the received one. Measuring after the encoder was wrong twice over: the
+    // frames come back as planar YUV, so copying a rect hands back a buffer that is two thirds luma
+    // and one third chroma — and chroma sits at a neutral 128 whatever the exposure, which drags
+    // every mean toward the middle and hides most of the effect being measured. These frames are
+    // the tone map's own output, in BGRA.
+    const proc = new MediaStreamTrackProcessor({ track: window.__ss.capture.track });
+    const reader = proc.readable.getReader();
+    let format = null;
+    // Mean over a wide band. Full frames would be 14 MB of copy each at 1440p, and a band is plenty
+    // for a four-stop change. Every 4th byte from offset 1: the green channel of BGRA, which
+    // carries most of the luminance and never mixes in the alpha (pinned at 255).
+    const mean = async () => {
+      const { value } = await reader.read();
+      format = value.format;
+      const rect = { x: 0, y: 0, width: value.codedWidth, height: 128 };
+      const buf = new Uint8Array(value.allocationSize({ rect }));
+      await value.copyTo(buf, { rect });
+      value.close();
+      let sum = 0, n = 0;
+      for (let i = 1; i < buf.length; i += 4) { sum += buf[i]; n++; }
+      return sum / n;
+    };
+    // Drained by TIME, not by a frame count: a repeated frame is not re-tone-mapped (native-video
+    // re-wraps the last one), so counting frames could count nothing but stale copies.
+    const settle = async () => {
+      const until = performance.now() + 700;
+      while (performance.now() < until) await mean();
+    };
+    out.asMeasured = await mean();
+    window.native.setSdrWhite(${sdrWhiteNits} / 4); // divide by less → brighter
+    await settle();
+    out.brighter = await mean();
+    window.native.setSdrWhite(${sdrWhiteNits} * 4);
+    await settle();
+    out.darker = await mean();
+    window.native.setSdrWhite(${sdrWhiteNits}); // leave the session as we found it
+    await settle();
+    out.restored = await mean();
+    out.format = format;
+    reader.cancel();
+  } catch (err) {
+    out.error = String(err);
+  }
+  return JSON.stringify(out);
+})()`;
+
+/** Phase four: shut down, then start again — "switch source", the flow real users hit. */
 const FINISH = (sdrWhiteNits) => `(async () => {
   const out = {};
   try {
@@ -357,6 +417,8 @@ app.whenReady().then(async () => {
     mover.hide();
     result.idle = await run(IDLE, 20_000);
     mover.show();
+    await new Promise((r) => setTimeout(r, 500)); // frames flowing again before we measure exposure
+    result.toneMap = await run(TONE_MAP(target.sdrWhiteNits), 30_000);
     Object.assign(result, await run(FINISH(target.sdrWhiteNits), 20_000));
     result.verdict = verdict(result, SECONDS);
   } catch (err) {
@@ -367,6 +429,8 @@ app.whenReady().then(async () => {
   win?.destroy();
   app.exit(result.error || result.verdict?.some((v) => !v.pass) ? 1 : 0);
 });
+
+const round1 = (v) => (typeof v === 'number' ? Math.round(v * 10) / 10 : 'n/a');
 
 /** Written so that absence of data fails — the same mistake was made once already in
  *  tools/wgc-latency.cjs, where three gates went green on a capture that produced nothing. */
@@ -471,5 +535,26 @@ function verdict(r, seconds) {
       pass: r.idle?.stampsIncrease === true,
       value: r.idle?.stampsError ?? JSON.stringify(r.idle?.stamps ?? []),
     },
+    // The one check a dead uniform cannot pass — but ONLY with a margin. Ordering alone was not a
+    // test: killing the uniform gave 66.7 / 66.8 / 66.8, so which way those three landed was decided
+    // by whatever moved on the desktop, and roughly one run in four would have gone green on dead
+    // code. The live spread is ±20%, so 8% of margin separates the signal from that noise by a wide
+    // gap while staying far under the real effect. `restored` guards the other half: a control that
+    // only travels one way.
+    (() => {
+      const t = r.toneMap ?? {};
+      const base = t.asMeasured ?? 0;
+      return {
+        gate: 'the HDR reference white reaches the shader',
+        pass:
+          base > 0 &&
+          (t.brighter ?? 0) > base * 1.08 &&
+          (t.darker ?? 1e9) < base * 0.92 &&
+          Math.abs((t.restored ?? 0) - base) < base * 0.15,
+        value:
+          t.error ??
+          `${t.format} mean ${round1(t.brighter)} at ÷4, ${round1(base)} as reported, ${round1(t.darker)} at ×4 (restored ${round1(t.restored)})`,
+      };
+    })(),
   ];
 }

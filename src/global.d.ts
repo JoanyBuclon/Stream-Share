@@ -103,11 +103,20 @@ interface StreamShareNative {
    * pick, rather than checking a name we hand it. Throws when nothing is approved — no pick, a
    * window rather than a screen, or the displays changed since.
    */
-  startNativeCapture?(sdrWhiteNits?: number, knee?: number, fps?: number): void;
+  startNativeCapture?(sdrWhiteNits?: number, fps?: number): void;
   /** Cap the capture rate, 0 for uncapped. The generated track refuses applyConstraints
    *  (OverconstrainedError, measured), so this is the only way to honour the fps setting — and it
    *  is the better one anyway: a frame refused here never costs a tone map or a readback. */
   setCaptureFps?(fps: number): void;
+  /** The tone map's divisor, in nits, live.
+   *
+   *  Windows reports a reference white per display and the shell passes it at capture time, but it
+   *  is the user's own SDR brightness slider — so the reading can be correct and the picture still
+   *  not what they want. This is the correction, and there was none until now.
+   *
+   *  Applied on the next frame the DISPLAY produces: WGC is change-driven, so on a perfectly still
+   *  screen nothing moves until something does. */
+  setSdrWhite?(nits: number): void;
   stopNativeCapture?(): void;
   /** Capture counters, or null without the addon. `dropped` is the backpressure signal: frames
    *  tone-mapped but never handed to the page because it was behind. */

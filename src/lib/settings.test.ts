@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyPreset, maxBitrateBps, estimatedUpload, contentHintFor, degradationFor, viewerTiers, effectiveScale, resLabel, sourceTier, parseQuality, serializeQuality, DEFAULT_QUALITY, PRESETS, RESOLUTIONS } from './settings.ts';
+import { applyPreset, maxBitrateBps, estimatedUpload, contentHintFor, degradationFor, viewerTiers, effectiveScale, resLabel, sourceTier, parseQuality, serializeQuality, parseSdrStops, clampSdrStops, sdrWhiteFactor, SDR_STOPS_MAX, DEFAULT_QUALITY, PRESETS, RESOLUTIONS } from './settings.ts';
 
 // parseQuality is a trust boundary: localStorage is user-editable, and — the real reason — it is
 // read by a self-updating desktop app that may have written it under an older schema. Everything
@@ -157,4 +157,38 @@ test('contentHint / degradation dérivent du preset, défauts en mode manuel', (
   assert.equal(degradationFor({ ...DEFAULT_QUALITY, preset: 'gaming' }), 'maintain-framerate');
   assert.equal(contentHintFor({ ...DEFAULT_QUALITY, preset: null }), 'motion');
   assert.equal(degradationFor({ ...DEFAULT_QUALITY, preset: null }), 'balanced');
+});
+
+// --- exposition du tone map HDR ---
+//
+// Ce réglage divise chaque pixel : une valeur non finie ou négative ne donne pas une image un peu
+// fausse, elle donne des NaN sur tout l'écran. Et il est lu depuis localStorage, donc éditable à la
+// main et écrit par une version antérieure de l'app.
+
+test('sdrWhiteFactor: exponentiel, et « comme mesuré » pile au centre', () => {
+  assert.equal(sdrWhiteFactor(0), 1, 'le défaut doit être neutre');
+  assert.equal(sdrWhiteFactor(1), 2);
+  assert.equal(sdrWhiteFactor(-1), 0.5);
+  // Les bornes valent un huitième / huit fois la valeur rapportée. Dimensionnées sur le cas qui
+  // motive le réglage : l'écran qui ne rapporte rien laisse le shell à 80 nits, soit 2,6 stops sous
+  // les 480 mesurés ici — à ±2 cet utilisateur butait sur la fin de course avant d'atteindre le sien.
+  assert.equal(sdrWhiteFactor(SDR_STOPS_MAX), 8);
+  assert.equal(sdrWhiteFactor(-SDR_STOPS_MAX), 0.125);
+  // Borné, pas ignoré : un curseur trafiqué ne doit pas noircir le partage.
+  assert.equal(sdrWhiteFactor(99), 8);
+});
+
+test('clampSdrStops: tout ce qui n est pas un nombre fini retombe sur « comme mesuré »', () => {
+  assert.equal(clampSdrStops(NaN), 0);
+  assert.equal(clampSdrStops(Infinity), 0);
+  assert.equal(clampSdrStops(-Infinity), 0);
+  assert.equal(clampSdrStops(0.35), 0.35, 'le clamp ne crante pas — le pas de 0,05 est celui de l input, pas de la donnée');
+});
+
+test('parseSdrStops: rien de stocké = comme mesuré, et le stock est validé', () => {
+  assert.equal(parseSdrStops(null), 0);
+  assert.equal(parseSdrStops('1.5'), 1.5);
+  assert.equal(parseSdrStops('12'), SDR_STOPS_MAX);
+  assert.equal(parseSdrStops('pas un nombre'), 0);
+  assert.equal(parseSdrStops(''), 0, 'Number("") vaut 0, ce qui tombe juste — mais par accident');
 });

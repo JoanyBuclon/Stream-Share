@@ -17,7 +17,11 @@ import {
   applyPreset,
   parseQuality,
   serializeQuality,
+  parseSdrStops,
+  clampSdrStops,
+  sdrWhiteFactor,
   QUALITY_KEY,
+  SDR_WHITE_KEY,
   effectiveScale,
   maxBitrateBps,
   estimatedUpload,
@@ -102,6 +106,12 @@ export class HostController {
    *  pin the cap at 720p for every later session — including on a 4K screen, with nothing on
    *  screen to explain it. */
   private pickedResolution: ResolutionTarget = this.quality.resolution;
+  /** Tone-map exposure in stops, and the white the current source reports. Kept apart from
+   *  `quality` on purpose — see SDR_WHITE_KEY. `sourceSdrNits` is set by captureHdr and deliberately
+   *  NOT cleared when the capture stops: nothing reads it without a live native capture (the row is
+   *  hidden), and the next HDR share overwrites it before anything can. */
+  private sdrStops = loadSdrStops();
+  private sourceSdrNits = 0;
   private readonly mixer = new AudioMixer();
   private readonly audioQueue = serial(); // serializes outgoing rebuilds — no interleaving
   private readonly wakeLock = createWakeLock(); // keep the screen awake while hosting
@@ -272,12 +282,16 @@ export class HostController {
     const audio = this.quality.systemAudio ? await this.loopbackAudioTrack() : null;
     if (this.ac.signal.aborted) return audio?.stop();
 
+    // The white this display reports, or the scRGB definition when it reports nothing. That
+    // fallback is wrong by up to 6x on a real HDR desktop — which is precisely why it is now a
+    // BASE the host can correct rather than a number to hide behind `undefined`.
+    this.sourceSdrNits = source.sdrWhiteMeasured ? source.sdrWhiteNits : 80;
     let capture: NativeCapture;
     try {
       capture = await captureNative(
-        // Only when it was really read: the 80-nit fallback is a plausible-looking number that
-        // would make the tone map wrong by up to 6x, and the addon's own default is the same value.
-        source.sdrWhiteMeasured ? source.sdrWhiteNits : undefined,
+        // Corrected from the start, not applied a render later: a capture that begins at the
+        // measured value and jumps when the panel repaints is a flash the host did not ask for.
+        this.sdrWhiteNits(),
         this.quality.fps,
       );
     } catch (e) {
@@ -551,6 +565,49 @@ export class HostController {
     for (const peerId of this.viewers.keys()) this.sig.signal(peerId, { height: h });
   }
 
+  /** The divisor actually sent to the tone map: what the display reports, times the host's
+   *  correction. Rounded because it is also what the label shows, and "479.99 nits" helps nobody. */
+  private sdrWhiteNits(): number {
+    return Math.round(this.sourceSdrNits * sdrWhiteFactor(this.sdrStops));
+  }
+
+  /** `save` is false while dragging: `input` fires at the pointer's rate, and one localStorage
+   *  write per pixel of travel is a hundred writes for one decision. The addon is told only when
+   *  the value actually moved — a drag ends with `input` and `change` carrying the same number, and
+   *  the second one is a save, not a second correction. */
+  private setSdrStops(stops: number, save: boolean, force = false): void {
+    const next = clampSdrStops(stops);
+    if (next !== this.sdrStops || force) {
+      this.sdrStops = next;
+      this.nativeCapture?.setSdrWhite(this.sdrWhiteNits());
+      this.renderSdrWhite();
+    }
+    if (save) saveSdrStops(this.sdrStops);
+  }
+
+  /** The row, its label, and whether it belongs on screen at all.
+   *
+   *  Hidden without a native capture (it is the tone map's divisor — meaningless on the
+   *  getDisplayMedia path) and hidden when the shell has no `setSdrWhite`, which is an older
+   *  installer paired with a newer web build. Note that `canCaptureNative()` does NOT gate on this
+   *  method the way it gates on `setCaptureFps`: refusing HDR outright to avoid a dead fps slider
+   *  is one trade, refusing it to avoid a dead brightness slider is a worse one. Hiding the control
+   *  keeps the same promise — no knob that does nothing — without costing the feature. */
+  private renderSdrWhite(): void {
+    const usable = !!this.nativeCapture && typeof window.native?.setSdrWhite === 'function';
+    el('sdrwhite-row').hidden = !usable;
+    if (!usable) return;
+    const range = el<HTMLInputElement>('sdrwhite-range');
+    range.value = String(this.sdrStops);
+    // Nits, and only nits: a percentage compares to nothing, while this number sits next to the one
+    // Windows shows for the same display's SDR brightness.
+    const label = `${this.sdrWhiteNits()} nits`;
+    setText('sdrwhite-value', label);
+    // A screen reader would otherwise announce "-1", which is the stop count — a unit nobody asked
+    // about. The bitrate slider needs no equivalent: there the raw value IS the meaning.
+    range.setAttribute('aria-valuetext', label);
+  }
+
   private applyFps(): void {
     // The native path first: a MediaStreamTrackGenerator rejects applyConstraints outright
     // (OverconstrainedError, measured), so the cap has to reach the addon — where it is also worth
@@ -598,6 +655,17 @@ export class HostController {
       signal,
     });
     bitrate.addEventListener('change', (e) => this.setBitrate(Number((e.target as HTMLInputElement).value)), { signal });
+    // `input`, unlike the bitrate above, and for the opposite reason: a drag here costs one atomic
+    // store in the addon, and watching the picture change while you drag IS the feature. Only the
+    // save waits for `change`, so a drag writes to localStorage once instead of a hundred times.
+    const sdr = el<HTMLInputElement>('sdrwhite-range');
+    sdr.addEventListener('input', (e) => this.setSdrStops(Number((e.target as HTMLInputElement).value), false), { signal });
+    sdr.addEventListener('change', (e) => this.setSdrStops(Number((e.target as HTMLInputElement).value), true), { signal });
+    // A visible way back to what the display reports. A control with no reset is a trap: two
+    // seconds of dragging and the host has no idea what their screen actually said.
+    // `force`: this is the "put it back" button, so it re-sends even when the state already says 0
+    // — the point of pressing it is to stop trusting the state.
+    el('btn-sdrwhite-auto').addEventListener('click', () => this.setSdrStops(0, true, true), { signal });
     el('toggle-sysaudio').addEventListener('click', () => void this.toggleSystemAudio(), { signal });
     el('toggle-mic').addEventListener('click', () => void this.toggleMic(), { signal });
   }
@@ -808,9 +876,11 @@ export class HostController {
   };
 
   private renderSettings(): void {
-    // The one save site, and it is here because it is synchronous and unconditional: every path
-    // that changes a setting repaints the panel, so nothing can change without being written. The
-    // dialog's `close` event cannot do this job — see onSettingsClosed.
+    // The one save site FOR `quality`, and it is here because it is synchronous and unconditional:
+    // every path that changes a quality setting repaints the panel, so nothing can change without
+    // being written. The dialog's `close` event cannot do this job — see onSettingsClosed.
+    // (The reference-white correction has its own store and its own save; see setSdrStops, which
+    // writes on `change` rather than on every pixel of a drag.)
     //
     // Two non-user-driven mutations reach here, and both are handled rather than absent:
     //   - clampResolution lowers the cap to fit the source, which is why `pickedResolution` and
@@ -843,6 +913,7 @@ export class HostController {
     setText('chip-resolution', resolutionLabel);
     setText('chip-fps', `${this.quality.fps} fps`);
     setText('chip-bitrate', `${this.quality.bitrate} mbps`);
+    this.renderSdrWhite();
     const label = this.stream?.getVideoTracks()[0]?.label;
     setText('settings-source-hint', label || 'no source selected');
     setText('btn-modal-source', this.stream ? 'Change source' : 'Choose source');
@@ -1120,6 +1191,22 @@ function saveQuality(q: Quality): void {
     localStorage.setItem(QUALITY_KEY, serializeQuality(q));
   } catch {
     /* nothing to recover: the session keeps working, it just won't be remembered */
+  }
+}
+
+function loadSdrStops(): number {
+  try {
+    return parseSdrStops(localStorage.getItem(SDR_WHITE_KEY));
+  } catch {
+    return 0;
+  }
+}
+
+function saveSdrStops(stops: number): void {
+  try {
+    localStorage.setItem(SDR_WHITE_KEY, String(stops));
+  } catch {
+    /* same as the quality store: never worth taking a live share down for */
   }
 }
 

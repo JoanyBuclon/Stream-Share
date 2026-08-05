@@ -97,6 +97,46 @@ export function parseQuality(raw: string | null): Quality {
   return q;
 }
 
+// --- HDR tone map exposure (desktop, native capture only) ---
+//
+// Kept OUT of `Quality`, and out of the store it writes, deliberately. Quality is quality maths
+// that presets spread over; this is a correction to a physical measurement, and putting it there
+// would force two exemptions immediately — presets must not reset it, and nudging it must not clear
+// `preset`. A key of its own answers both by not asking.
+//
+// One value for the whole machine, not one per display, and that is a real limitation rather than
+// an oversight: a host with a 480-nit panel and a 250-nit one gets the correction they found by eye
+// on the first applied to the second, where it means something else. It is stored as a RELATIVE
+// factor precisely so it transports better than an absolute would, and the "auto" button is the way
+// out. Per-display keys the day someone actually calibrates two screens.
+
+/** localStorage key for the tone-map exposure, in stops. Per-origin like the quality store. */
+export const SDR_WHITE_KEY = 'ss-sdr-stops';
+/** ±3 stops = an eighth to eight times the reported white. Sized by the case that motivates the
+ *  control, not by taste: a display that reports nothing leaves the shell on the scRGB default of
+ *  80 nits, which is 2.6 stops below the 480 measured here — at ±2 that user would hit the end of
+ *  the slider still short of their own screen. Mirrored by the `<input>` in HostScreen.astro, which
+ *  imports this constant rather than repeating it. */
+export const SDR_STOPS_MAX = 3;
+
+/** Exposure, not a percentage: the shader divides by this white, so the control is a multiplier and
+ *  perception of brightness is logarithmic. `2 ** stops` also puts "as measured" at the exact centre
+ *  of the slider, where a linear 50–200% would sit it a third of the way along. */
+export function sdrWhiteFactor(stops: number): number {
+  return 2 ** clampSdrStops(stops);
+}
+
+export function clampSdrStops(stops: number): number {
+  if (!Number.isFinite(stops)) return 0;
+  return Math.min(SDR_STOPS_MAX, Math.max(-SDR_STOPS_MAX, stops));
+}
+
+/** 0 (as reported) for anything unreadable — a stored value from another version, or none at all.
+ *  `Number(null)` is 0, so the empty case needs no branch of its own. */
+export function parseSdrStops(raw: string | null): number {
+  return clampSdrStops(Number(raw));
+}
+
 /** Label for a host resolution tier: 4K / 2K for the top two, `${h}p` otherwise. */
 export function resLabel(target: ResolutionTarget): string {
   return target === 2160 ? '4K' : target === 1440 ? '2K' : `${target}p`;

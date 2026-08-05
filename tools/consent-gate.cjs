@@ -29,7 +29,7 @@ const evaluate = (win, expr) =>
     `(async () => { try { return { ok: await (${expr}) }; } catch (e) { return { err: String(e && e.message ? e.message : e) }; } })()`,
   );
 
-const START = `(() => { window.native.startNativeCapture(undefined, undefined, 30); return 'started'; })()`;
+const START = `(() => { window.native.startNativeCapture(undefined, 30); return 'started'; })()`;
 
 /**
  * One attempt, and ALWAYS stop afterwards.

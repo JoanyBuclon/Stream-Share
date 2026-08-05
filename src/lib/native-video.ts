@@ -24,6 +24,9 @@ export interface NativeCapture {
   /** Cap the capture rate; 0 means uncapped. Goes to the addon, which refuses frames before the
    *  tone map — the generated track rejects `applyConstraints` outright. */
   setFps(fps: number): void;
+  /** Change the tone map's divisor without restarting anything. See `setSdrWhite` in global.d.ts
+   *  for why it exists and why a still screen does not update immediately. */
+  setSdrWhite(nits: number): void;
   /** Height of the frames actually arriving, or 0 before the first one.
    *
    *  The generated track cannot answer this when it matters: `getSettings()` is
@@ -80,10 +83,11 @@ export function canCaptureNative(): boolean {
  * Which display is not ours to say — see `startNativeCapture` in global.d.ts. The shell captures
  * whatever the last confirmed pick approved, and throws if that is nothing.
  *
- * `sdrWhiteNits` comes from the source list; leaving it undefined means the addon falls back to the
- * scRGB definition (80), which on a real HDR desktop is wrong by whatever the user's SDR brightness
- * slider is set to — measured at 6x on the dev machine, and the difference between 0% and 70% of
- * the highlights clipping. Pass the measured value.
+ * `sdrWhiteNits` is the tone map's divisor: what the display reports, times whatever correction the
+ * host has dialled in (see the reference-white control in host.ts). The caller always passes one —
+ * the parameter stays optional only because the addon has the same scRGB fallback of 80, which on a
+ * real HDR desktop is wrong by whatever the SDR brightness slider is set to: measured at 6x here,
+ * and the difference between 0% and 70% of the highlights clipping.
  */
 export async function captureNative(sdrWhiteNits?: number, fps?: number): Promise<NativeCapture> {
   const native = window.native;
@@ -120,9 +124,7 @@ export async function captureNative(sdrWhiteNits?: number, fps?: number): Promis
     };
     window.addEventListener('message', onMessage);
     try {
-      // No knee: the shader default (0.75) is the only value anything has ever passed, and a
-      // parameter with no caller is a knob to maintain for nobody. Add it back with its slider.
-      native.startNativeCapture?.(sdrWhiteNits, undefined, fps);
+      native.startNativeCapture?.(sdrWhiteNits, fps);
     } catch (err) {
       window.removeEventListener('message', onMessage);
       clearTimeout(handover);
@@ -261,7 +263,16 @@ export async function captureNative(sdrWhiteNits?: number, fps?: number): Promis
     track: generator,
     droppedInPage: () => dropped,
     height: () => height,
-    setFps: (value: number) => native.setCaptureFps?.(value),
+    // Both guarded on `stopped`: the addon is a process-wide singleton, so a NativeCapture the host
+    // has already dropped would otherwise reach across and re-tune the session that replaced it.
+    // Not reachable today (stopNative nulls the reference first), and one line each to keep it that
+    // way for the next caller.
+    setFps: (value: number) => {
+      if (!stopped) native.setCaptureFps?.(value);
+    },
+    setSdrWhite: (nits: number) => {
+      if (!stopped) native.setSdrWhite?.(nits);
+    },
     stop: () => {
       if (stopped) return;
       stopped = true;

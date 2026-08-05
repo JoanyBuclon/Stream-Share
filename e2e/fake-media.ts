@@ -122,10 +122,10 @@ const FAKE_SOURCES = [
  */
 export async function fakeNative(
   page: Page,
-  opts: { delaysMs?: number[]; fail?: boolean; nativeCapture?: 'ok' | 'throw' | 'noport' } = {},
+  opts: { delaysMs?: number[]; fail?: boolean; nativeCapture?: 'ok' | 'throw' | 'noport'; noSdrWhite?: boolean } = {},
 ): Promise<void> {
   await page.addInitScript(
-    ([sources, { delaysMs = [0], fail = false, nativeCapture = null }]) => {
+    ([sources, { delaysMs = [0], fail = false, nativeCapture = null, noSdrWhite = false }]) => {
       const px =
         'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
       let call = 0;
@@ -158,13 +158,18 @@ export async function fakeNative(
       // again later.
       const DEVICE_BY_ID: Record<string, string> = { 'screen:0:0': String.raw`\\.\DISPLAY1` };
       const cap = window as unknown as {
-        __native: { started: Array<{ device: string; sdrWhiteNits?: number; fps?: number }>; stopped: number; fps: number[] };
+        __native: {
+          started: Array<{ device: string; sdrWhiteNits?: number; fps?: number }>;
+          stopped: number;
+          fps: number[];
+          sdrWhite: number[];
+        };
         /** The capture item went away and the addon says so. */
         __nativeClosed?: boolean;
         /** The frames stop while the addon keeps claiming everything is fine. */
         __nativeStall?: boolean;
       };
-      cap.__native = { started: [], stopped: 0, fps: [] };
+      cap.__native = { started: [], stopped: 0, fps: [], sdrWhite: [] };
       let framePort: MessagePort | null = null;
       let pump: ReturnType<typeof setInterval> | undefined;
       Object.defineProperty(window, 'native', {
@@ -187,7 +192,7 @@ export async function fakeNative(
           // Explicit, not omitted: the suite exercises the getDisplayMedia path, and a fake that
           // returned true here would silently route every spec through the native branch.
           canCaptureNative: () => nativeCapture !== null,
-          startNativeCapture: (sdrWhiteNits?: number, _knee?: number, fps?: number) => {
+          startNativeCapture: (sdrWhiteNits?: number, fps?: number) => {
             // The consent gate, resolved the way the shell resolves it: the caller says nothing
             // about WHICH display, the shell answers with the one the last confirmed pick approved.
             // A caller that never went through the picker gets nothing.
@@ -230,6 +235,11 @@ export async function fakeNative(
             }, 66);
           },
           setCaptureFps: (fps: number) => cap.__native.fps.push(fps),
+          // `noSdrWhite` models an installer older than the web bundle: it can capture in HDR but
+          // knows nothing about the reference white. The renderer must then hide the control rather
+          // than offer a knob that does nothing — and rather than refuse HDR altogether, which is
+          // what `canCaptureNative` does for a missing fps setter. See renderSdrWhite in host.ts.
+          ...(noSdrWhite ? {} : { setSdrWhite: (nits: number) => cap.__native.sdrWhite.push(nits) }),
           stopNativeCapture: () => {
             cap.__native.stopped++;
             clearInterval(pump);

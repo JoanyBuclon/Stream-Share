@@ -18,6 +18,7 @@ interface NativeCalls {
   started: Array<{ device: string; sdrWhiteNits?: number; fps?: number }>;
   stopped: number;
   fps: number[];
+  sdrWhite: number[];
 }
 interface GdmCall {
   audio: boolean;
@@ -202,6 +203,77 @@ test('fps and pause are applied to the addon, which is the only thing that can h
   // 60 on start, 30 from the panel, 1 while paused, 30 again on resume — the last one is the
   // regression that matters: resuming at the paused rate would leave the share at 1 fps.
   await nativeCalls(page).toMatchObject({ fps: [60, 30, 1, 30] });
+
+  await ctx.close();
+});
+
+// The tone map divides by the display's reference white. Windows reports it (480 nits here, where
+// the scRGB default of 80 would clip 70% of the highlights) but it IS the user's own brightness
+// slider, so the reading can be right and the picture still wrong. This is the correction, and it
+// has to reach the addon live — restarting a capture to honour a slider would be absurd.
+test('the HDR reference white reaches the shell, and only exists on the native path', async ({ browser }) => {
+  const ctx = await browser.newContext();
+  const page = await ctx.newPage();
+  await fakeDisplayMedia(page, { audio: true });
+  await fakeNative(page, { nativeCapture: 'ok' });
+  await shareHdrScreen(page);
+  await previewHeight(page).toBe(720);
+
+  await page.click('#btn-settings');
+  await expect(page.locator('#sdrwhite-row')).toBeVisible();
+  await expect(page.locator('#sdrwhite-value')).toHaveText('480 nits'); // exactly what the display reports
+
+  // One stop up = twice the divisor, i.e. a DARKER picture — which is why the control is labelled
+  // as the white level and not as brightness. Exponential, so "as reported" sits at the centre of
+  // the travel rather than a third of the way along.
+  await page.locator('#sdrwhite-range').fill('1');
+  await expect(page.locator('#sdrwhite-value')).toHaveText('960 nits');
+  await nativeCalls(page).toMatchObject({ sdrWhite: [960] });
+
+  // And a way back, because an exposure control without one is a trap.
+  await page.click('#btn-sdrwhite-auto');
+  await expect(page.locator('#sdrwhite-value')).toHaveText('480 nits');
+  await nativeCalls(page).toMatchObject({ sdrWhite: [960, 480] });
+
+  // It survives a restart — a correction the host had to find by eye should not be found twice.
+  await page.locator('#sdrwhite-range').fill('-1');
+  await expect(page.locator('#sdrwhite-value')).toHaveText('240 nits');
+  // `goto('/')`, NOT `reload()`: hosting puts the room code in the hash, and reloading `/#CODE`
+  // lands on the JOIN screen — which is a 60 s timeout and a very confusing snapshot. (Ask me how
+  // I know. It is also the shape of a flake that cost an afternoon.)
+  await page.goto('/');
+  await shareHdrScreen(page);
+  await previewHeight(page).toBe(720);
+  // Applied from the very first frame, not one repaint later: a capture that starts at the measured
+  // white and jumps when the panel renders is a flash nobody asked for.
+  await nativeCalls(page).toMatchObject({ started: [{ sdrWhiteNits: 240 }] });
+  await page.click('#btn-settings');
+  await expect(page.locator('#sdrwhite-value')).toHaveText('240 nits');
+
+  // And it is gone on the getDisplayMedia path: no tone map there, so a knob would do nothing.
+  await page.click('#btn-modal-source');
+  await pick(page, 'window', 'Discord');
+  await expect(page.locator('#host-video')).toBeVisible();
+  await page.click('#btn-settings');
+  await expect(page.locator('#sdrwhite-row')).toBeHidden();
+
+  await ctx.close();
+});
+
+// The compatibility branch the control's own comment leans on: an installer that predates the
+// reference white paired with a newer web bundle. HDR still runs — refusing it outright, the way
+// `canCaptureNative` refuses a shell with no fps setter, would trade the feature for a slider — but
+// the control is hidden, because a knob that does nothing is worse than a missing one.
+test('an older shell that cannot set the reference white still captures, without the control', async ({ browser }) => {
+  const ctx = await browser.newContext();
+  const page = await ctx.newPage();
+  await fakeDisplayMedia(page, { audio: true });
+  await fakeNative(page, { nativeCapture: 'ok', noSdrWhite: true });
+  await shareHdrScreen(page);
+
+  await previewHeight(page).toBe(720); // the native path still runs
+  await page.click('#btn-settings');
+  await expect(page.locator('#sdrwhite-row')).toBeHidden();
 
   await ctx.close();
 });
