@@ -3,28 +3,65 @@ import { type Page } from '@playwright/test';
 // Replace the native screen-picker with a synthetic animated canvas stream, so the whole WebRTC
 // path runs for real (RTCPeerConnection, ICE, encode) but headless and without a user gesture.
 // Lives outside the specs because Playwright forbids importing one test file from another.
-export async function fakeDisplayMedia(page: Page, opts: { sizes?: Array<[number, number]> } = {}): Promise<void> {
+export async function fakeDisplayMedia(
+  page: Page,
+  opts: { sizes?: Array<[number, number]>; audio?: boolean; rejectFrom?: number } = {},
+): Promise<void> {
   // `sizes` gives each successive capture its own dimensions (the last entry repeats). Needed to
   // exercise anything that reacts to the SOURCE height — the resolution cap in particular, whose
   // interesting case is switching from a small window to a big screen.
-  await page.addInitScript((sizes: number[][]) => {
-    let call = 0;
-    navigator.mediaDevices.getDisplayMedia = async () => {
-      const [w, h] = sizes[Math.min(call++, sizes.length - 1)];
-      const canvas = document.createElement('canvas');
-      canvas.width = w;
-      canvas.height = h;
-      const ctx = canvas.getContext('2d');
-      let hue = 0;
-      setInterval(() => {
-        if (!ctx) return;
-        hue = (hue + 8) % 360;
-        ctx.fillStyle = `hsl(${hue}, 70%, 50%)`;
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-      }, 66); // keep painting so the encoder has fresh frames
-      return canvas.captureStream(15);
-    };
-  }, opts.sizes ?? [[640, 360]]);
+  //
+  // `audio` hands back a real (silent oscillator) audio track when the caller asked for one. Off by
+  // default deliberately: every capture in this suite requests system audio and has always got a
+  // video-only stream back, so turning it on for everyone would put a system track through
+  // AudioMixer in specs that are not about audio. The HDR path opts in — there, "the share is not
+  // muted" is the assertion.
+  await page.addInitScript(
+    ([sizes, withAudio, rejectFrom]) => {
+      let call = 0;
+      navigator.mediaDevices.getDisplayMedia = async (constraints?: DisplayMediaStreamOptions) => {
+        // `rejectFrom` fails every call from that index on — the capture that goes wrong AFTER a
+        // share is already running, which is the only way to test what happens to the old one.
+        if (rejectFrom >= 0 && call >= rejectFrom) {
+          call++;
+          throw new DOMException('e2e: capture refused', 'NotAllowedError');
+        }
+        const [w, h] = sizes[Math.min(call++, sizes.length - 1)];
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        let hue = 0;
+        setInterval(() => {
+          if (!ctx) return;
+          hue = (hue + 8) % 360;
+          ctx.fillStyle = `hsl(${hue}, 70%, 50%)`;
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }, 66); // keep painting so the encoder has fresh frames
+        const stream = canvas.captureStream(15);
+        // Recorded because the native HDR path calls this for AUDIO ONLY and stops the video track
+        // it is forced to ask for. Neither half is observable otherwise, and getting it wrong means
+        // either a muted share or a second screen capture running for nothing.
+        const entry = { audio: !!constraints?.audio, videoStopped: false };
+        const w2 = window as unknown as { __gdm?: Array<typeof entry> };
+        (w2.__gdm ??= []).push(entry);
+        const video = stream.getVideoTracks()[0];
+        const stop = video.stop.bind(video);
+        video.stop = () => {
+          entry.videoStopped = true;
+          stop();
+        };
+        if (withAudio && constraints?.audio) {
+          const audioCtx = new AudioContext();
+          const dest = audioCtx.createMediaStreamDestination();
+          audioCtx.createOscillator().connect(dest); // never started: a live track carrying silence
+          stream.addTrack(dest.stream.getAudioTracks()[0]);
+        }
+        return stream;
+      };
+    },
+    [opts.sizes ?? [[640, 360]], opts.audio ?? false, opts.rejectFrom ?? -1] as const,
+  );
 }
 
 /**
@@ -79,10 +116,16 @@ const FAKE_SOURCES = [
  * ~300-550 ms); the last entry repeats. Per-call rather than a single value so a test can make an
  * EARLIER call resolve after a later one — the ordering the staleness guard exists for, and which
  * equal delays can never produce. `fail` makes every call reject.
+ *
+ * `nativeCapture` turns on the HDR path (see below). Absent, `canCaptureNative()` answers false and
+ * every capture goes through getDisplayMedia, which is what the rest of the suite wants.
  */
-export async function fakeNative(page: Page, opts: { delaysMs?: number[]; fail?: boolean } = {}): Promise<void> {
+export async function fakeNative(
+  page: Page,
+  opts: { delaysMs?: number[]; fail?: boolean; nativeCapture?: 'ok' | 'throw' | 'noport' } = {},
+): Promise<void> {
   await page.addInitScript(
-    ([sources, { delaysMs = [0], fail = false }]) => {
+    ([sources, { delaysMs = [0], fail = false, nativeCapture = null }]) => {
       const px =
         'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
       let call = 0;
@@ -98,6 +141,27 @@ export async function fakeNative(page: Page, opts: { delaysMs?: number[]; fail?:
       // Explicitly null, not undefined: a refusal leaves `__audio` untouched, so before the first
       // successful capture the tests must still be able to read "nothing is running".
       (window as unknown as { __audio: unknown }).__audio = null;
+
+      // --- native HDR capture ---
+      //
+      // What the real shell does (electron/src/preload.ts): a C++ addon captures the screen in
+      // scRGB, tone-maps it on the GPU, and the PRELOAD builds a VideoFrame per frame and
+      // TRANSFERS it to the page over a MessagePort handed across by one synchronous
+      // `window.postMessage`. Everything above that port is real code (src/lib/native-video.ts),
+      // so imitating the port contract exercises the whole routing without an addon or Electron.
+      //
+      // Deliberately NOT modelled: the approved-device gate (the real call throws when the device
+      // name is not the one the user confirmed) and the addon's own "capture already running".
+      const cap = window as unknown as {
+        __native: { started: Array<{ deviceName: string; sdrWhiteNits?: number; fps?: number }>; stopped: number; fps: number[] };
+        /** The capture item went away and the addon says so. */
+        __nativeClosed?: boolean;
+        /** The frames stop while the addon keeps claiming everything is fine. */
+        __nativeStall?: boolean;
+      };
+      cap.__native = { started: [], stopped: 0, fps: [] };
+      let framePort: MessagePort | null = null;
+      let pump: ReturnType<typeof setInterval> | undefined;
       Object.defineProperty(window, 'native', {
         value: {
           // The signaling lives on :8080 in dev; app.ts derives the socket from this origin.
@@ -115,10 +179,56 @@ export async function fakeNative(page: Page, opts: { delaysMs?: number[]; fail?:
             // `unknown`, not `string`: the source list is no longer all strings since `hdr` landed.
             return (sources as Array<Record<string, unknown>>).map((s) => ({ ...s, thumbnail: px, icon: null }));
           },
-          // Explicit, not omitted: the suite exercises the getDisplayMedia path, and a future fake
-          // that returned true here would silently route every spec through the native branch —
-          // which needs a real addon, a MessagePort and VideoFrames that none of this provides.
-          canCaptureNative: () => false,
+          // Explicit, not omitted: the suite exercises the getDisplayMedia path, and a fake that
+          // returned true here would silently route every spec through the native branch.
+          canCaptureNative: () => nativeCapture !== null,
+          startNativeCapture: (deviceName: string, sdrWhiteNits?: number, _knee?: number, fps?: number) => {
+            cap.__native.started.push({ deviceName, sdrWhiteNits, fps });
+            // Throw BEFORE the handover, like the real preload: it validates the device against
+            // the user's confirmed pick first, so a refusal never leaves a port behind.
+            if (nativeCapture === 'throw') throw new Error('e2e: native capture refused');
+            if (nativeCapture === 'noport') return; // the handover goes missing — the locked-picker case
+            // Like the shell's closeFramePort(): a start with a session still open replaces it
+            // rather than leaving a second pump posting into an abandoned port.
+            clearInterval(pump);
+            framePort?.close();
+            const { port1, port2 } = new MessageChannel();
+            framePort = port1;
+            // 720p, not the 2560×1440 the picker advertises for this screen: the assertion that
+            // matters is that the ladder reads the height of the frames actually arriving, and a
+            // 1440p VideoFrame every 66 ms is 14 MB of copy per frame in headless for nothing.
+            const canvas = document.createElement('canvas');
+            canvas.width = 1280;
+            canvas.height = 720;
+            const ctx = canvas.getContext('2d');
+            if (ctx) {
+              ctx.fillStyle = '#2563eb';
+              ctx.fillRect(0, 0, canvas.width, canvas.height);
+            }
+            // Synchronous, inside the call, exactly like the shell — native-video.ts registers its
+            // listener first and would miss a handover posted any later.
+            window.postMessage({ streamShare: 'frames' }, location.origin, [port2]);
+            pump = setInterval(() => {
+              // A dead capture stops producing. It does NOT close the port: WGC going away (HDR
+              // switched off, monitor unplugged) is silent from the page's side, which is the whole
+              // reason native-video.ts polls `closed`. `__nativeStall` is the nastier version — the
+              // frames stop and the addon still reports itself healthy.
+              if (cap.__nativeClosed || cap.__nativeStall || !framePort) return;
+              // Microseconds, like the addon's `timestampUs` — the repeater adds to this value.
+              const frame = new VideoFrame(canvas, { timestamp: Math.round(performance.now() * 1000) });
+              framePort.postMessage(frame, [frame]);
+            }, 66);
+          },
+          setCaptureFps: (fps: number) => cap.__native.fps.push(fps),
+          stopNativeCapture: () => {
+            cap.__native.stopped++;
+            clearInterval(pump);
+            framePort?.close();
+            framePort = null;
+          },
+          // Only `closed` is ever read (native-video.ts's repeater); the other twenty counters are
+          // diagnostics with no caller in the page.
+          nativeCaptureStats: () => ({ closed: !!cap.__nativeClosed }),
           selectSource: async (id: string) => {
             (window as unknown as { __picked?: string }).__picked = id;
           },

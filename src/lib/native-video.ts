@@ -34,8 +34,22 @@ export interface NativeCapture {
 /** Repeater period. Note it doubles as the staleness threshold, so the FIRST repeat lands up to
  *  2×IDLE_REPEAT_MS after the last real frame — the floor is 1-2 fps, not a flat 2. */
 const IDLE_REPEAT_MS = 500;
-/** Consecutive repeats before we stop believing the capture is alive. See the repeater. */
-const MAX_REPEATS = 20;
+/**
+ * Consecutive repeats before we stop believing the capture is alive — deliberately far beyond any
+ * plausible idle. `closed` is the real signal and it fires immediately; this is only the net for an
+ * addon that stops producing while still claiming to be healthy.
+ *
+ * It started at 20 (10 s) and that was wrong in the dangerous direction. WGC delivers nothing at
+ * all while nothing changes, and "nothing changes" is a real state: a full-screen document with no
+ * caret and a still mouse can go minutes without a single frame — the taskbar clock only ticks once
+ * a minute. A false positive here KILLS A WORKING SHARE; a slow true positive only delays a
+ * teardown the user will trigger themselves. So the asymmetry decides the value.
+ *
+ * ponytail: a count of repeats is a proxy for "is the capture healthy", and the addon is the only
+ * thing that can answer that properly. The upgrade is a real health signal from it (its own frame
+ * counter against wall time), not a bigger number here.
+ */
+const MAX_REPEATS = 240; // 2 minutes at IDLE_REPEAT_MS
 /** The port handover is synchronous inside `startNativeCapture`; this is 100x the margin. */
 const PORT_TIMEOUT_MS = 3000;
 
@@ -138,6 +152,22 @@ export async function captureNative(
   let repeats = 0;
   let height = 0;
 
+  /**
+   * End the track in the way host.ts can HEAR — i.e. from the source side.
+   *
+   * `generator.stop()` does not do that: measured in this Chromium, it moves `readyState` to
+   * `ended` and fires nothing, which is exactly what the spec says (`ended` is not fired when the
+   * application itself calls stop()). Closing the writable is what ends the track *as a source*,
+   * and that does fire it — 0.4 ms later, measured.
+   *
+   * The distinction is the whole point, so both callers stay honest:
+   *   - the capture DIED (see the repeater) → notify, or the host keeps a frozen frame on screen;
+   *   - we stopped it on purpose (see `stop()`) → stay silent, the host already knows. Firing there
+   *     ran `stopSource()` inside `capture()`'s await on every source change away from HDR: the
+   *     share un-paused itself and the per-app mutes were dropped.
+   */
+  const endTrack = (): void => void writer.close().catch(() => {});
+
   const send = (frame: VideoFrame): void => {
     writing = true;
     lastWriteMs = performance.now();
@@ -173,15 +203,29 @@ export async function captureNative(
    * likeliest way to get there is the user pressing Win+Alt+B, which on an HDR feature is not an
    * exotic scenario. So: give up after MAX_REPEATS, or as soon as the addon reports the capture
    * item closed, and end the track — `ended` is what host.ts listens to for "the source is gone".
+   *
+   * MAX_REPEATS is the net for when the addon does NOT report it — see the constant for why it is
+   * as long as it is, and why that branch is not the one doing the work.
    */
   const repeater = setInterval(() => {
-    if (stopped || writing || !last) return;
-    if (performance.now() - lastWriteMs < IDLE_REPEAT_MS) return;
+    if (stopped) return;
+    // The death check runs FIRST, and in particular before the `!last` guard below. A capture can
+    // die before it ever produces a frame — HDR switched off between the pick and the first frame,
+    // or a capture item that was already closed — and treating "no frame yet" as "nothing to do"
+    // left the host on a black preview labelled `live` for ever, which is the exact failure the
+    // rest of this comment is about. `closed` is terminal in the addon (set by
+    // GraphicsCaptureItem::Closed, cleared only by Stop), so this can never kill a live capture.
     if (repeats >= MAX_REPEATS || window.native?.nativeCaptureStats?.()?.closed) {
       clearInterval(repeater);
-      generator.stop(); // fires `ended`, which is how the host learns the source died
+      // NOT `stopped = true`: that is stop()'s own guard, and setting it here would make the
+      // host's stop() — which is exactly what `ended` triggers — return before releasing the WGC
+      // session and the port. Writes to the now-closed track simply reject, and send() closes
+      // those frames.
+      endTrack(); // `ended` is how the host learns the source died — see endTrack
       return;
     }
+    if (writing || !last) return;
+    if (performance.now() - lastWriteMs < IDLE_REPEAT_MS) return;
     repeats++;
     try {
       // A monotonically increasing timestamp, tracked separately from the source frame: the encoder
@@ -226,12 +270,18 @@ export async function captureNative(
       // then never be closed — the exact hardware-buffer leak this file exists to avoid. With
       // `stopped` set, the handler above closes every straggler.
       // ponytail: a macrotask is a heuristic, not a guarantee — nothing orders a setTimeout against
-      // a MessagePort queue. It drains what is there in practice; a formal drain would need a
+      // a MessagePort queue, and `stopNativeCapture()` on the line below closes the producer's end
+      // synchronously, so this also assumes messages already posted survive their sender closing.
+      // Both hold in practice and neither is specified or measured; a formal drain would need a
       // sentinel message from the preload, for a handful of frames at teardown.
       native.stopNativeCapture?.();
       setTimeout(() => port.close(), 0);
-      void writer.close().catch(() => {});
+      // generator.stop(), NOT endTrack(): a deliberate stop must not fire `ended`. See endTrack.
       generator.stop();
+      // The one frame that could otherwise slip through this file's rule that every frame is
+      // either written or closed: a write in flight right now settles only if something settles
+      // it, and releasing the lock rejects it — which runs send()'s catch, which closes it.
+      writer.releaseLock();
     },
   };
 }

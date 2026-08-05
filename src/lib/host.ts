@@ -214,14 +214,21 @@ export class HostController {
    *  display surface, so they come through getUserMedia. Everything downstream — setStream, the
    *  quality ladder, the peers — treats the result as any other MediaStream. */
   private async capture(source?: NativeSource): Promise<void> {
-    // Every source change starts by ending the native session, whatever the new source turns out
-    // to be. Only one WGC session can exist at a time (the addon throws "capture already running"),
-    // and switching from an HDR screen to anything else would otherwise leave it feeding a track
-    // that has been replaced. One place, so no branch can forget.
-    this.stopNative();
     const deviceId = source ? cameraDeviceId(source.id) : null;
     if (deviceId) return this.captureCamera(deviceId);
-    if (source?.hdr && source.deviceName && canCaptureNative()) return this.captureHdr(source);
+    if (source?.hdr && source.deviceName && canCaptureNative()) {
+      // ONLY here. Two WGC sessions cannot coexist (the addon throws "capture already running"), so
+      // an HDR→HDR switch has to kill the old one before starting the new one — and that is the one
+      // case where a failure leaves the previous share frozen, with no way around it.
+      //
+      // Every other source change must NOT do this. Stopping up front used to be unconditional, and
+      // it is silent since a deliberate stop stopped firing `ended`: a getDisplayMedia that then
+      // failed (window closed since the listing, prompt refused, camera busy) left the host on the
+      // last HDR frame with a "live" badge and nobody told. The previous session dies in setStream's
+      // `finally` instead, i.e. only once the new one is committed.
+      this.stopNative();
+      return this.captureHdr(source);
+    }
     return this.captureDisplay();
   }
 

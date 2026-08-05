@@ -706,9 +706,23 @@ les 500 ms.
 
 Mais un répéteur sans limite rend une capture **morte** indistinguable d'un écran
 immobile : `Win+Alt+B` coupe le HDR, WGC s'arrête, et le flux continue d'afficher la
-dernière image avec des stats vertes et un badge « live ». Il s'arrête donc après 20
-répétitions consécutives, ou dès que l'addon signale `closed`, et termine la track —
-ce que `host.ts` écoute déjà comme « la source a disparu ».
+dernière image avec des stats vertes et un badge « live ». Il s'arrête donc dès que
+l'addon signale `closed`, ou après `MAX_REPEATS` répétitions consécutives, et termine
+la track — ce que `host.ts` écoute déjà comme « la source a disparu ».
+
+`closed` est le vrai signal, immédiat et fiable ; le compteur n'est que le filet pour
+un addon qui cesse de produire en se déclarant sain. Il valait 20 (10 s), et c'était
+faux **du mauvais côté** : « rien ne change » est un état réel — un document en plein
+écran, sans caret ni souris, peut passer des minutes sans une seule frame, l'horloge
+de la barre des tâches ne bougeant qu'une fois par minute. Un faux positif **tue un
+partage qui marche** ; un vrai positif tardif ne fait que retarder un arrêt que
+l'utilisateur va déclencher lui-même. D'où 240 (2 min). Le vrai correctif serait un
+signal de santé venant de l'addon, pas un nombre plus grand.
+
+Et la détection tourne **avant** le garde « rien à répéter ». Une capture peut mourir
+sans avoir jamais produit de frame — HDR coupé entre le choix de la source et la
+première image — et traiter ça comme « rien à faire » laissait l'hôte sur un preview
+**noir** étiqueté live, indéfiniment.
 
 > Deux erreurs de conception attrapées en revue, toutes deux silencieuses : les frames
 > répétées portaient **le même timestamp** (rebasées sur une frame source qui ne bouge
@@ -716,21 +730,40 @@ ce que `host.ts` écoute déjà comme « la source a disparu ».
 > rien — un bureau réel n'est jamais parfaitement immobile. La porte compare maintenant
 > *encodées* et *capturées* : le surplus ne peut venir que des répétitions.
 
+> **Et « terminer la track » ne se fait pas comme on croit.** `generator.stop()` met
+> `readyState` à `ended` **sans émettre l'événement** — mesuré, et conforme à la spec
+> (`ended` n'est pas émis quand c'est l'application qui appelle `stop()`). Le répéteur
+> l'appelait : la capture morte était détectée, la track mourait, et `host.ts`
+> n'apprenait rien — le bug même que le répéteur existe pour éviter. Seul l'arrêt
+> **côté source** notifie, donc `writer.close()`. La distinction est portante dans les
+> deux sens : un arrêt délibéré (`NativeCapture.stop()`) doit rester silencieux, sinon
+> l'`ended` tombe pendant l'`await` de `capture()` et `stopSource()` s'exécute à chaque
+> changement de source — la diffusion se dé-met en pause toute seule et les mutes
+> per-app partent avec. Les deux sont tenus par des tests qui échouent sans le
+> correctif (vérifié en le retirant).
+
 **Ce qui reste vrai et non mesuré**, pour la suite du chantier natif :
 - **WGC ne livre que sur changement.** Un bureau immobile rend ~24 fps, et 0,2 fps
   quand plus rien ne bouge. C'est une qualité (aucun encodage gaspillé) mais le
   chemin natif doit répéter la dernière frame si l'encodeur a besoin d'une cadence.
 - **Le chemin GPU sous charge réelle.** Voir l'encadré du tableau : tout est mesuré
   GPU oisif.
-- **Le routage n'a aucune couverture automatisée.** `tools/native-track.cjs` prouve
-  la chaîne addon → track → encodeur, mais ne charge pas une ligne de `host.ts` ; et
-  l'e2e ne prend jamais la branche native (`canCaptureNative: () => false` dans le
-  faux shell, faute d'addon, de MessagePort et de `VideoFrame`). Donc `captureHdr`,
-  `loopbackAudioTrack`, le cycle de vie de `nativeCapture` et le repli de
-  `sourceHeight()` ne sont vérifiés que par revue et par essai manuel. Le chemin
-  praticable : un `fakeNative(page, { nativeCapture: true })` qui alimente un
-  MessagePort depuis un `captureStream` de canvas — ça couvre tout ce qui est
-  au-dessus du port, sans addon ni Electron.
+- **La porte « écran immobile » du harness ne parle plus que quand elle le peut.**
+  Sur cette machine, le même run donne 3 frames ou 52 sur la même fenêtre de 2,5 s,
+  mover caché dans les deux cas — et couvrir tout l'écran capturé d'une fenêtre opaque
+  toujours-au-dessus n'y change rien (38→39, 45→48). La cause n'est pas identifiée.
+  La porte est donc **skippée** quand l'écran n'est jamais devenu immobile, comme celle
+  du H.265 : sinon elle mesure la pièce. La logique du répéteur, elle, est couverte de
+  façon déterministe en e2e (frames comptées sur la track elle-même).
+- **Deux portes du harness varient avec la charge** (cadence encodée, résolution
+  pleine) : sur une machine occupée l'encodeur descend à 1080p ou sous 20 fps. Elles
+  alternent d'un run à l'autre sur du code identique.
+- **Le routage est couvert depuis `e2e/desktop-hdr.spec.ts`**, mais seulement
+  au-dessus du port. `fakeNative(page, { nativeCapture })` imite le contrat du
+  preload — un `MessageChannel`, un `window.postMessage` synchrone, des `VideoFrame`
+  transférées depuis un canvas — et le reste est du vrai code : le picker, `host.ts`,
+  `native-video.ts`, le `MediaStreamTrackGenerator`. Ce qu'aucun de ces tests ne
+  touche : l'addon, Electron, et la porte de consentement (ci-dessous).
 - **La porte de consentement du chemin natif n'est exercée qu'en production** : le
   harness s'auto-approuve. Si `ss:select-source` n'arrive pas à relier l'id
   `desktopCapturer` à une sortie DXGI, `startNativeCapture` refuse et on retombe sur
