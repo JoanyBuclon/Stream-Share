@@ -216,7 +216,9 @@ export class HostController {
   private async capture(source?: NativeSource): Promise<void> {
     const deviceId = source ? cameraDeviceId(source.id) : null;
     if (deviceId) return this.captureCamera(deviceId);
-    if (source?.hdr && source.deviceName && canCaptureNative()) {
+    // `hdr` alone: it is only ever true when the shell holds a DXGI output for this source, and
+    // that output is the one it captures. The page is not told which, and has nothing to pass on.
+    if (source?.hdr && canCaptureNative()) {
       // ONLY here. Two WGC sessions cannot coexist (the addon throws "capture already running"), so
       // an HDR→HDR switch has to kill the old one before starting the new one — and that is the one
       // case where a failure leaves the previous share frozen, with no way around it.
@@ -273,7 +275,6 @@ export class HostController {
     let capture: NativeCapture;
     try {
       capture = await captureNative(
-        source.deviceName,
         // Only when it was really read: the 80-nit fallback is a plausible-looking number that
         // would make the tone map wrong by up to 6x, and the addon's own default is the same value.
         source.sdrWhiteMeasured ? source.sdrWhiteNits : undefined,

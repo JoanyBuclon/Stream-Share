@@ -4,9 +4,13 @@ import {
   parseAudioApps,
   createWakeLockToggle,
   nativeDisplayFor,
+  pickerSources,
+  approvedDeviceFor,
   rendererSecurity,
   type PowerBlocker,
   type NativeDisplay,
+  type CapturerSource,
+  type PickerDisplay,
 } from './config.ts';
 
 // The wake-lock bookkeeping fails silently by construction: get it wrong and the only symptom is a
@@ -173,6 +177,100 @@ test('nativeDisplayFor: tolère un pixel d écart, et rend null sans corresponda
   assert.equal(nativeDisplayFor([], { bounds: { x: 0, y: 0, width: 1, height: 1 }, scaleFactor: 1 }), null);
   // scaleFactor 0 ne doit pas écraser toutes les origines sur 0 et faire matcher le premier écran.
   assert.equal(nativeDisplayFor(DISPLAYS, { bounds: { x: 2560, y: 0, width: 1920, height: 1080 }, scaleFactor: 0 })?.deviceName, String.raw`\\.\DISPLAY5`);
+});
+
+// --- picker listing and the native consent gate ---
+//
+// Ce que ces tests gardent : le chemin natif ne passe PAS par setDisplayMediaRequestHandler, donc
+// `approvedDeviceFor` est sa seule porte, et elle lit la table construite par `pickerSources` —
+// seul endroit du programme où un id de picker est associé à un nom DXGI (voir son docblock pour
+// ce qui se passait quand il y en avait deux).
+
+const img = (tag: string) => ({ toJPEG: () => ({ toString: () => `jpeg-${tag}` }) });
+/** L'écran HDR (id Electron 100), l'écran SDR (200), et une fenêtre. */
+const RAW: CapturerSource[] = [
+  { id: 'screen:0:0', name: 'Screen 1', display_id: '100', thumbnail: img('s1'), appIcon: null },
+  { id: 'screen:1:0', name: 'Screen 2', display_id: '200', thumbnail: img('s2'), appIcon: null },
+  { id: 'window:12:0', name: 'Discord', display_id: '', thumbnail: img('w'), appIcon: { isEmpty: () => false, toDataURL: () => 'data:icon' } },
+];
+const PICKER_DISPLAYS: PickerDisplay[] = [
+  { id: 100, bounds: { x: 0, y: 0, width: 2560, height: 1440 }, scaleFactor: 1 },
+  { id: 200, bounds: { x: 2560, y: 0, width: 1920, height: 1080 }, scaleFactor: 1 },
+];
+
+test('pickerSources: le HDR est par source, pas par machine', () => {
+  const { sources } = pickerSources(RAW, PICKER_DISPLAYS, DISPLAYS, undefined);
+  assert.equal(sources.find((s) => s.id === 'screen:0:0')?.hdr, true);
+  // Une machine qui a un écran HDR ne doit pas faire passer son écran SDR par le chemin natif.
+  assert.equal(sources.find((s) => s.id === 'screen:1:0')?.hdr, false);
+  assert.equal(sources.find((s) => s.id === 'window:12:0')?.hdr, false);
+  assert.deepEqual(sources.map((s) => s.kind), ['screen', 'screen', 'window']);
+  // Le point du chantier : aucun nom de périphérique ne part vers le renderer.
+  assert.equal(sources.some((s) => JSON.stringify(s).includes('DISPLAY')), false);
+});
+
+test('pickerSources: la table des périphériques se limite aux écrans HDR appariés', () => {
+  const { devices } = pickerSources(RAW, PICKER_DISPLAYS, DISPLAYS, undefined);
+  // L'écran SDR est apparié lui aussi, mais le chemin natif ne lui est jamais proposé : une porte
+  // plus large que la fonctionnalité est une porte à refermer plus tard.
+  assert.deepEqual([...devices], [['screen:0:0', String.raw`\\.\DISPLAY1`]]);
+});
+
+// Une FENÊTRE qui rapporterait un display_id ne doit pas hériter du chemin natif : un clic dessus
+// lancerait une capture plein écran. Les fenêtres n'en rapportent pas sur cette machine (les six
+// ouvertes ont display_id=""), et c'est justement pour ne pas dépendre de ce détail que le contrôle
+// est sur le type d'id.
+test('pickerSources: une fenêtre qui rapporte un écran ne devient pas capturable en natif', () => {
+  const sneaky: CapturerSource[] = [
+    { id: 'window:12:0', name: 'Discord', display_id: '100', thumbnail: img('w'), appIcon: null },
+  ];
+  const { sources, devices } = pickerSources(sneaky, PICKER_DISPLAYS, DISPLAYS, undefined);
+  assert.equal(sources[0].hdr, false);
+  assert.equal(devices.size, 0);
+});
+
+test('pickerSources: meta en pixels physiques, fenêtre propre exclue, icône vide traitée comme absente', () => {
+  const scaled: PickerDisplay[] = [{ id: 100, bounds: { x: 0, y: 0, width: 1707, height: 960 }, scaleFactor: 1.5 }];
+  const raw: CapturerSource[] = [
+    RAW[0],
+    { id: 'window:9:0', name: 'Empty icon', display_id: '', thumbnail: img('e'), appIcon: { isEmpty: () => true, toDataURL: () => 'data:broken' } },
+  ];
+  const { sources } = pickerSources(raw, scaled, DISPLAYS, 'screen:0:0'); // notre propre fenêtre
+  assert.deepEqual(sources.map((s) => s.id), ['window:9:0'], 'la source propre doit disparaître');
+  assert.equal(sources[0].icon, null, 'une NativeImage vide rendrait un <img> cassé');
+  assert.equal(sources[0].meta, '', 'une fenêtre n a pas de résolution d écran');
+  // L écran à 150 % : le rectangle de l addon donne 2560, pile la résolution inscrite sur le carton.
+  // Le calcul en DIP, lui, rend 2561 (1707 × 1,5 = 2560,5) — un écran qui n existe pas.
+  assert.equal(pickerSources([RAW[0]], scaled, DISPLAYS, undefined).sources[0].meta, '2560×1440');
+  // Sans addon (hors Windows, ou chargement raté), le repli DIP reste le seul recours.
+  assert.equal(pickerSources([RAW[0]], scaled, [], undefined).sources[0].meta, '2561×1440');
+});
+
+test('pickerSources: une source sans écran correspondant reste listée, sans chemin natif', () => {
+  // display_id vide ou inconnu arrive vraiment (Electron le documente), et perdre la tuile serait
+  // pire que perdre l étiquette de résolution.
+  const orphan: CapturerSource[] = [{ id: 'screen:7:0', name: 'Ghost', display_id: '999', thumbnail: img('g'), appIcon: null }];
+  const { sources, devices } = pickerSources(orphan, PICKER_DISPLAYS, DISPLAYS, undefined);
+  assert.equal(sources.length, 1);
+  assert.equal(sources[0].hdr, false);
+  assert.equal(sources[0].sdrWhiteMeasured, false);
+  // 0, jamais 80 : la valeur par défaut de scRGB est un nombre parfaitement plausible qui rendrait
+  // le tone map faux d'un facteur 6, et `sdrWhiteMeasured: false` est le seul garde-fou.
+  assert.equal(sources[0].sdrWhiteNits, 0);
+  assert.equal(devices.size, 0);
+});
+
+test('approvedDeviceFor: seul un écran de la DERNIÈRE liste est approuvable', () => {
+  const listing = pickerSources(RAW, PICKER_DISPLAYS, DISPLAYS, undefined);
+  assert.equal(approvedDeviceFor(listing, 'screen:0:0'), String.raw`\\.\DISPLAY1`);
+  // Une fenêtre n a pas de sortie DXGI, et l écran SDR n est pas sur ce chemin.
+  assert.equal(approvedDeviceFor(listing, 'window:12:0'), '');
+  assert.equal(approvedDeviceFor(listing, 'screen:1:0'), '');
+  // Un id jamais listé — un renderer qui a sauté le picker, ou qui invente un id.
+  assert.equal(approvedDeviceFor(listing, 'screen:42:0'), '');
+  assert.equal(approvedDeviceFor(listing, null), '', 'rien de sélectionné n approuve rien');
+  // Liste invalidée (écran débranché, page rechargée) : on refuse, ce qui ne coûte que le HDR.
+  assert.equal(approvedDeviceFor(null, 'screen:0:0'), '');
 });
 
 // The renderer's sandbox is OFF (so the HDR addon can run in the preload), which promotes the other

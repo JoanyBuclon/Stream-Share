@@ -9,12 +9,13 @@ import { fakeDisplayMedia, fakeNative } from './fake-media.ts';
 // exactly where three leaks were found.
 //
 // What runs for real here: the picker, host.ts, native-video.ts, MediaStreamTrackGenerator, the
-// port handover contract. What is faked: the producer (a canvas instead of a C++ addon). What is
-// NOT covered by any of this: the addon itself, Electron, and the approved-device consent gate,
-// which only exists in the real preload.
+// port handover contract. What is faked: the producer (a canvas instead of a C++ addon) and the
+// shell's side of the consent gate — the fake resolves the approved display from the pick the same
+// way main does. What is NOT covered by any of this: the addon itself, and Electron's IPC wiring
+// (the gate's own logic is unit-tested in electron/src/config.test.ts).
 
 interface NativeCalls {
-  started: Array<{ deviceName: string; sdrWhiteNits?: number; fps?: number }>;
+  started: Array<{ device: string; sdrWhiteNits?: number; fps?: number }>;
   stopped: number;
   fps: number[];
 }
@@ -61,12 +62,13 @@ test('an HDR screen is captured natively, with system audio fetched on the side'
 
   await expect(page.locator('#host-video')).toBeVisible();
   await expect(page.locator('#host-live-badge')).toBeVisible();
-  // The device name and the MEASURED white level both reach the shell. The nits matter: the
-  // addon's own fallback is the scRGB definition (80), which on this machine is wrong by 6x and
-  // clips 70% of the highlights — so `sdrWhiteMeasured` deciding between 480 and *undefined*
-  // (never 80) is the difference the whole tone map hangs on.
+  // The screen that gets captured is the one whose tile was clicked — resolved by the shell from
+  // that pick, not named by the page, which is never told a device name at all. And the MEASURED
+  // white level reaches the addon: its own fallback is the scRGB definition (80), wrong by 6x on
+  // this machine and 70% of the highlights clipped, so `sdrWhiteMeasured` deciding between 480 and
+  // *undefined* (never 80) is what the whole tone map hangs on.
   await nativeCalls(page).toMatchObject({
-    started: [{ deviceName: String.raw`\\.\DISPLAY1`, sdrWhiteNits: 480, fps: 60 }],
+    started: [{ device: String.raw`\\.\DISPLAY1`, sdrWhiteNits: 480, fps: 60 }],
   });
 
   // Exactly ONE getDisplayMedia call, for the audio, with its video sibling stopped. Two failures

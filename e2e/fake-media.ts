@@ -95,16 +95,16 @@ export async function fakeNotifications(page: Page, opts: { focused?: boolean } 
 /** Sources the fake desktop shell reports; `thumbnail`/`icon` stay tiny so the grid renders. */
 const FAKE_SOURCES = [
   // Screen 1 is flagged HDR: the shell reports this per source, and a suite where nothing is ever
-  // HDR could not tell "the flag is plumbed" from "the flag is always false".
-  // `deviceName` and the SDR white level ride along for the same reason: only the shell can map a
-  // desktopCapturer id to a DXGI output, and the native path needs both.
-  { id: 'screen:0:0', name: 'Screen 1', kind: 'screen', meta: '2560×1440', hdr: true, deviceName: String.raw`\\.\DISPLAY1`, sdrWhiteNits: 480, sdrWhiteMeasured: true },
-  { id: 'screen:1:0', name: 'Screen 2', kind: 'screen', meta: '1920×1080', hdr: false, deviceName: String.raw`\\.\DISPLAY5`, sdrWhiteNits: 80, sdrWhiteMeasured: true },
+  // HDR could not tell "the flag is plumbed" from "the flag is always false". The SDR white level
+  // rides along for the same reason — only the shell can read it, and the tone map needs it.
+  // No device name: the shell keeps those, the page never sees one.
+  { id: 'screen:0:0', name: 'Screen 1', kind: 'screen', meta: '2560×1440', hdr: true, sdrWhiteNits: 480, sdrWhiteMeasured: true },
+  { id: 'screen:1:0', name: 'Screen 2', kind: 'screen', meta: '1920×1080', hdr: false, sdrWhiteNits: 80, sdrWhiteMeasured: true },
   // 4242 is the one whose owning process resolves (see setAudioCapture); the others stand in for
   // a window that is not its process's main window, where app-only sound is impossible.
-  { id: 'window:4242:0', name: 'Elden Ring', kind: 'window', meta: '', hdr: false, deviceName: '', sdrWhiteNits: 0, sdrWhiteMeasured: false },
-  { id: 'window:11:0', name: 'Google Chrome', kind: 'window', meta: '', hdr: false, deviceName: '', sdrWhiteNits: 0, sdrWhiteMeasured: false },
-  { id: 'window:12:0', name: 'Discord', kind: 'window', meta: '', hdr: false, deviceName: '', sdrWhiteNits: 0, sdrWhiteMeasured: false },
+  { id: 'window:4242:0', name: 'Elden Ring', kind: 'window', meta: '', hdr: false, sdrWhiteNits: 0, sdrWhiteMeasured: false },
+  { id: 'window:11:0', name: 'Google Chrome', kind: 'window', meta: '', hdr: false, sdrWhiteNits: 0, sdrWhiteMeasured: false },
+  { id: 'window:12:0', name: 'Discord', kind: 'window', meta: '', hdr: false, sdrWhiteNits: 0, sdrWhiteMeasured: false },
 ];
 
 /**
@@ -150,10 +150,15 @@ export async function fakeNative(
       // `window.postMessage`. Everything above that port is real code (src/lib/native-video.ts),
       // so imitating the port contract exercises the whole routing without an addon or Electron.
       //
-      // Deliberately NOT modelled: the approved-device gate (the real call throws when the device
-      // name is not the one the user confirmed) and the addon's own "capture already running".
+      // Deliberately NOT modelled: the addon's own "capture already running", and the IPC wiring
+      // (which listing main keeps, and when it drops it — covered in electron/src/config.test.ts).
+      // The device names the SHELL holds. Deliberately not in the source payload: main keeps this
+      // table and the page never sees one. HDR screens only, like the real table — the native path
+      // is never offered for anything else, and a gate wider than the feature is a gate to close
+      // again later.
+      const DEVICE_BY_ID: Record<string, string> = { 'screen:0:0': String.raw`\\.\DISPLAY1` };
       const cap = window as unknown as {
-        __native: { started: Array<{ deviceName: string; sdrWhiteNits?: number; fps?: number }>; stopped: number; fps: number[] };
+        __native: { started: Array<{ device: string; sdrWhiteNits?: number; fps?: number }>; stopped: number; fps: number[] };
         /** The capture item went away and the addon says so. */
         __nativeClosed?: boolean;
         /** The frames stop while the addon keeps claiming everything is fine. */
@@ -182,10 +187,15 @@ export async function fakeNative(
           // Explicit, not omitted: the suite exercises the getDisplayMedia path, and a fake that
           // returned true here would silently route every spec through the native branch.
           canCaptureNative: () => nativeCapture !== null,
-          startNativeCapture: (deviceName: string, sdrWhiteNits?: number, _knee?: number, fps?: number) => {
-            cap.__native.started.push({ deviceName, sdrWhiteNits, fps });
-            // Throw BEFORE the handover, like the real preload: it validates the device against
-            // the user's confirmed pick first, so a refusal never leaves a port behind.
+          startNativeCapture: (sdrWhiteNits?: number, _knee?: number, fps?: number) => {
+            // The consent gate, resolved the way the shell resolves it: the caller says nothing
+            // about WHICH display, the shell answers with the one the last confirmed pick approved.
+            // A caller that never went through the picker gets nothing.
+            const device = DEVICE_BY_ID[(window as unknown as { __picked?: string }).__picked ?? ''] ?? '';
+            cap.__native.started.push({ device, sdrWhiteNits, fps });
+            if (!device) throw new Error('e2e: no display was picked by the user');
+            // Throw BEFORE the handover, like the real preload: everything that can refuse runs
+            // before the port exists, so a refusal never leaves one behind.
             if (nativeCapture === 'throw') throw new Error('e2e: native capture refused');
             if (nativeCapture === 'noport') return; // the handover goes missing — the locked-picker case
             // Like the shell's closeFramePort(): a start with a session still open replaces it

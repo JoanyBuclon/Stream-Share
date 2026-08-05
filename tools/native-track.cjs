@@ -57,10 +57,12 @@ x.fillStyle='#3a3a44';x.fillRect((t%520)-40,0,40,270);requestAnimationFrame(f)})
   );
 }
 
+// `deviceName` is recorded in the result for the reader's benefit only — the page cannot choose a
+// display, it captures whatever main approved (see the ss:approved-device handler above).
 const SCRIPT = (deviceName, sdrWhiteNits, seconds) => `(async () => {
   const rtpIdOf = (stats) => { let id = null; stats.forEach((s) => { if (s.type === 'outbound-rtp' && s.kind === 'video') id = s.id; }); return id; };
-  const DEVICE = ${JSON.stringify(deviceName)}, SDR_WHITE = ${sdrWhiteNits};
-  const out = { deviceName: DEVICE, sdrWhiteNits: SDR_WHITE };
+  const SDR_WHITE = ${sdrWhiteNits};
+  const out = { deviceName: ${JSON.stringify(deviceName)}, sdrWhiteNits: SDR_WHITE };
   try {
     // The real module, served by Vite in dev — not a copy of its logic.
     const { captureNative, canCaptureNative } = await import('/src/lib/native-video.ts');
@@ -68,7 +70,9 @@ const SCRIPT = (deviceName, sdrWhiteNits, seconds) => `(async () => {
     if (!out.canCaptureNative) return JSON.stringify(out);
     out.h265Available = (RTCRtpSender.getCapabilities('video')?.codecs ?? []).some((c) => c.mimeType === 'video/H265');
 
-    const capture = await captureNative(DEVICE, SDR_WHITE);
+    // No device: the page cannot name one. It captures whatever main approved — which this harness
+    // sets to the target display in its own ss:approved-device handler, standing in for a pick.
+    const capture = await captureNative(SDR_WHITE);
     out.trackReadyState = capture.track.readyState;
 
     // What the generated track tells the rest of the app about itself. This decides where the
@@ -253,7 +257,7 @@ const IDLE = `(async () => {
 })()`;
 
 /** Phase three: shut down, then start again — "switch source", the flow real users hit. */
-const FINISH = (deviceName, sdrWhiteNits) => `(async () => {
+const FINISH = (sdrWhiteNits) => `(async () => {
   const out = {};
   try {
     const { captureNative } = await import('/src/lib/native-video.ts');
@@ -264,7 +268,7 @@ const FINISH = (deviceName, sdrWhiteNits) => `(async () => {
     // The old two-call handshake closed the live frame port BEFORE the call that could fail, so a
     // second capture threw "already running" and left the first live and frozen. Happy paths never
     // saw it.
-    const again = await captureNative(${JSON.stringify(deviceName)}, ${sdrWhiteNits});
+    const again = await captureNative(${sdrWhiteNits});
     await new Promise((r) => setTimeout(r, 800));
     const s2 = window.native.nativeCaptureStats();
     out.restart = { readyState: again.track.readyState, frames: s2.frames, running: s2.running };
@@ -353,7 +357,7 @@ app.whenReady().then(async () => {
     mover.hide();
     result.idle = await run(IDLE, 20_000);
     mover.show();
-    Object.assign(result, await run(FINISH(target.deviceName, target.sdrWhiteNits), 20_000));
+    Object.assign(result, await run(FINISH(target.sdrWhiteNits), 20_000));
     result.verdict = verdict(result, SECONDS);
   } catch (err) {
     result.error = String(err && err.stack ? err.stack : err);

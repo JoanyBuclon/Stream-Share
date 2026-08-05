@@ -666,16 +666,61 @@ qu'elles soient non nulles et différentes.
 ##### La porte de consentement du chemin natif
 
 `setDisplayMediaRequestHandler` est documenté dans `main.ts` comme **étant** la porte
-de consentement. Le chemin natif ne le traverse jamais : il nomme une sortie DXGI
-directement depuis le preload. Autrement dit, tel qu'écrit d'abord, un XSS dans le
-bundle suffisait à lancer une capture plein écran sans prompt et sans indicateur.
-`ss:select-source` mémorise désormais aussi le `deviceName` correspondant, et
-`startNativeCapture` refuse tout autre écran que celui que l'utilisateur vient de
-confirmer dans le sélecteur.
+de consentement. Le chemin natif ne le traverse jamais : il pilote l'addon
+directement. Autrement dit, tel qu'écrit d'abord, un XSS dans le bundle suffisait à
+lancer une capture plein écran sans prompt et sans indicateur.
 
-> ⚠️ Ce contrôle n'est pas couvert par le harness, qui court-circuite
-> `ss:select-source` (il faudrait tout le main process). Il n'est exercé qu'en
-> production.
+**La page ne nomme plus aucun écran.** Premier essai : elle recevait le `deviceName`
+dans la liste des sources, le repassait à `startNativeCapture`, et le preload le
+comparait à ce que `ss:select-source` avait mémorisé. L'association id → nom DXGI
+était donc **dérivée deux fois** — dans `ss:sources` par `display_id`, dans
+`ss:select-source` en reconstruisant `screen:${id}:0`.
+
+> **Et la deuxième ne matchait jamais.** Mesuré sur Windows / Electron 43 :
+> `desktopCapturer` rapporte `screen:0:0` et `screen:4:0`, quand les ids de `Display`
+> valent 3646719705 et 3701595930. Le segment du milieu est un index de device, pas
+> l'id d'écran — et il n'est même pas séquentiel. `approvedDeviceName` valait donc `''`
+> en permanence, `startNativeCapture` refusait à tous les coups, et **le chemin HDR
+> natif était inatteignable dans l'application** : chaque partage retombait sur
+> `getDisplayMedia` avec un `console.error` pour toute trace. Il n'a jamais tourné
+> qu'sous `tools/native-track.cjs`, qui s'auto-approuve. Ce n'est pas un durcissement
+> théorique, c'est la réparation d'une fonctionnalité morte — et personne ne l'a vu
+> parce que le repli est exactement le comportement normal en SDR.
+
+Maintenant `startNativeCapture()` ne prend **pas** d'écran : le preload demande à main
+lequel il a le droit de capturer, et main répond depuis la table construite en même
+temps que la liste montrée au sélecteur. `hdr: true` suffit à dire « main tient une
+sortie pour cette source ».
+
+> Ce que ça ne fait **pas** : durcir la porte contre un renderer compromis.
+> `selectSource(id)` reste exposé, donc du code hostile dans notre propre bundle
+> désigne un écran par id au lieu de le désigner par nom — même capacité, autre
+> monnaie. Ce qui disparaît vraiment, c'est la seconde dérivation et son mode de panne
+> silencieux, et la fuite des noms DXGI vers une page qui n'en a aucun usage. Le vrai
+> verrou reste que le bundle ne soit pas compromis.
+
+La liste est oubliée quand les écrans changent et quand le renderer navigue ou
+recharge : les noms DXGI sont des noms de **slot**, `\\.\DISPLAY2` peut désigner un
+autre panneau après un débranchement, et un consentement ne doit pas survivre à la
+page qui l'a donné (avant, il survivait au rechargement — c'est le seul vrai gain de
+sécurité du lot).
+
+Sur `display-added` / `display-removed`, **le choix est oublié aussi**. N'oublier que
+la liste serait un demi-correctif : le sélecteur re-liste dès qu'il s'ouvre, avant le
+moindre clic, et l'ancien id serait alors approuvé contre la nouvelle disposition — un
+index `screen:N:0` ne désigne pas forcément le même moniteur une fois qu'un écran est
+parti. Pas sur `display-metrics-changed`, qui se déclenche aussi pour un changement de
+zone de travail : les ids nomment toujours les mêmes panneaux.
+
+> Couverture : `pickerSources` et `approvedDeviceFor` sont testées unitairement
+> (`electron/src/config.test.ts`) — le HDR par source, la table réduite aux écrans HDR
+> appariés, une fenêtre qui rapporterait un écran, un id jamais listé, une liste
+> invalidée. Ce que ça ne couvre pas : **le câblage IPC**, qui reste le point aveugle
+> du projet — rien ne chargeait `electron/src/main.ts`, et c'est ce qui a laissé passer
+> un `screen.on()` au niveau module (interdit avant `app.ready`) : suite verte,
+> application morte au lancement. D'où `tools/main-boots.cjs`, qui charge le vrai
+> bundle sous Electron et vérifie qu'une fenêtre s'ouvre sur `app://`. Vérifié capable
+> d'échouer en réintroduisant le bug.
 
 #### Branché dans le produit
 
@@ -763,11 +808,11 @@ première image — et traiter ça comme « rien à faire » laissait l'hôte su
   preload — un `MessageChannel`, un `window.postMessage` synchrone, des `VideoFrame`
   transférées depuis un canvas — et le reste est du vrai code : le picker, `host.ts`,
   `native-video.ts`, le `MediaStreamTrackGenerator`. Ce qu'aucun de ces tests ne
-  touche : l'addon, Electron, et la porte de consentement (ci-dessous).
-- **La porte de consentement du chemin natif n'est exercée qu'en production** : le
-  harness s'auto-approuve. Si `ss:select-source` n'arrive pas à relier l'id
-  `desktopCapturer` à une sortie DXGI, `startNativeCapture` refuse et on retombe sur
-  le chemin clampé — silencieusement, avec juste un `console.error`.
+  touche : l'addon, Electron, et le câblage IPC.
+- **Le refus de la porte reste silencieux** : si main n'a aucune sortie DXGI pour la
+  source choisie, `startNativeCapture` refuse et on retombe sur le chemin clampé —
+  avec juste un `console.error`. La logique de la porte est testée unitairement
+  (ci-dessus), pas son effet visible côté utilisateur.
 - **Rallumer le son système après coup ne donne rien** (aucune piste audio dans le
   flux natif). Comportement identique sur le chemin `getDisplayMedia`, donc
   pré-existant — mais ici `loopbackAudioTrack()` existe déjà et rendrait le correctif

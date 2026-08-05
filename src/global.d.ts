@@ -16,11 +16,12 @@ interface NativeSource {
   readonly meta: string;
   /** This screen is in HDR mode **right now** — the shell's live reading, not the panel's
    *  capability, and not something the web can answer. False for windows, cameras, non-Windows,
-   *  and whenever the native addon is unavailable. */
+   *  and whenever the native addon is unavailable.
+   *
+   *  It doubles as "the shell holds a DXGI output for this source", which is what makes the native
+   *  path reachable: the page is never told any device name, it only picks a source and then asks
+   *  the shell to capture whatever that pick approved. */
   readonly hdr: boolean;
-  /** Windows device name (`\\.\DISPLAY1`) — what `startNativeCapture` takes. Empty for windows and
-   *  cameras, and for a screen the shell could not match to a DXGI output. */
-  readonly deviceName: string;
   /** Reference white for SDR content, in nits — the tone map's divisor. Only trustworthy when
    *  `sdrWhiteMeasured`; 0 means the shell has nothing to report. */
   readonly sdrWhiteNits: number;
@@ -92,14 +93,17 @@ interface StreamShareNative {
   /** Windows, and the addon actually loaded. False means there is no native path at all. */
   canCaptureNative?(): boolean;
   /**
-   * Start pushing tone-mapped frames for a screen, by its Windows device name, and hand over the
-   * MessagePort they arrive on — as a single `window.postMessage` tagged `{ streamShare: 'frames' }`,
-   * posted SYNCHRONOUSLY from inside this call. Listen before calling. See src/lib/native-video.ts.
+   * Start pushing tone-mapped frames for **the display the user last confirmed in the picker**, and
+   * hand over the MessagePort they arrive on — as a single `window.postMessage` tagged
+   * `{ streamShare: 'frames' }`, posted SYNCHRONOUSLY from inside this call. Listen before calling.
+   * See src/lib/native-video.ts.
    *
-   * Throws if `deviceName` is not the display the user last confirmed in the picker: this path does
-   * not go through the OS consent handler, so the check lives here.
+   * There is deliberately no way to say WHICH display: this path does not go through the OS consent
+   * handler, so the shell answers with the one its own listing associated with the last confirmed
+   * pick, rather than checking a name we hand it. Throws when nothing is approved — no pick, a
+   * window rather than a screen, or the displays changed since.
    */
-  startNativeCapture?(deviceName: string, sdrWhiteNits?: number, knee?: number, fps?: number): void;
+  startNativeCapture?(sdrWhiteNits?: number, knee?: number, fps?: number): void;
   /** Cap the capture rate, 0 for uncapped. The generated track refuses applyConstraints
    *  (OverconstrainedError, measured), so this is the only way to honour the fps setting — and it
    *  is the better one anyway: a frame refused here never costs a tone map or a readback. */

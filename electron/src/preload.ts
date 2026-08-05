@@ -86,7 +86,18 @@ contextBridge.exposeInMainWorld('native', {
   canCaptureNative: () => addon !== null,
 
   /**
-   * Start pushing tone-mapped frames for `deviceName`, and hand the page the port they arrive on.
+   * Start pushing tone-mapped frames for the display the user picked, and hand the page the port
+   * they arrive on.
+   *
+   * **The caller does not say which display.** `setDisplayMediaRequestHandler` — which main
+   * documents as THE consent gate — is never consulted when frames come from the addon, so this
+   * path carries its own: main answers with the display the last confirmed pick approved.
+   *
+   * Be precise about what that is worth. It is NOT a stronger barrier against a compromised
+   * renderer: `selectSource(id)` is still exposed, so hostile code in our own bundle can name a
+   * source from the last listing and then call this — by id instead of by device name. What it
+   * removes is a second derivation of the id→device association that could silently disagree with
+   * the listing's, and the DXGI names themselves, which the page has no use for.
    *
    * One call, not a connect/start pair, and that is a bug fix rather than tidiness: the pair closed
    * the live port BEFORE the call that can fail, so picking a second source while one was running
@@ -96,14 +107,11 @@ contextBridge.exposeInMainWorld('native', {
    *
    * The page must already be listening for `{ streamShare: 'frames' }` when it calls this.
    */
-  startNativeCapture: (deviceName: string, sdrWhiteNits?: number, knee?: number, fps?: number) => {
+  startNativeCapture: (sdrWhiteNits?: number, knee?: number, fps?: number) => {
     if (!addon) throw new Error('native capture unavailable');
-    // The consent gate for this path. `setDisplayMediaRequestHandler` — which main documents as THE
-    // gate — is never consulted when frames come from the addon, so the device name is checked
-    // against the last source the user actually confirmed in the picker.
     const approved = ipcRenderer.sendSync('ss:approved-device') as string;
-    if (!approved || approved !== deviceName) throw new Error('that display was not picked by the user');
-    addon.startCapture(deviceName, sdrWhiteNits, knee, pushFrame, fps);
+    if (!approved) throw new Error('no display was picked by the user');
+    addon.startCapture(approved, sdrWhiteNits, knee, pushFrame, fps);
     closeFramePort();
     const channel = new MessageChannel();
     framePort = channel.port1;

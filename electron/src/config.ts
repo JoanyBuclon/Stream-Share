@@ -115,6 +115,132 @@ export function nativeDisplayFor(displays: readonly NativeDisplay[], display: Di
   return displays.find((d) => near(d.left, x) && near(d.top, y)) ?? null;
 }
 
+/** A desktopCapturer id says which kind it is; nothing else has to be consulted. */
+export const kindOf = (id: string): 'screen' | 'window' => (id.startsWith('screen:') ? 'screen' : 'window');
+
+/** The bits of an Electron `Display` this needs beyond the rectangle. */
+export interface PickerDisplay extends DipDisplay {
+  id: number;
+}
+
+/** The bits of a `DesktopCapturerSource` this needs. The two images are structural rather than
+ *  `NativeImage` so the mapping below can be tested without Electron — same trick as DipDisplay. */
+export interface CapturerSource {
+  id: string;
+  name: string;
+  display_id: string;
+  thumbnail: { toJPEG(quality: number): { toString(encoding: 'base64'): string } };
+  appIcon: { isEmpty(): boolean; toDataURL(): string } | null;
+}
+
+/** One capturable surface as the picker receives it. Note what is NOT here: the Windows device
+ *  name. The renderer never learns it — see `approvedDeviceFor`. */
+export interface PickerSource {
+  id: string;
+  name: string;
+  kind: 'screen' | 'window';
+  meta: string;
+  hdr: boolean;
+  sdrWhiteNits: number;
+  sdrWhiteMeasured: boolean;
+  thumbnail: string;
+  icon: string | null;
+}
+
+/** What the picker gets, plus the id→device-name table the consent gate reads. */
+export interface Listing {
+  sources: PickerSource[];
+  /** Screens the addon matched, by picker id. Kept in main and NEVER sent to the renderer. */
+  devices: Map<string, string>;
+}
+
+/**
+ * Turn a raw desktopCapturer listing into what the picker renders.
+ *
+ * Pure, and extracted for that reason: this is where a screen becomes "HDR, with this reference
+ * white", and every mistake in it is silent — a source that loses its display match keeps a
+ * plausible tile and quietly stops offering the native path.
+ *
+ * It also produces `devices`, which is the ONLY place a picker id is associated with a Windows
+ * device name. `ss:select-source` used to re-derive that association by rebuilding the id string
+ * (`screen:${display.id}:0`) and matching it against the pick — and that never matched anything.
+ * Measured on Windows / Electron 43: `desktopCapturer` reports `screen:0:0` and `screen:4:0` while
+ * the Display ids are 3646719705 and 3701595930, so the middle segment is a device index and not
+ * the display id at all. The consent gate therefore answered '' for every screen, `startNativeCapture`
+ * refused every time, and **the native HDR path was unreachable in the app** — every share fell
+ * back to getDisplayMedia with a console line for evidence. It only ever ran under
+ * tools/native-track.cjs, which approves itself.
+ */
+export function pickerSources(
+  raw: readonly CapturerSource[],
+  displays: readonly PickerDisplay[],
+  native: readonly NativeDisplay[],
+  ownId: string | undefined,
+): Listing {
+  const devices = new Map<string, string>();
+  const sources = raw
+    .filter((s) => s.id !== ownId) // our own window is capturable, and picking it is an infinite mirror
+    .map((s) => {
+      // display_id is documented as possibly empty — no match just means no resolution label.
+      const display = displays.find((d) => String(d.id) === s.display_id);
+      // `kindOf`, structurally, rather than trusting that a WINDOW never reports a display_id: it
+      // happens not to on this machine (all six were empty, measured), which is a platform detail
+      // nobody documented. Without the check, a window that did report one would come out
+      // `hdr: true` and a click on it would start a full-SCREEN native capture.
+      const output = display && kindOf(s.id) === 'screen' ? nativeDisplayFor(native, display) : null;
+      // HDR only, so the table holds exactly the sources for which the native path is on offer —
+      // `hdr` below is what the renderer routes on, and a gate that approves more than that is a
+      // gate that is wider than the feature.
+      if (output?.hdr) devices.set(s.id, output.deviceName);
+      return {
+        id: s.id,
+        name: s.name,
+        kind: kindOf(s.id),
+        // getAllDisplays() reports DIP: a 2560×1440 monitor at 150% would read 1707×960, a
+        // resolution the user has never seen. scaleFactor brings it back to physical pixels.
+        // The addon's rectangle when we have it — those ARE physical pixels. The DIP fallback
+        // rounds, and a 1707-DIP display at 150% comes out as "2561×1440", a resolution nobody has
+        // ever seen on a box. Same reason nativeDisplayFor carries a pixel of slack.
+        meta: output
+          ? `${output.right - output.left}×${output.bottom - output.top}`
+          : display
+            ? `${Math.round(display.bounds.width * display.scaleFactor)}×${Math.round(display.bounds.height * display.scaleFactor)}`
+            : '',
+        // Whether THIS screen is in HDR mode right now — the switch that decides between the
+        // native capture path and getDisplayMedia. Per source, not per machine: sharing the SDR
+        // monitor of a machine that also has an HDR one must not take the native path. It doubles
+        // as "main holds a device name for this source", which is what lets the renderer ask for
+        // the native path without ever naming a display.
+        hdr: output?.hdr ?? false,
+        // The tone map's divisor, carried alongside so the renderer never has to guess it. Only
+        // meaningful when `sdrWhiteMeasured`; the 80 fallback is a plausible-looking number that
+        // would be wrong by up to 6x.
+        sdrWhiteNits: output?.sdrWhiteNits ?? 0,
+        sdrWhiteMeasured: output?.sdrWhiteMeasured ?? false,
+        // JPEG, not toDataURL()'s lossless PNG: a real Windows session has 30-60 windows, and
+        // each one is a synchronous encode on the main thread plus base64 through IPC. The tile
+        // is a lossy preview anyway. The icon keeps PNG — it needs the alpha channel.
+        thumbnail: `data:image/jpeg;base64,${s.thumbnail.toJPEG(70).toString('base64')}`,
+        // appIcon is null for screens, and can be a non-null EMPTY image for some windows —
+        // whose data URL would render as a broken <img>.
+        icon: s.appIcon && !s.appIcon.isEmpty() ? s.appIcon.toDataURL() : null,
+      };
+    });
+  return { sources, devices };
+}
+
+/**
+ * The one display the renderer may capture natively, or '' for "none".
+ *
+ * Read straight out of the listing the user picked from, so what is approved is by construction the
+ * same screen the picker showed. An id that was never listed — a renderer that skipped the picker,
+ * or one calling after the listing was invalidated — is refused, which costs the HDR path and
+ * nothing else: getDisplayMedia has its own gate and does its own fresh enumeration.
+ */
+export function approvedDeviceFor(listing: Listing | null, id: string | null): string {
+  return listing?.devices.get(id ?? '') ?? '';
+}
+
 /** An app the user could exclude from the shared audio. `pid` is the ROOT process — WASAPI
  *  excludes a process *tree*, and a Chromium app renders its audio in a child service process. */
 export interface AudioApp {

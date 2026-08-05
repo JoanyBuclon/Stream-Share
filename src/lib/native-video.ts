@@ -71,18 +71,17 @@ export function canCaptureNative(): boolean {
 }
 
 /**
- * Start native capture of `deviceName` and return it as a track.
+ * Start native capture of the display the shell approved, and return it as a track.
+ *
+ * Which display is not ours to say — see `startNativeCapture` in global.d.ts. The shell captures
+ * whatever the last confirmed pick approved, and throws if that is nothing.
  *
  * `sdrWhiteNits` comes from the source list; leaving it undefined means the addon falls back to the
  * scRGB definition (80), which on a real HDR desktop is wrong by whatever the user's SDR brightness
  * slider is set to — measured at 6x on the dev machine, and the difference between 0% and 70% of
  * the highlights clipping. Pass the measured value.
  */
-export async function captureNative(
-  deviceName: string,
-  sdrWhiteNits?: number,
-  fps?: number,
-): Promise<NativeCapture> {
+export async function captureNative(sdrWhiteNits?: number, fps?: number): Promise<NativeCapture> {
   const native = window.native;
   if (!native?.startNativeCapture) throw new Error('native capture unavailable');
 
@@ -119,7 +118,7 @@ export async function captureNative(
     try {
       // No knee: the shader default (0.75) is the only value anything has ever passed, and a
       // parameter with no caller is a knob to maintain for nobody. Add it back with its slider.
-      native.startNativeCapture?.(deviceName, sdrWhiteNits, undefined, fps);
+      native.startNativeCapture?.(sdrWhiteNits, undefined, fps);
     } catch (err) {
       window.removeEventListener('message', onMessage);
       clearTimeout(handover);

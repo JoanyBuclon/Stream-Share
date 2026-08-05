@@ -56,7 +56,6 @@ export async function listCameras(): Promise<NativeSource[]> {
         // produced it (OBS, in the pilot). Only a screen can be captured natively, so none of the
         // native-capture fields apply.
         hdr: false,
-        deviceName: '',
         sdrWhiteNits: 0,
         sdrWhiteMeasured: false,
         thumbnail: NO_THUMBNAIL,

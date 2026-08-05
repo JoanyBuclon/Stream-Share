@@ -24,10 +24,13 @@ import {
   parseAudioApps,
   hwndFromSourceId,
   createWakeLockToggle,
-  nativeDisplayFor,
+  kindOf,
+  pickerSources,
+  approvedDeviceFor,
   rendererSecurity,
   type AudioApp,
   type NativeDisplay,
+  type Listing,
 } from './config.ts';
 import { loadCaptureAddon } from './native-addon.ts';
 
@@ -51,13 +54,14 @@ const setWakeLock = createWakeLockToggle(powerSaveBlocker);
 // --- source picker (renderer-side UI, main-side capture routing) ---
 
 const SOURCE_TYPES: Array<'screen' | 'window'> = ['screen', 'window'];
-const kindOf = (id: string): 'screen' | 'window' => (id.startsWith('screen:') ? 'screen' : 'window');
-// Single-window app: one selection for the whole process is enough. Per-webContents state would
-// be required the day a second window can capture.
+// Single-window app: one selection for the whole process is enough — and the same goes for the
+// listing below, more so: a second window listing its sources would overwrite the table the first
+// one's consent is read from. Per-webContents state would be required the day a second window can
+// capture.
 let selectedSourceId: string | null = null;
-// The DXGI device name matching `selectedSourceId`, or '' — the native capture path's consent gate.
-// It has to be tracked separately because that path bypasses setDisplayMediaRequestHandler entirely.
-let approvedDeviceName = '';
+/** The last thing the picker was shown, with the device names that never left main. The native
+ *  capture path's consent gate reads from here — see `approvedDeviceFor`. */
+let lastListing: Listing | null = null;
 // The local build carries no CSP (nginx sets it in prod), so we attach the mirrored policy to
 // every app:// response — more robust than a webRequest listener, which doesn't reliably see
 // protocol.handle responses across Electron versions.
@@ -145,6 +149,11 @@ function createWindow(): void {
   const dropNativeState = (): void => {
     stopCapture();
     setWakeLock(false);
+    // The consent goes with the page that gave it. Without this, a reload — or a renderer that
+    // navigated somewhere and came back — could start a native capture of the display picked in a
+    // session that is over, without ever showing the picker.
+    selectedSourceId = null;
+    lastListing = null;
   };
   win.webContents.on('destroyed', dropNativeState);
   // A crashed renderer leaves the WebContents alive, so neither of the other two fire — and the
@@ -235,6 +244,7 @@ app.whenReady().then(() => {
   Menu.setApplicationMenu(null);
 
   createWindow();
+  watchDisplayChanges();
 
   // Auto-update only makes sense on an installed build (dev has no publish channel).
   if (app.isPackaged) {
@@ -284,7 +294,8 @@ function nativeDisplays(): NativeDisplay[] {
   }
 }
 
-// Everything the picker grid needs, already serialisable (NativeImage doesn't cross IPC).
+// Everything the picker grid needs, already serialisable (NativeImage doesn't cross IPC). The
+// mapping itself is pure and lives in config.ts — this is the IO around it.
 ipcMain.handle('ss:sources', async (event) => {
   // Defence in depth: only our own bundle may enumerate windows. A thumbnail of every open
   // window is exactly the kind of thing that must not become reachable from foreign content.
@@ -292,50 +303,15 @@ ipcMain.handle('ss:sources', async (event) => {
   // Our own window is capturable and picking it is an infinite mirror. getMediaSourceId() gives
   // the exact id desktopCapturer will report, so no name heuristic.
   const own = BrowserWindow.fromWebContents(event.sender)?.getMediaSourceId();
-  const displays = screen.getAllDisplays();
-  const native = nativeDisplays();
   const sources = await desktopCapturer.getSources({
     types: SOURCE_TYPES,
     thumbnailSize: { width: 320, height: 180 },
     fetchWindowIcons: true,
   });
-  return sources
-    .filter((s) => s.id !== own)
-    .map((s) => {
-      // display_id is documented as possibly empty — no match just means no resolution label.
-      const display = displays.find((d) => String(d.id) === s.display_id);
-      const output = display ? nativeDisplayFor(native, display) : null;
-      return {
-        id: s.id,
-        name: s.name,
-        kind: kindOf(s.id),
-        // getAllDisplays() reports DIP: a 2560×1440 monitor at 150% would read 1707×960, a
-        // resolution the user has never seen. scaleFactor brings it back to physical pixels.
-        meta: display
-          ? `${Math.round(display.size.width * display.scaleFactor)}×${Math.round(display.size.height * display.scaleFactor)}`
-          : '',
-        // Whether THIS screen is in HDR mode right now — the switch that decides between the
-        // native capture path and getDisplayMedia. Per source, not per machine: sharing the SDR
-        // monitor of a machine that also has an HDR one must not take the native path.
-        hdr: output?.hdr ?? false,
-        // What `startNativeCapture` needs to name this screen to the addon — DXGI speaks device
-        // names, `desktopCapturer` speaks its own ids, and only main sees both. Empty for windows,
-        // and for a screen the addon could not match.
-        deviceName: output?.deviceName ?? '',
-        // The tone map's divisor, carried alongside so the renderer never has to guess it. Only
-        // meaningful when `sdrWhiteMeasured` is true; the 80 fallback is a plausible-looking number
-        // that would be wrong by up to 6x.
-        sdrWhiteNits: output?.sdrWhiteNits ?? 0,
-        sdrWhiteMeasured: output?.sdrWhiteMeasured ?? false,
-        // JPEG, not toDataURL()'s lossless PNG: a real Windows session has 30-60 windows, and
-        // each one is a synchronous encode on the main thread plus base64 through IPC. The tile
-        // is a lossy preview anyway. The icon keeps PNG — it needs the alpha channel.
-        thumbnail: `data:image/jpeg;base64,${s.thumbnail.toJPEG(70).toString('base64')}`,
-        // appIcon is null for screens, and can be a non-null EMPTY image for some windows —
-        // whose data URL would render as a broken <img>.
-        icon: s.appIcon && !s.appIcon.isEmpty() ? s.appIcon.toDataURL() : null,
-      };
-    });
+  // Kept for the consent gate, which reads the device name of whatever the user then picks out of
+  // THIS listing rather than deriving it a second time. Only the `sources` half crosses IPC.
+  lastListing = pickerSources(sources, screen.getAllDisplays(), nativeDisplays(), own);
+  return lastListing.sources;
 });
 
 // --- per-app audio (WASAPI process loopback) ---
@@ -587,20 +563,44 @@ ipcMain.handle('ss:select-source', (event, id: unknown) => {
   // `typeof id === 'string'` would let `selectSource('')` through as "nothing selected".
   selectedSourceId =
     typeof id === 'string' && (id.startsWith('screen:') || id.startsWith('window:')) ? id : null;
-  // The native path does not go through setDisplayMediaRequestHandler — it names a DXGI output
-  // directly from the preload — so this is where its consent gate has to live too. Without it the
-  // renderer could start a full-screen capture of any display without ever passing the picker,
-  // which is exactly the fallback the handler above refuses to have.
-  approvedDeviceName = '';
-  if (!selectedSourceId || !isInternalUrl(event.senderFrame?.url ?? '')) return;
-  const display = screen.getAllDisplays().find((d) => `screen:${d.id}:0` === selectedSourceId);
-  if (display) approvedDeviceName = nativeDisplayFor(nativeDisplays(), display)?.deviceName ?? '';
+  if (!isInternalUrl(event.senderFrame?.url ?? '')) selectedSourceId = null;
 });
 
-/** Reply to `ss:approved-device`: the ONE device name the preload may capture natively. */
+/** Reply to `ss:approved-device`: the ONE display the preload may capture natively. The native path
+ *  does not go through setDisplayMediaRequestHandler — it drives the addon directly — so this is
+ *  its consent gate. See `approvedDeviceFor`. */
 ipcMain.on('ss:approved-device', (event) => {
-  event.returnValue = isInternalUrl(event.senderFrame?.url ?? '') ? approvedDeviceName : '';
+  const internal = isInternalUrl(event.senderFrame?.url ?? '');
+  event.returnValue = internal ? approvedDeviceFor(lastListing, selectedSourceId) : '';
 });
+
+// The listing is what the gate approves from, so it must not outlive the arrangement it described:
+// device names are SLOT names, and after a monitor is unplugged `\\.\DISPLAY2` can be a different
+// panel than the one whose tile the user clicked. Dropping it costs one re-listing (the picker
+// lists every time it opens) and refuses the native path until then, which is the safe direction.
+const forgetListing = (): void => {
+  lastListing = null;
+};
+// …and on those two, the PICK goes as well. Dropping only the listing would be half a fix: the
+// picker re-lists as soon as it opens, before any click, and the old id would then be approved
+// against the new arrangement — a `screen:N:0` index does not necessarily point at the same
+// monitor once one has come or gone. Not on `display-metrics-changed`: that also fires for a work
+// area change (the taskbar), the ids still name the same panels, and clearing the pick there would
+// only break a getDisplayMedia in flight.
+const forgetPick = (): void => {
+  forgetListing();
+  selectedSourceId = null;
+};
+
+/** Subscribed from `whenReady`, never at module scope: touching `screen` before the `ready` event
+ *  THROWS, and an exception in the entry module means an error dialog and no window at all. Listed
+ *  one by one rather than in a loop — each event has its own listener signature, and a union
+ *  matches no overload. */
+function watchDisplayChanges(): void {
+  screen.on('display-added', forgetPick);
+  screen.on('display-removed', forgetPick);
+  screen.on('display-metrics-changed', forgetListing);
+}
 
 // Decision: close = quit. No tray, no background — including on macOS, against its usual
 // convention, since the app is Windows-first and host-only.
