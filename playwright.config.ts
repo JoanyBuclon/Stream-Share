@@ -20,7 +20,11 @@ export default defineConfig({
   use: {
     baseURL: 'http://localhost:4321',
     launchOptions: { args: chromiumArgs },
-    trace: 'on-first-retry',
+    // `retain-on-failure`, not `on-first-retry`: locally `retries` is 0, so on-first-retry means no
+    // trace is ever written — which is exactly what happened the one time a spec flaked here, and
+    // left a DOM snapshot and nothing else to reason from. Traces are discarded on green runs, so
+    // this costs the successful case nothing.
+    trace: 'retain-on-failure',
   },
   projects: [
     // Desktop — the non-regression control. testIgnore keeps the touch specs out: tap() needs
@@ -47,6 +51,14 @@ export default defineConfig({
     {
       command: 'pnpm exec astro dev --port 4321',
       url: 'http://localhost:4321',
+      // Reused locally, and that is a convenience with a sharp edge worth naming: this is a dev
+      // server with HMR, so **saving any source file fully reloads the page under test** (measured:
+      // a marker set on `window` is gone 2 s after touching src/lib/host.ts). Mid-test that looks
+      // like nothing recognisable — the app reloads at `/#CODE`, routes to the JOIN screen because
+      // a room code is in the hash, and whatever the test was waiting for on the host screen never
+      // comes. One failure has already looked exactly like that, down to the focused nickname
+      // field. If a spec fails with a join screen in its snapshot, this is the first suspect, and
+      // it is not a product bug.
       reuseExistingServer: !process.env.CI,
       timeout: 120_000,
     },
