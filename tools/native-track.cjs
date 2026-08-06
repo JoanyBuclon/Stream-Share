@@ -148,7 +148,15 @@ const SCRIPT = (deviceName, sdrWhiteNits, seconds) => `(async () => {
         return { bytes, sum: bytes.reduce((s, v) => s + v, 0) };
       };
       const a = await grab();
-      await new Promise((r) => setTimeout(r, 900));
+      // DRAINED, not slept. Sleeping 900 ms and reading again returns the next frame off the
+      // reader's queue, which is the one right after `a` — so the two samples were ~16 ms apart, the
+      // sweeping bar had moved 4 px, and only its two edges differed: ~18 changed samples where a
+      // real 900 ms gap gives ~160. That is the whole reason this gate read as noise.
+      const until = performance.now() + 900;
+      while (performance.now() < until) {
+        const { value } = await reader.read();
+        value.close();
+      }
       const b = await grab();
       reader.cancel();
       // Sum of ABSOLUTE per-sample differences, not the difference of the sums. The mover is a bar
@@ -399,7 +407,14 @@ const FINISH = (sdrWhiteNits) => `(async () => {
     out.switchBlackMs = Math.round(first);
     await new Promise((r) => setTimeout(r, 800));
     const s2 = window.native.nativeCaptureStats();
-    out.restart = { readyState: again.track.readyState, frames: s2.frames, running: s2.running };
+    out.restart = {
+      readyState: again.track.readyState,
+      frames: s2.frames,
+      running: s2.running,
+      // 0 = the D3D device and its pipeline were REUSED rather than rebuilt. See the gate.
+      startupDeviceMs: s2.startupDeviceMs,
+      startupTotalMs: s2.startupTotalMs,
+    };
     again.stop();
   } catch (err) {
     out.restart = { error: String(err) };
@@ -559,10 +574,22 @@ function verdict(r, seconds) {
       pass: (n.failed ?? -1) === 0 && (n.undelivered ?? -1) === 0 && (n.orphanedFrames ?? -1) === 0 && n.closed === false,
       value: `failed=${n.failed} undelivered=${n.undelivered} orphaned=${n.orphanedFrames} closed=${n.closed}`,
     },
+    // Three halves of one property: the restart works, it REUSED the cached D3D device, and the
+    // device it reused still produces frames. Split apart each is passable by a broken build —
+    // rebuilding the device every time is invisible to the first, and caching a DEAD device gives a
+    // 0 with no frames. `startupDeviceMs === 0` is also the machine-independent form: a fast box
+    // cannot pass it by accident and a loaded one cannot fail it.
     {
-      gate: 'stop then start again',
-      pass: r.restart?.readyState === 'live' && r.restart?.running === true,
-      value: r.restart?.error ?? `readyState=${r.restart?.readyState} running=${r.restart?.running}`,
+      gate: 'stop then start again reuses the D3D device',
+      pass:
+        r.restart?.readyState === 'live' &&
+        r.restart?.running === true &&
+        r.restart?.frames > 0 &&
+        r.restart?.startupDeviceMs === 0,
+      value:
+        r.restart?.error ??
+        `readyState=${r.restart?.readyState} running=${r.restart?.running} frames=${r.restart?.frames} ` +
+          `device=${r.restart?.startupDeviceMs}ms total=${r.restart?.startupTotalMs}ms`,
     },
     // WGC produces nothing on a still screen. Without the repeater the encoder gets nothing either,
     // and a viewer joining then waits for the host to move something before seeing anything.

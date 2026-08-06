@@ -351,7 +351,9 @@ class CaptureSession {
    *  of whichever display the window is on, so the tone map is unchanged — but the divisor has to
    *  follow the window across screens, which is what CurrentDisplay() is for. */
   bool StartWindow(HWND window, float sdr_white, napi_threadsafe_function sink, std::string* err);
-  void Stop();
+  /** `drop_device`: also release the cached D3D device and pipeline. Default false — they are kept
+   *  across a stop on purpose, see the comment in Stop(). True on a failed start and at teardown. */
+  void Stop(bool drop_device = false);
   CaptureStats Snapshot();
   /** A frame that was tone-mapped but could not be handed to JS (no buffer, or a detached one).
    *  Counted separately from `failed`, which is about the GPU path, because the symptom differs:
@@ -423,6 +425,14 @@ class CaptureSession {
     bool sdr_white_measured = false;
     bool minimized = false;
   };
+  /** Per-stage cost of the last StartItem, in ms. The whole call is synchronous C++ on the thread
+   *  that asked for it — the renderer's — so the click on "share" pays every line of it, and one
+   *  aggregate number cannot say which line to attack. Written and read on the JS thread. */
+  struct StartupTiming {
+    double apartment = 0, supported = 0, device = 0, compileVs = 0, compilePs = 0, pipelineRest = 0;
+    double buffer = 0, rtDevice = 0, item = 0, pool = 0, session = 0, total = 0;
+  };
+  StartupTiming Startup() const { return startup_; }
   DisplayState CurrentDisplay() const;
   /** Moved out, not copied: the caller gets the buffer and the session allocates a fresh one. */
   std::vector<uint8_t> TakeFrame(int32_t* w, int32_t* h);
@@ -441,6 +451,7 @@ class CaptureSession {
   bool UploadParams();  // caller holds pipeline_m_
 
   // --- GPU pipeline: touched only under pipeline_m_ ---
+  StartupTiming startup_{};
   std::mutex pipeline_m_;
   winrt::com_ptr<ID3D11Device> d3d_;
   winrt::com_ptr<ID3D11DeviceContext> ctx_;
@@ -504,7 +515,17 @@ bool CaptureSession::BuildPipeline(std::string* err) {
     return true;
   };
   winrt::com_ptr<ID3DBlob> vs_blob, ps_blob;
-  if (!compile("VSMain", "vs_5_0", vs_blob) || !compile("PSMain", "ps_5_0", ps_blob)) return false;
+  auto t0 = std::chrono::steady_clock::now();
+  const auto since = [](std::chrono::steady_clock::time_point& mark) {
+    const auto now = std::chrono::steady_clock::now();
+    const double ms = std::chrono::duration<double, std::milli>(now - mark).count();
+    mark = now;
+    return ms;
+  };
+  if (!compile("VSMain", "vs_5_0", vs_blob)) return false;
+  startup_.compileVs = since(t0);
+  if (!compile("PSMain", "ps_5_0", ps_blob)) return false;
+  startup_.compilePs = since(t0);
   winrt::check_hresult(
       d3d_->CreateVertexShader(vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(), nullptr, vs_.put()));
   winrt::check_hresult(
@@ -514,6 +535,7 @@ bool CaptureSession::BuildPipeline(std::string* err) {
   sd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;  // 1:1 blit, so no filtering to pay for
   sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
   winrt::check_hresult(d3d_->CreateSamplerState(&sd, sampler_.put()));
+  startup_.pipelineRest = since(t0);
   return true;
 }
 
@@ -565,6 +587,15 @@ bool CaptureSession::StartItem(ItemTarget target, float sdr_white, napi_threadsa
     return false;
   }
   sink_.store(sink, std::memory_order_release);
+  startup_ = StartupTiming{};
+  const auto t_start = std::chrono::steady_clock::now();
+  auto t_mark = t_start;
+  const auto since = [](std::chrono::steady_clock::time_point& mark) {
+    const auto now = std::chrono::steady_clock::now();
+    const double ms = std::chrono::duration<double, std::milli>(now - mark).count();
+    mark = now;
+    return ms;
+  };
   try {
     // COM has to be initialized on this thread; which apartment does not matter, because the frame
     // pool below is free-threaded and delivers on its own thread either way. RPC_E_CHANGED_MODE
@@ -575,49 +606,83 @@ bool CaptureSession::StartItem(ItemTarget target, float sdr_white, napi_threadsa
       winrt::init_apartment(winrt::apartment_type::multi_threaded);
     } catch (winrt::hresult_error const&) {
     }
-    if (!wgc::GraphicsCaptureSession::IsSupported()) {
+    startup_.apartment = since(t_mark);
+    // Static: a machine property, and it measured 14.4 ms on EVERY start (the apartment call next
+    // to it is 0.1 — they were one timer until the split showed which was which). Magic statics are
+    // thread-safe under MSVC and re-run if the initializer throws.
+    static const bool kSupported = wgc::GraphicsCaptureSession::IsSupported();
+    if (!kSupported) {
       *err = "Windows Graphics Capture is not supported on this machine";
       // Stop(), not a bare return: `sink_` is already set, and this is the one failure path that
       // used to skip the release — leaking the threadsafe function, which keeps a reference on the
       // environment so the renderer can never tear down cleanly. And of course the machine that
       // takes this path is the one nobody develops on.
-      Stop();
+      Stop(/*drop_device=*/true);
       return false;
+    }
+    startup_.supported = since(t_mark);
+    // A device kept from a previous session, if it is still usable. GetDeviceRemovedReason covers
+    // TDR, a driver update, a GPU reset and adapter removal — all of which surface as
+    // DXGI_ERROR_DEVICE_*. It is the fast path, not the only defence: the catch below drops the
+    // cache too, so a device that dies between here and StartCapture cannot poison every later
+    // start.
+    if (d3d_ && d3d_->GetDeviceRemovedReason() != S_OK) {
+      vs_ = nullptr;
+      ps_ = nullptr;
+      sampler_ = nullptr;
+      params_ = nullptr;
+      ctx_ = nullptr;
+      d3d_ = nullptr;
     }
     UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
     // ponytail: default adapter, not the one that owns the HMONITOR. On a hybrid or dual-GPU
     // machine that costs a cross-adapter copy per frame. Invisible on the single-GPU box this was
     // measured on; QueryDisplays already walks the adapters if it ever needs fixing.
-    winrt::check_hresult(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags, nullptr, 0,
-                                           D3D11_SDK_VERSION, d3d_.put(), nullptr, ctx_.put()));
-    if (!BuildPipeline(err)) {
-      Stop();
-      return false;
+    if (!d3d_) {
+      winrt::check_hresult(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags, nullptr, 0,
+                                             D3D11_SDK_VERSION, d3d_.put(), nullptr, ctx_.put()));
+      startup_.device = since(t_mark);
+      if (!BuildPipeline(err)) {
+        Stop(/*drop_device=*/true);
+        return false;
+      }
     }
+    // A zero here is the cache-hit signal, and the harness gates on exactly that — see the "stop
+    // then start again" gate in tools/native-track.cjs.
+    t_mark = std::chrono::steady_clock::now();
     // DYNAMIC, not IMMUTABLE: the SDR white level is a live value. Windows lets the user move its
     // own slider mid-session, and ours exposes it too (see SetSdrWhite). Baking it in would mean
     // tearing down the device and the capture session to change one float.
-    D3D11_BUFFER_DESC bd{};
-    bd.ByteWidth = sizeof(ShaderParams);
-    bd.Usage = D3D11_USAGE_DYNAMIC;
-    bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-    bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-    // The knee stays at the ShaderParams default. It was a parameter for a while and never had a
-    // caller: the settings modal exposes the reference white (which the user can judge by looking)
-    // and not the curve shape (which they cannot). Making it configurable again means a UI for it.
-    const ShaderParams initial{sdr_white > 0 ? sdr_white : 80.0f, ShaderParams{}.knee, {1.0f, 1.0f}};
-    D3D11_SUBRESOURCE_DATA init{&initial, 0, 0};
-    winrt::check_hresult(d3d_->CreateBuffer(&bd, &init, params_.put()));
-    params_cpu_ = initial;
-    // Cleared HERE and not only in Stop(): setSdrWhite has no running() guard, so a value set
-    // before the first capture of the process would sit in the atomic and overwrite, on the very
-    // first frame, the one this Start was given.
-    want_sdr_white_.store(0.0f, std::memory_order_relaxed);
+    const float want = sdr_white > 0 ? sdr_white : 80.0f;
+    if (!params_) {
+      D3D11_BUFFER_DESC bd{};
+      bd.ByteWidth = sizeof(ShaderParams);
+      bd.Usage = D3D11_USAGE_DYNAMIC;
+      bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+      bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+      // The knee stays at the ShaderParams default. It was a parameter for a while and never had a
+      // caller: the settings modal exposes the reference white (which the user can judge by looking)
+      // and not the curve shape (which they cannot). Making it configurable again means a UI for it.
+      const ShaderParams initial{want, ShaderParams{}.knee, {1.0f, 1.0f}};
+      D3D11_SUBRESOURCE_DATA init{&initial, 0, 0};
+      winrt::check_hresult(d3d_->CreateBuffer(&bd, &init, params_.put()));
+      params_cpu_ = initial;
+    }
+    startup_.buffer = since(t_mark);
+    // Overwritten HERE, unconditionally, and this is load-bearing twice over. Before the cache it
+    // was a CLEAR, because setSdrWhite has no running() guard and a value set before the first
+    // capture of the process must not overwrite the one this Start was given. Now the buffer can be
+    // a REUSED one still holding the previous session's divisor, so this is also how the new value
+    // reaches the GPU: ToneMap picks the atomic up on the first frame and uploads it on the WGC
+    // thread, under pipeline_m_, before the Draw. Doing it here with ctx_->Map would be the first
+    // context call on the JS thread in this file, which is precisely the rule the mutex encodes.
+    want_sdr_white_.store(want, std::memory_order_relaxed);
 
     winrt::com_ptr<::IInspectable> inspectable;
     winrt::check_hresult(CreateDirect3D11DeviceFromDXGIDevice(d3d_.as<IDXGIDevice>().get(), inspectable.put()));
     rt_device_ = inspectable.as<winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice>();
 
+    startup_.rtDevice = since(t_mark);
     auto interop = winrt::get_activation_factory<wgc::GraphicsCaptureItem, ::IGraphicsCaptureItemInterop>();
     // Remembered for the 2 Hz display poll on the JS thread (see CurrentDisplay). For a monitor
     // the device name is fixed for the session; for a window it is resolved each time, because the
@@ -637,8 +702,10 @@ bool CaptureSession::StartItem(ItemTarget target, float sdr_white, napi_threadsa
     // R16G16B16A16Float is the whole point: it is scRGB, so HDR highlights arrive above 1.0 instead
     // of clamped the way getDisplayMedia's BGRA8 delivers them. Two buffers, because a deeper pool
     // only buys latency we are trying not to spend.
+    startup_.item = since(t_mark);
     pool_ = wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(
         rt_device_, wgdx::DirectXPixelFormat::R16G16B16A16Float, 2, item_.Size());
+    startup_.pool = since(t_mark);
     content_w_ = item_.Size().Width;
     content_h_ = item_.Size().Height;
     frame_token_ = pool_.FrameArrived({this, &CaptureSession::OnFrame});
@@ -655,17 +722,24 @@ bool CaptureSession::StartItem(ItemTarget target, float sdr_white, napi_threadsa
     // Win11-only, and on 24H2 it can additionally require a capture-access grant. Best effort: the
     // yellow border is cosmetic, and refusing to capture over it would be worse.
     try {
-      if (winrt::Windows::Foundation::Metadata::ApiInformation::IsPropertyPresent(
-              L"Windows.Graphics.Capture.GraphicsCaptureSession", L"IsBorderRequired")) {
+      // Static for the same reason as IsSupported above: this is a WinRT metadata lookup, it is an
+      // OS constant, and it sat in the ~7 ms `session` stage on every single start.
+      static const bool kHasBorderFlag = winrt::Windows::Foundation::Metadata::ApiInformation::IsPropertyPresent(
+          L"Windows.Graphics.Capture.GraphicsCaptureSession", L"IsBorderRequired");
+      if (kHasBorderFlag) {
         session_.IsBorderRequired(false);
       }
     } catch (winrt::hresult_error const&) {
     }
     session_.StartCapture();
+    startup_.session = since(t_mark);
+    startup_.total = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_start).count();
     return true;
   } catch (winrt::hresult_error const& e) {
     *err = winrt::to_string(e.message());
-    Stop();
+    // A start that threw must not leave its half-built device behind: the throw can BE the device
+    // dying, and caching that would turn one transient failure into a permanently broken capture.
+    Stop(/*drop_device=*/true);
     return false;
   }
 }
@@ -743,7 +817,13 @@ void CaptureSession::OnFrame(wgc::Direct3D11CaptureFramePool const& pool,
   // Everything below runs under this lock — see the class comment. It is what makes a concurrent
   // second handler safe on a non-free-threaded device context, and what makes Stop() wait for us.
   std::lock_guard<std::mutex> pipeline(pipeline_m_);
-  if (!ctx_) return;  // Stop() ran while this dispatch was queued
+  // `pool != pool_`, not just `!ctx_`. The context check alone used to mean "Stop() ran while this
+  // dispatch was queued", but the context now SURVIVES a stop, so that guard would let a dispatch
+  // belonging to a dead pool through: TryGetNextFrame on a closed pool throws RO_E_CLOSED, the catch
+  // below swallows it, and the failure is billed to the NEXT session's freshly-zeroed stats. WinRT
+  // projections compare by ABI pointer, so this is exact — and it also covers the stop-start-then-
+  // stale-wakeup ordering the old guard never did.
+  if (!ctx_ || pool != pool_) return;
 
   const auto t0 = clock::now();
   bool ok = false, resized = false;
@@ -902,7 +982,7 @@ std::vector<uint8_t> CaptureSession::TakeFrame(int32_t* w, int32_t* h) {
   return std::move(frame_);
 }
 
-void CaptureSession::Stop() {
+void CaptureSession::Stop(bool drop_device) {
   // Revoke FIRST and WITHOUT the lock. Revoking stops new dispatches; it does not join a handler
   // already running, so the lock below is what actually waits for one — and taking the lock before
   // revoking could deadlock against a handler queued behind it.
@@ -922,11 +1002,9 @@ void CaptureSession::Stop() {
   session_ = nullptr;
   pool_ = nullptr;
   item_ = nullptr;
+  // NOT cached: measured at 0.0 ms in all four rounds of tools/start-cost.cjs, so keeping it would
+  // hold a WinRT reference alive to save nothing.
   rt_device_ = nullptr;
-  vs_ = nullptr;
-  ps_ = nullptr;
-  sampler_ = nullptr;
-  params_ = nullptr;
   rtv_ = nullptr;
   target_ = nullptr;
   staging_ = nullptr;
@@ -940,8 +1018,25 @@ void CaptureSession::Stop() {
   want_sdr_white_.store(0.0f, std::memory_order_relaxed);
   window_ = nullptr;
   monitor_device_.clear();
-  ctx_ = nullptr;
-  d3d_ = nullptr;
+  // The device and everything hanging off it that does NOT depend on the target survive a stop —
+  // that is the whole point (D3D11CreateDevice alone is ~96 ms of a ~148 ms start, EVERY start, and
+  // a source switch pays it as black screen mid-call). `target_`/`staging_` are deliberately NOT
+  // among them: ~28 MB at 1440p held for a restart that may never come, and they are rebuilt on the
+  // WGC thread, so they cost the renderer nothing anyway.
+  //
+  // `drop_device` is for the two paths where keeping it is wrong: a start that FAILED (a dead device
+  // must not be cached into every future start) and process teardown (see StopCaptureForTeardown —
+  // releasing D3D from the static destructor during CRT shutdown is what that exists to avoid).
+  // Assigned rather than left alone: `com_ptr::put()` asserts only in debug and leaks in release, so
+  // a rebuild over a non-empty pointer would leak a whole D3D11 device per occurrence.
+  if (drop_device) {
+    vs_ = nullptr;
+    ps_ = nullptr;
+    sampler_ = nullptr;
+    params_ = nullptr;
+    ctx_ = nullptr;
+    d3d_ = nullptr;
+  }
   std::lock_guard<std::mutex> lock(stats_m_);
   stats_ = {};
   frame_.clear();
@@ -1267,7 +1362,7 @@ napi_value StopCapture(napi_env env, napi_callback_info) {
   return nullptr;
 }
 
-void StopCaptureForTeardown() { g_capture.Stop(); }
+void StopCaptureForTeardown() { g_capture.Stop(/*drop_device=*/true); }
 
 /** Called from the env cleanup hook: the reused frame buffer must not outlive the environment that
  *  owns it, and it is the one thing here that is not tied to a running session. */
@@ -1313,6 +1408,19 @@ napi_value GetCaptureStats(napi_env env, napi_callback_info) {
   napi_value running;
   napi_get_boolean(env, g_capture.running(), &running);
   napi_set_named_property(env, obj, "running", running);
+  const auto up = g_capture.Startup();
+  num("startupApartmentMs", up.apartment);
+  num("startupSupportedMs", up.supported);
+  num("startupDeviceMs", up.device);
+  num("startupCompileVsMs", up.compileVs);
+  num("startupCompilePsMs", up.compilePs);
+  num("startupPipelineRestMs", up.pipelineRest);
+  num("startupBufferMs", up.buffer);
+  num("startupRtDeviceMs", up.rtDevice);
+  num("startupItemMs", up.item);
+  num("startupPoolMs", up.pool);
+  num("startupSessionMs", up.session);
+  num("startupTotalMs", up.total);
   // Live display state, resolved here on the JS thread. The page polls this at 2 Hz and owns the
   // divisor (reported white x the host's correction), so a window dragged to another screen — or
   // the Windows SDR brightness slider moving under a share — is picked up within half a second.

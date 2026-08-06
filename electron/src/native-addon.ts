@@ -54,6 +54,14 @@ export interface CaptureStats {
    *  — WGC reports nothing at all and never marks the item closed, so without this the page cannot
    *  tell it from a capture that died and would end the share. */
   minimized?: boolean;
+  /** Per-stage cost of the last capture START, in ms. `startupDeviceMs === 0` means the D3D device
+   *  and its pipeline were reused rather than rebuilt — D3D11CreateDevice alone was ~96 ms of a
+   *  ~148 ms start, on EVERY start, which a source switch paid as black screen mid-call.
+   *  ponytail: kept to re-arm the napi_async_work decision (the cold first start is still ~185 ms).
+   *  Delete when that is closed. Only these two are named here; the addon reports the full
+   *  breakdown and tools/start-cost.cjs reads it off the raw object. */
+  startupDeviceMs?: number;
+  startupTotalMs?: number;
 }
 
 export interface CaptureAddon {

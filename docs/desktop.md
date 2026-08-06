@@ -950,8 +950,9 @@ première image — et traiter ça comme « rien à faire » laissait l'hôte su
   shaders avec `fxc` au build.
 - **Le repli quand l'item se ferme.** `GraphicsCaptureItem::Closed` est abonné et
   remonte dans `captureStats().closed` (écran débranché, session RDP, HDR coupé au
-  `Win+Alt+B`), mais personne ne le consomme encore — il faudra rebasculer sur
-  `getDisplayMedia` à ce moment-là.
+  `Win+Alt+B`). `onSourceEnded` le **lit** désormais et arrête le partage avec une
+  raison affichée sur la scène vide. Ce qui reste à faire est la reprise : rebasculer
+  tout seul sur `getDisplayMedia` plutôt que de rendre la main à l'utilisateur.
 - **La maintenance.** `loopback-capture` (audio) est le problème de quelqu'un
   d'autre ; celui-ci est le nôtre : node-gyp en CI, prebuilds, un pin d'ABI à chaque
   majeure d'Electron. Et le `--target` du script de build doit suivre la

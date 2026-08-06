@@ -147,6 +147,14 @@ interface NativeCaptureStats {
    *  reported closed, so without this the page cannot tell it from a dead capture — and would end
    *  a share the host never stopped. */
   readonly minimized?: boolean;
+  /** Per-stage cost of the last capture START, in ms. Nothing in the page reads these — they exist
+   *  so a slow start can be diagnosed from a real user's machine, where `captureStats()` is the only
+   *  instrument that reaches. `startupDeviceMs === 0` means the D3D device and its pipeline were
+   *  reused rather than rebuilt, which is what the harness gates on.
+   *  ponytail: here to re-arm the napi_async_work decision (the cold first start is still ~185 ms).
+   *  Delete the lot when that is closed. */
+  readonly startupDeviceMs?: number;
+  readonly startupTotalMs?: number;
   readonly recreated: number;
   readonly width: number;
   readonly height: number;
