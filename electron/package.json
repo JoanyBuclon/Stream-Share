@@ -1,6 +1,6 @@
 {
   "name": "stream-share-desktop",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "//productName": "Read by Electron in dev so app.getName() matches the packaged build; electron-builder.yml sets it for the installer.",
   "productName": "StreamShare",
   "description": "Desktop host shell for Stream-Share (Electron).",

@@ -149,9 +149,9 @@ const SCRIPT = (deviceName, sdrWhiteNits, seconds) => `(async () => {
       };
       const a = await grab();
       // DRAINED, not slept. Sleeping 900 ms and reading again returns the next frame off the
-      // reader's queue, which is the one right after `a` — so the two samples were ~16 ms apart, the
-      // sweeping bar had moved 4 px, and only its two edges differed: ~18 changed samples where a
-      // real 900 ms gap gives ~160. That is the whole reason this gate read as noise.
+      // reader's queue, which is the one right after the first — so the two samples were ~16 ms
+      // apart, the sweeping bar had moved 4 px, and only its two edges differed: ~18 changed
+      // samples where a real 900 ms gap gives ~160. That is why this gate read as noise.
       const until = performance.now() + 900;
       while (performance.now() < until) {
         const { value } = await reader.read();
@@ -522,9 +522,15 @@ app.whenReady().then(async () => {
     await new Promise((r) => setTimeout(r, 500)); // frames flowing again before we measure exposure
     result.toneMap = await run(TONE_MAP(target.sdrWhiteNits), 30_000);
     Object.assign(result, await run(FINISH(target.sdrWhiteNits), 20_000));
-    result.verdict = verdict(result, SECONDS);
   } catch (err) {
     result.error = String(err && err.stack ? err.stack : err);
+  } finally {
+    // In `finally`, not at the end of the try: a run that blew up in one phase used to write a
+    // result file with NO verdict at all, which reads as "the tool is broken" and hides both which
+    // stage failed and how far the run got. Every gate reads through `?.`, so the ones whose data
+    // never arrived report their own absence instead of throwing. Learned the hard way — an
+    // intermittent failure went undiagnosed because its file said nothing.
+    result.verdict = verdict(result, SECONDS);
   }
   fs.writeFileSync(OUT, JSON.stringify(result, null, 2));
   mover?.destroy();

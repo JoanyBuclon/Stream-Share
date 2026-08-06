@@ -126,6 +126,12 @@ export class HostController {
    *  the settings panel, which falls back on the same label, claimed "no source selected" while a
    *  share was live. Empty on the browser path, where getDisplayMedia's own label IS the name. */
   private sourceName = '';
+  /** Whether the COMMITTED pick was an HDR screen — not whether the capture ended up native. The
+   *  rest of the reasoning lives where it is read, in setStream. */
+  private sourceHdr = false;
+  /** The pick `capture()` is working on, committed into the two fields above by setStream. Null on
+   *  the browser path, which has no picker and no source object. */
+  private pendingSource: NativeSource | null = null;
   private readonly mixer = new AudioMixer();
   private readonly audioQueue = serial(); // serializes outgoing rebuilds — no interleaving
   private readonly wakeLock = createWakeLock(); // keep the screen awake while hosting
@@ -240,7 +246,11 @@ export class HostController {
   private async capture(source?: NativeSource): Promise<void> {
     // The shell's picker knows the name; getDisplayMedia's prompt does not tell us, and there the
     // track's own label IS the name — see `sourceName`.
-    this.sourceName = source?.name ?? '';
+    // Held, not committed. These used to be assigned right here, before any await — so a capture
+    // that then failed left the panel naming a source that never started while the previous one was
+    // still live. setStream is the commit point for everything else about a source; it is the
+    // commit point for its identity too.
+    this.pendingSource = source ?? null;
     const deviceId = source ? cameraDeviceId(source.id) : null;
     if (deviceId) return this.captureCamera(deviceId);
     // `hdr` alone: it is only ever true when the shell holds a DXGI output for this source, and
@@ -252,6 +262,12 @@ export class HostController {
     // nobody told. Everywhere but the native→native switch, the previous session dies in
     // setStream's `finally`, i.e. only once the new one is committed.
     if (source?.hdr && canCaptureNative()) return this.captureHdr(source);
+    // The OTHER route to the clamped path, and the one that had nothing at all to read: an HDR
+    // source on a shell that cannot capture natively. Defensive rather than routine — the page and
+    // the preload ship in one installer (main loads `app://bundle/`, never a remote origin), so the
+    // version skew canCaptureNative() guards against needs the same .node to load in main and fail
+    // in the preload. Logged anyway, because the stage chip says WHAT and only this says why.
+    if (source?.hdr) console.warn('stream-share: HDR source on a shell that cannot capture natively — sharing clamped');
     return this.captureDisplay();
   }
 
@@ -304,6 +320,8 @@ export class HostController {
     // track, i.e. BLACK, still labelled with the previous source. Doing it up front stretched that
     // window across the audio round trip above (a getDisplayMedia that re-enumerates sources in
     // main); here it is only the capture start, measured at ~171 ms.
+    // Read BEFORE the stop, because it decides what a failed fallback may do below.
+    const killedPrevious = this.nativeCapture !== null;
     this.stopNative();
     let capture: NativeCapture;
     try {
@@ -327,7 +345,21 @@ export class HostController {
       // The capture may have started before whatever failed; nothing else can reach it now.
       window.native?.stopNativeCapture?.();
       console.error('stream-share: native HDR capture failed, falling back to getDisplayMedia', e);
-      return this.captureDisplay();
+      // The fallback keeps the previous share alive if IT fails — setStream is the only thing that
+      // touches `this.stream`. But `stopNative()` above already killed the previous session on a
+      // native→native switch, and it kills it SILENTLY (a deliberate stop does not fire `ended`, see
+      // endTrack in native-video.ts). So a refused fallback used to leave the worst possible state:
+      // a live badge, a Stop button, the old source still named on the stage, and viewers holding a
+      // frozen track — with nothing, anywhere, saying the share was over. Nothing on the host's own
+      // machine reveals it either.
+      if (!killedPrevious) return this.captureDisplay();
+      try {
+        return await this.captureDisplay();
+      } catch (err) {
+        this.endedReason = 'HDR capture failed and the fallback was refused, so the share stopped. Pick a source to start again.';
+        this.stopSource();
+        throw err; // the picker is still open and says "capture failed — try another source"
+      }
     }
     if (this.ac.signal.aborted) {
       audio?.stop();
@@ -391,6 +423,9 @@ export class HostController {
     const previousNative = this.nativeCapture;
     this.nativeCapture = native;
     this.stream = capture;
+    // The source's identity becomes true HERE, with the stream it describes — see pendingSource.
+    this.sourceName = this.pendingSource?.name ?? '';
+    this.sourceHdr = this.pendingSource?.hdr ?? false;
     const video = capture.getVideoTracks()[0];
     if (video) {
       video.contentHint = contentHintFor(this.quality);
@@ -411,6 +446,13 @@ export class HostController {
     show(el('btn-pause'));
     show(el('host-quality-bar'));
     setText('host-source-name', this.sourceName || video?.label || 'screen');
+    // An HDR screen that did NOT end up on the native path. Two routes lead here and neither has to
+    // signal it: capture() falling through when canCaptureNative() is false, and captureHdr's catch
+    // (the consent gate answering null, no DXGI output for that source, the addon refusing). Both
+    // land in setStream, and `native` is the only thing that can make the claim untrue — so the
+    // state is derived at the commit point instead of being a flag two failure paths must set and
+    // every success path must remember to clear. Hidden with the whole meta row by resetStage.
+    el('host-hdr-clamped').hidden = !this.sourceHdr || !!native;
 
     try {
       await this.pushOutgoing(); // build outgoing + hot-swap existing viewers (serialized)

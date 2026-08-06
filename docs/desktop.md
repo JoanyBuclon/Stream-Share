@@ -918,6 +918,35 @@ première image — et traiter ça comme « rien à faire » laissait l'hôte su
 > per-app partent avec. Les deux sont tenus par des tests qui échouent sans le
 > correctif (vérifié en le retirant).
 
+**Le repli n'est plus muet.** Une source que main rapporte **HDR** et qui finit sur
+`getDisplayMedia` affiche une puce `captured without HDR` sur la scène, à côté du nom
+de la source. Avant, le seul indice était une *absence* — la ligne `#sdrwhite-row`
+masquée, un curseur que la plupart des hôtes n'ont jamais vu — et l'image simplement
+délavée.
+
+Deux chemins y mènent et **aucun des deux n'a à le signaler** : `capture()` qui passe
+outre quand `canCaptureNative()` est faux (défensif — page et preload sont livrés dans
+le même installeur, main charge `app://bundle/` et jamais une origine distante), et le
+`catch` de `captureHdr`. L'état est **dérivé** au point de commit unique que les trois
+chemins de capture traversent — dans `setStream`, `sourceHdr` croisé avec le paramètre
+`native` — plutôt que porté par un drapeau que deux chemins d'échec poseraient et que
+tous les chemins de succès devraient penser à effacer. `resetStage` masque toute la
+ligne de méta, donc l'arrêt du partage l'emporte gratuitement.
+
+Le mot compte, et il a fallu deux essais : la puce est collée au nom de la source, donc
+« no HDR » comme « HDR unavailable » se lisent « Screen 1 ne fait pas de HDR » — le seul
+énoncé faux, puisque la puce n'apparaît que si l'écran *est* en HDR. « captured without
+HDR » nomme l'action. Pas de région live non plus, contrairement à `#host-ended-reason` :
+celui-là est une annonce ponctuelle, celle-ci une étiquette persistante, et `renderPause`
+bascule son **conteneur** — chaque pause/reprise ré-annoncerait un état inchangé.
+
+**Et le double échec ne laisse plus un partage fantôme.** Sur un enchaînement
+natif→natif, `stopNative()` a déjà tué la session avant que le repli soit tenté, et il
+la tue *silencieusement* (un arrêt délibéré n'émet pas `ended`). Si le repli échouait
+aussi — prompt refusé — l'hôte gardait un badge LIVE, un bouton Stop, l'ancienne source
+nommée à l'écran et des viewers sur une image figée, sans que rien nulle part ne dise
+que c'était fini. Ce cas arrête maintenant le partage avec sa raison.
+
 **Ce qui reste vrai et non mesuré**, pour la suite du chantier natif :
 - **WGC ne livre que sur changement.** Un bureau immobile rend ~24 fps, et 0,2 fps
   quand plus rien ne bouge. C'est une qualité (aucun encodage gaspillé) mais le
@@ -940,14 +969,20 @@ première image — et traiter ça comme « rien à faire » laissait l'hôte su
   transférées depuis un canvas — et le reste est du vrai code : le picker, `host.ts`,
   `native-video.ts`, le `MediaStreamTrackGenerator`. Ce qu'aucun de ces tests ne
   touche : l'addon, Electron, et le câblage IPC.
-- **Le refus de la porte reste silencieux** : si main n'a aucune sortie DXGI pour la
-  source choisie, `startNativeCapture` refuse et on retombe sur le chemin clampé —
-  avec juste un `console.error`. La logique de la porte est testée unitairement
-  (ci-dessus), pas son effet visible côté utilisateur.
-- **`startCapture` bloque 171 ms** (device D3D, deux compilations HLSL au runtime,
-  pool, session). Dans le preload c'est le thread du renderer, donc le clic sur
-  « partager » les paiera. À passer en `napi_async_work`, ou à précompiler les
-  shaders avec `fxc` au build.
+- **Un écran réellement HDR que main ne reconnaît pas** reste silencieux. `hdr` vaut
+  `output?.hdr ?? false`, donc un écran dont `nativeDisplayFor` ne retrouve pas
+  l'origine est rapporté `hdr: false`, part sur le chemin clampé et **n'affiche aucune
+  puce** (voir plus bas). Pas hypothétique : `electron/src/config.test.ts` documente
+  déjà le cas (2560 DIP à 150 % = 3840 physiques, aucune origine ne correspond). Idem
+  si le HDR est allumé entre le listing et la confirmation, et idem pour une fenêtre
+  choisie sur l'écran SDR puis glissée sur l'écran HDR. Rien de tout ça n'est
+  réparable depuis le renderer.
+- **Le coût à froid du premier `startCapture`.** Le device est maintenant réutilisé
+  entre deux captures, donc tout démarrage suivant coûte ~32 ms — mais le tout premier
+  du process en coûte encore ~185, sur le thread du renderer. `napi_async_work`
+  reste la sortie, ou une préchauffe à l'ouverture du picker (l'hôte a déjà signalé
+  son intention et le picker reste ouvert ~1 s). Non fait tant que personne ne s'en
+  plaint : voir le `ponytail:` sur `StartupTiming`.
 - **Le repli quand l'item se ferme.** `GraphicsCaptureItem::Closed` est abonné et
   remonte dans `captureStats().closed` (écran débranché, session RDP, HDR coupé au
   `Win+Alt+B`). `onSourceEnded` le **lit** désormais et arrête le partage avec une

@@ -215,6 +215,12 @@ export async function fakeNative(
             // Throw BEFORE the handover, like the real preload: everything that can refuse runs
             // before the port exists, so a refusal never leaves one behind.
             if (nativeCapture === 'throw') throw new Error('e2e: native capture refused');
+            // Runtime switch, like `__audioFail`: the mode above is fixed at init, and the case that
+            // needs this is "the FIRST capture succeeded natively and a LATER one is refused" —
+            // which is the only way to reach a refusal that has already killed a live session.
+            if ((window as unknown as { __nativeFail?: boolean }).__nativeFail) {
+              throw new Error('e2e: native capture refused (runtime)');
+            }
             if (nativeCapture === 'noport') return; // the handover goes missing — the locked-picker case
             // Like the shell's closeFramePort(): a start with a session still open replaces it
             // rather than leaving a second pump posting into an abandoned port.

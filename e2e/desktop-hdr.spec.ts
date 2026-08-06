@@ -83,6 +83,9 @@ test('an HDR screen is captured natively, with system audio fetched on the side'
     await page.evaluate(() => ((document.getElementById('host-video') as HTMLVideoElement).srcObject as MediaStream).getAudioTracks().length),
   ).toBe(1);
   await expect(page.locator('#toggle-sysaudio')).toHaveAttribute('aria-pressed', 'true');
+  // The other half of the "captured without HDR" chip asserted in the fallback tests below: a
+  // warning that is always on says nothing. Same HDR source, captured natively, so it is off.
+  await expect(page.locator('#host-hdr-clamped')).toBeHidden();
 
   // Frames really arrive — without this the whole suite stays green on a handover that works and a
   // track nothing ever writes to.
@@ -555,9 +558,54 @@ for (const { mode, stops } of [
     // `noport` waits out native-video's 3 s handover timeout before falling back.
     await expect(page.locator('#host-video')).toBeVisible({ timeout: 10_000 });
     await expect(page.locator('#host-live-badge')).toBeVisible();
+    // …and the host is TOLD. The fallback is correct but it clamps HDR, so the picture is washed
+    // out for reasons nothing on screen used to explain: the only clue was the absent #sdrwhite-row,
+    // a control most hosts have never seen.
+    await expect(page.locator('#host-hdr-clamped')).toBeVisible();
     await previewHeight(page).toBe(1080);
     await nativeCalls(page).toMatchObject({ stopped: stops });
+
+    // …and it goes away on the next source. THIS is the assertion the derivation exists for: a
+    // sticky flag set in the two failure routes passes everything above and still fails here,
+    // because then every success route has to remember to clear it. Screen 2 is not HDR.
+    await page.click('#btn-settings');
+    await page.click('#btn-modal-source');
+    await pick(page, 'screen', 'Screen 2');
+    await expect(page.locator('#host-hdr-clamped')).toBeHidden();
 
     await ctx.close();
   });
 }
+
+// The refusal that has ALREADY destroyed something. On a native→native switch, captureHdr stops the
+// running WGC session before it starts the next one — and a deliberate stop is silent by design, so
+// nothing fires `ended`. If the getDisplayMedia fallback is then refused too, `setStream` never
+// runs: the stage used to keep a live badge, a Stop button and the previous source's name over a
+// dead track, with the viewers holding a frozen picture and nothing anywhere saying it was over.
+// The host cannot see any of that from their own machine.
+test('a fallback refused after the native session was killed ends the share and says why', async ({ browser }) => {
+  const ctx = await browser.newContext();
+  const page = await ctx.newPage();
+  // Rejects from the SECOND call on: the first share's audio grab must succeed, so that what the
+  // switch below tears down is a real, running native session.
+  await fakeDisplayMedia(page, { audio: true, rejectFrom: 1 });
+  await fakeNative(page, { nativeCapture: 'ok' });
+  await shareHdrScreen(page);
+  await previewHeight(page).toBe(720);
+  await expect(page.locator('#host-live-badge')).toBeVisible();
+
+  await page.evaluate(() => {
+    (window as unknown as { __nativeFail: boolean }).__nativeFail = true;
+  });
+  await page.click('#btn-settings');
+  await page.click('#btn-modal-source');
+  await pick(page, 'screen', 'Screen 1');
+
+  // Ended, not "live over a corpse" — and wearing the reason, which is the whole point: this is a
+  // teardown the host did not ask for.
+  await expect(page.locator('#host-live-badge')).toBeHidden();
+  await expect(page.locator('#host-empty')).toBeVisible();
+  await expect(page.locator('#host-ended-reason')).toContainText('fallback was refused');
+
+  await ctx.close();
+});

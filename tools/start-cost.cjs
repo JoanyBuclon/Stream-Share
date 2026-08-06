@@ -10,7 +10,7 @@
 //   pnpm exec electron ../tools/start-cost.cjs
 const fs = require('node:fs');
 const path = require('node:path');
-const { app, screen } = require('electron');
+const { app } = require('electron');
 
 // Destroying the last window quits the app before anything is written.
 app.on('window-all-closed', () => {});
@@ -29,7 +29,6 @@ const breakdown = (s) =>
 app.whenReady().then(async () => {
   const result = { rounds: [] };
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const addon = require(ADDON);
     const displays = addon.listDisplays();
     const target = displays.find((d) => d.hdr) ?? displays[0];
