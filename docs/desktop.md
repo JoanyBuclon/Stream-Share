@@ -698,6 +698,21 @@ Deux comportements qu'un écran n'a jamais, mesurés eux aussi :
 - **Fenêtre fermée** : `GraphicsCaptureItem::Closed` **se déclenche**, donc le partage se
   termine proprement par le chemin qui existait déjà.
 
+**Le changement de source passe par un noir, et il faut le tenir court.** Deux sessions
+WGC ne peuvent pas coexister, donc passer d'une source native à une autre impose de
+tuer l'ancienne avant de démarrer la nouvelle — et entre les deux, l'aperçu tient une
+piste morte. Le symptôme remonté du terrain était exactement ça : écran noir, avec le
+nom de la source précédente encore affiché (un GUID, à l'époque où c'était `track.label`
+qui le fournissait). L'arrêt se faisait **avant** l'aller-retour `getDisplayMedia` de
+l'audio, ce qui étirait le noir sur toute sa durée ; il se fait maintenant juste avant
+le démarrage. Mesuré (porte du harness) : **178 à 256 ms**, soit le coût du
+`startCapture` lui-même.
+
+> Et le nom affiché ne vient plus de `track.label` : un `MediaStreamTrackGenerator` est
+> étiqueté d'un GUID, que la scène affichait tel quel — pendant que le panneau de
+> réglages, qui retombait sur le même label, annonçait « no source selected » sous un
+> partage bien vivant. C'est le nom du sélecteur qui sert, sur les deux chemins.
+
 **Une fenêtre s'approuve par son handle *et* son pid.** Windows recycle les handles :
 la liste est prise à l'ouverture du sélecteur, et le temps que l'utilisateur confirme,
 la fenêtre cliquée peut avoir disparu en laissant son numéro à une autre. `IsWindow()`

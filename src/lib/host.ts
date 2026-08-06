@@ -119,6 +119,13 @@ export class HostController {
    *  a window's capture item closes because the user closed the window, which has nothing to do
    *  with a display changing. */
   private sourceIsWindow = false;
+  /** What the user actually picked, for the stage and the settings panel to name.
+   *
+   *  Needed because `track.label` cannot: a MediaStreamTrackGenerator is labelled with a GUID, so
+   *  the native path was putting `4aead88e-fc84-…` on screen where the source name belongs — and
+   *  the settings panel, which falls back on the same label, claimed "no source selected" while a
+   *  share was live. Empty on the browser path, where getDisplayMedia's own label IS the name. */
+  private sourceName = '';
   private readonly mixer = new AudioMixer();
   private readonly audioQueue = serial(); // serializes outgoing rebuilds — no interleaving
   private readonly wakeLock = createWakeLock(); // keep the screen awake while hosting
@@ -231,23 +238,20 @@ export class HostController {
    *  display surface, so they come through getUserMedia. Everything downstream — setStream, the
    *  quality ladder, the peers — treats the result as any other MediaStream. */
   private async capture(source?: NativeSource): Promise<void> {
+    // The shell's picker knows the name; getDisplayMedia's prompt does not tell us, and there the
+    // track's own label IS the name — see `sourceName`.
+    this.sourceName = source?.name ?? '';
     const deviceId = source ? cameraDeviceId(source.id) : null;
     if (deviceId) return this.captureCamera(deviceId);
     // `hdr` alone: it is only ever true when the shell holds a DXGI output for this source, and
     // that output is the one it captures. The page is not told which, and has nothing to pass on.
-    if (source?.hdr && canCaptureNative()) {
-      // ONLY here. Two WGC sessions cannot coexist (the addon throws "capture already running"), so
-      // an HDR→HDR switch has to kill the old one before starting the new one — and that is the one
-      // case where a failure leaves the previous share frozen, with no way around it.
-      //
-      // Every other source change must NOT do this. Stopping up front used to be unconditional, and
-      // it is silent since a deliberate stop stopped firing `ended`: a getDisplayMedia that then
-      // failed (window closed since the listing, prompt refused, camera busy) left the host on the
-      // last HDR frame with a "live" badge and nobody told. The previous session dies in setStream's
-      // `finally` instead, i.e. only once the new one is committed.
-      this.stopNative();
-      return this.captureHdr(source);
-    }
+    // The old native session is NOT stopped here — see captureHdr, which stops it as late as it
+    // can. Stopping up front used to be unconditional, and it is silent since a deliberate stop
+    // stopped firing `ended`: a getDisplayMedia that then failed (window closed since the listing,
+    // prompt refused, camera busy) left the host on the last HDR frame with a "live" badge and
+    // nobody told. Everywhere but the native→native switch, the previous session dies in
+    // setStream's `finally`, i.e. only once the new one is committed.
+    if (source?.hdr && canCaptureNative()) return this.captureHdr(source);
     return this.captureDisplay();
   }
 
@@ -294,6 +298,13 @@ export class HostController {
     // BASE the host can correct rather than a number to hide behind `undefined`.
     this.sourceSdrNits = source.sdrWhiteMeasured ? source.sdrWhiteNits : 80;
     this.sourceIsWindow = source.kind === 'window';
+    // AS LATE AS POSSIBLE, and not a line earlier. Two WGC sessions cannot coexist (the addon
+    // throws "capture already running"), so switching from one native source to another has to kill
+    // the old one first — and between that and the new one's first frame, the preview is a dead
+    // track, i.e. BLACK, still labelled with the previous source. Doing it up front stretched that
+    // window across the audio round trip above (a getDisplayMedia that re-enumerates sources in
+    // main); here it is only the capture start, measured at ~171 ms.
+    this.stopNative();
     let capture: NativeCapture;
     try {
       capture = await captureNative(
@@ -396,7 +407,7 @@ export class HostController {
     show(el('btn-stop'));
     show(el('btn-pause'));
     show(el('host-quality-bar'));
-    setText('host-source-name', video?.label || 'screen');
+    setText('host-source-name', this.sourceName || video?.label || 'screen');
 
     try {
       await this.pushOutgoing(); // build outgoing + hot-swap existing viewers (serialized)
@@ -934,8 +945,10 @@ export class HostController {
     setText('chip-fps', `${this.quality.fps} fps`);
     setText('chip-bitrate', `${this.quality.bitrate} mbps`);
     this.renderSdrWhite();
-    const label = this.stream?.getVideoTracks()[0]?.label;
-    setText('settings-source-hint', label || 'no source selected');
+    // `sourceName` first: on the native path the track's label is a GUID, so this line used to read
+    // "no source selected" — under a live share, next to a "Change source" button.
+    const label = this.sourceName || this.stream?.getVideoTracks()[0]?.label;
+    setText('settings-source-hint', label || (this.stream ? 'sharing' : 'no source selected'));
     setText('btn-modal-source', this.stream ? 'Change source' : 'Choose source');
   }
 

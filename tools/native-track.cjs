@@ -344,7 +344,19 @@ const FINISH = (sdrWhiteNits) => `(async () => {
     // The old two-call handshake closed the live frame port BEFORE the call that could fail, so a
     // second capture threw "already running" and left the first live and frozen. Happy paths never
     // saw it.
+    // How long the preview is BLACK across a source switch. Between stopping one WGC session and
+    // the first frame of the next, the video element holds a dead track — and the host reported
+    // exactly that, with the previous source still named on screen. Measured rather than argued.
+    const t0 = performance.now();
     const again = await captureNative(${sdrWhiteNits});
+    const proc = new MediaStreamTrackProcessor({ track: again.track });
+    const reader = proc.readable.getReader();
+    const first = await Promise.race([
+      reader.read().then(({ value }) => { value?.close(); return performance.now() - t0; }),
+      new Promise((r) => setTimeout(() => r(-1), 5000)),
+    ]);
+    reader.cancel();
+    out.switchBlackMs = Math.round(first);
     await new Promise((r) => setTimeout(r, 800));
     const s2 = window.native.nativeCaptureStats();
     out.restart = { readyState: again.track.readyState, frames: s2.frames, running: s2.running };
@@ -546,6 +558,13 @@ function verdict(r, seconds) {
       value: `${r.steady?.dropped} steady (${r.duringSetup?.dropped} during setup), ${r.droppedInPage} in the page`,
     },
     { gate: 'stop() actually stops', pass: r.afterStop?.running === false, value: `running=${r.afterStop?.running}` },
+    // The black window on a source switch. A ceiling, not a target: below this the host sees a
+    // blink, above it they report a bug — which is how this gate came to exist.
+    {
+      gate: 'a source switch goes dark only briefly',
+      pass: (r.switchBlackMs ?? -1) >= 0 && (r.switchBlackMs ?? 1e9) < 1000,
+      value: r.switchBlackMs === -1 ? 'no frame within 5s' : `${r.switchBlackMs} ms to the first frame`,
+    },
     // Two halves of the same invariant, and the reason this counter exists: 1 in flight is the
     // repeater's clone, 2 is that clone mid-replacement, and 0 is the only acceptable number once
     // the session is over. `?? -1` so a run that never reported fails instead of passing on
