@@ -113,6 +113,38 @@ test('with system audio off, the native path never touches getDisplayMedia', asy
   await ctx.close();
 });
 
+// …and turning it back on afterwards must actually produce sound. The native capture is video-only
+// and `getDisplayMedia` was never called, so flipping the flag alone rebuilt from a stream with no
+// audio track in it: silence, with the panel showing "system" lit. The host cannot hear their own
+// share, so nothing on their machine reveals it — it was in the backlog for that reason.
+test('system audio turned on after the native capture started reaches the share', async ({ browser }) => {
+  const ctx = await browser.newContext();
+  const page = await ctx.newPage();
+  await fakeDisplayMedia(page, { audio: true });
+  await fakeNative(page, { nativeCapture: 'ok' });
+  await shareHdrScreen(page, async (p) => p.click('#toggle-sysaudio'));
+  await previewHeight(page).toBe(720);
+
+  await page.click('#btn-settings');
+  await page.click('#toggle-sysaudio');
+
+  // The same grab captureHdr does — video sibling stopped, or it is a second full screen capture
+  // running for nothing.
+  await displayMediaCalls(page).toEqual([{ audio: true, videoStopped: true }]);
+  // And it lands in the shared stream, which is what buildOutgoing reads. Not just "the toggle
+  // stayed lit": a failed grab turns it back off, so the toggle alone proves only half of it.
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => ((document.getElementById('host-video') as HTMLVideoElement).srcObject as MediaStream).getAudioTracks().length,
+      ),
+    )
+    .toBe(1);
+  await expect(page.locator('#toggle-sysaudio')).toHaveAttribute('aria-pressed', 'true');
+
+  await ctx.close();
+});
+
 // Switching away from an HDR screen: only one WGC session can exist at a time, so a leaked one
 // makes the NEXT native share impossible ("capture already running") — and it keeps tone-mapping a
 // screen for a track nobody reads.

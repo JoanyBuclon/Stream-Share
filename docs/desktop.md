@@ -160,6 +160,57 @@ Trois conséquences, toutes voulues :
   donc plus rien de coupé ; rallumer repart de « les viewers entendent tout ».
   C'est le prix de la règle, et il est petit.
 
+**Rallumer ré-acquiert, ça ne se contente pas de rallumer le drapeau.** Le
+correctif d'un point du backlog, et il en a fait tomber un second, jamais
+remonté :
+
+| Source partagée            | Avant                                              | Maintenant                            |
+| -------------------------- | -------------------------------------------------- | ------------------------------------- |
+| Écran (natif ou non)       | **silence**, avec « system » allumé au panneau      | une piste loopback est demandée        |
+| Fenêtre, propriétaire résolu | **tout le bureau**, panneau nommant toujours l'app | la session par app est réarmée         |
+| Fenêtre, sans propriétaire | tout le bureau, annoncé par le hint                 | inchangé — dégradation assumée         |
+| Caméra                      | rien à rallumer, les cases restent la seule voie   | inchangé, et **délibérément** : voir plus bas |
+| Web (pas de `window.native`) | silence si l'audio n'a pas été coché au prompt     | un **second** sélecteur d'écran s'ouvre |
+
+Le premier cas : `buildOutgoing` lit la piste système dans le flux de capture, et
+elle n'y est que si le toggle était **déjà** allumé au moment du `getDisplayMedia`
+— le chemin natif, lui, ne produit jamais d'audio. Le second est pire, parce qu'il
+est *audible chez les autres et pas chez soi* : sur une fenêtre, main répond
+`audio: 'loopback'` comme partout ailleurs, donc le mix complet du bureau dort
+dans le flux, inutilisé tant que la session par app tourne. Couper le son système
+détruit cette session, la rallumer laissait `buildOutgoing` retomber sur ce mix.
+Un clic sur « system » et le vocal Discord partait dans le stream.
+
+**La caméra ne demande rien, exprès.** `ss:select-source` ne mémorise que les ids
+`screen:`/`window:`, donc un `getDisplayMedia` serait refusé — et un refus rééteint
+le toggle, ce qui **grise les cases par app**, c'est-à-dire le seul chemin par
+lequel un partage caméra a jamais du son. Laisser le drapeau allumé sans piste est
+le comportement documenté de `captureCamera` : silence jusqu'à ce qu'une case soit
+cochée. Demander aurait remplacé ça par un interrupteur impossible à allumer.
+
+Sur le desktop la demande ne montre aucun prompt : le shell répond depuis la source
+déjà approuvée. Sur le **web**, si : c'est un second sélecteur, et le host peut y
+choisir une autre surface que celle qu'il partage — les viewers entendraient alors
+une source dont ils ne voient pas l'image. C'est aussi le seul rattrapage possible
+pour qui a oublié de cocher « Partager l'audio » dans le premier prompt.
+
+Deux réserves, toutes deux vérifiées :
+
+- **`selectedSourceId` ne vit pas toute la session.** `forgetPick` l'efface sur
+  `display-added`/`display-removed`. Brancher un écran en cours de partage, puis
+  cliquer « system » → refus → le toggle claque et se rééteint, sans explication.
+  Assumé : le toggle qui refuse de rester allumé *est* le signal, et il ne ment pas.
+  Un message actionnable (« re-choisis la source ») reste à écrire — voir le
+  `ponytail:` dans `toggleSystemAudio`.
+- **« avant tout `await` » n'est vrai que sur le chemin écran.** Sur une fenêtre
+  refusée, le repli traverse d'abord l'aller-retour IPC de `setAudioCapture`. Le
+  budget Chromium est de ~5 s et l'aller-retour très en dessous, mais ce n'est plus
+  une garantie d'ordre, c'est une marge.
+
+Mesuré côté harness : la seconde capture **du même écran** (vérifié par
+`display_id`, pas supposé) ne perturbe pas la session WGC en cours — 30 images sur
+les 400 ms où les deux coexistent réellement, session non fermée.
+
 Le passage de 1 à 2 apps coupées **change la sémantique en silence**, et c'est la
 limite principale du modèle. Le panneau l'annonce pendant toute la durée où c'est
 vrai (dérivé du mode réellement actif, pas d'un décompte de coches).
@@ -893,10 +944,6 @@ première image — et traiter ça comme « rien à faire » laissait l'hôte su
   source choisie, `startNativeCapture` refuse et on retombe sur le chemin clampé —
   avec juste un `console.error`. La logique de la porte est testée unitairement
   (ci-dessus), pas son effet visible côté utilisateur.
-- **Rallumer le son système après coup ne donne rien** (aucune piste audio dans le
-  flux natif). Comportement identique sur le chemin `getDisplayMedia`, donc
-  pré-existant — mais ici `loopbackAudioTrack()` existe déjà et rendrait le correctif
-  trivial.
 - **`startCapture` bloque 171 ms** (device D3D, deux compilations HLSL au runtime,
   pool, session). Dans le preload c'est le thread du renderer, donc le clic sur
   « partager » les paiera. À passer en `napi_async_work`, ou à précompiler les

@@ -341,6 +341,8 @@ export class HostController {
   }
 
   /** The system-audio track alone: ask for the usual A/V capture, keep the audio, drop the video.
+   *  Used by the native path, which produces no audio of its own, and by the toggle when it is
+   *  turned on after the capture started.
    *  Returns null rather than throwing — losing sound is a degradation, not a reason to abandon a
    *  capture that is otherwise fine — but the toggle is turned off so the panel cannot claim sound
    *  the viewers are not getting. */
@@ -357,9 +359,10 @@ export class HostController {
       console.error('stream-share: no system audio alongside the native capture', e);
     }
     // Same rule buildOutgoing applies when the mic is denied: the UI must not show a source the
-    // session does not have.
+    // session does not have — the toggle snapping back off IS the feedback. A message used to go to
+    // `settings-source-hint`, which the renderSettings that follows on BOTH callers overwrites with
+    // the source label; it was never once visible. Words about audio belong in audioHint().
     this.quality = { ...this.quality, systemAudio: false };
-    setText('settings-source-hint', 'shared in HDR, but system audio could not start');
     return null;
   }
 
@@ -444,11 +447,15 @@ export class HostController {
     // used — exactly what turning systemAudio off already does — so ticking a box never re-runs
     // capture() and never disturbs viewers. `[]` is a live capture with nothing in it: still the
     // native track, and it is silent, which is the point.
+    // `find(live)`, not `[0]`: a loopback track dies on its own when the default output device
+    // changes (headphones unplugged), and it stays in the stream at index 0 once it has. EVERY
+    // rebuild reads this line — setStream, both toggles, pause, stopSource — so handing the mixer a
+    // corpse from here is silence with no way out, on a path the host never touched.
     const systemTrack = !this.quality.systemAudio
       ? null
       : this.live
         ? this.nativeAudio.track()
-        : (this.stream.getAudioTracks()[0] ?? null);
+        : (this.stream.getAudioTracks().find(isLiveTrack) ?? null);
     let mixed: MediaStreamTrack | null;
     try {
       mixed = await this.mixer.build(systemTrack, this.quality.mic);
@@ -762,7 +769,55 @@ export class HostController {
     // "viewers hear everything": the ticks are not remembered across the toggle, because they are
     // read from the live capture and there no longer is one. Deliberate — an intent kept aside
     // just to survive this is exactly the second source of truth that can drift out of step.
-    if (!this.quality.systemAudio && this.live) return void (await this.sendAudio(null));
+    //
+    // Sent whenever the shell is there, NOT only when `this.live` is set: an arm requested a moment
+    // ago may still be resolving in main, in which case `live` reads null here and its WASAPI
+    // sessions would start after the host turned the sound off and never stop. `sendAudio(null)`
+    // bumps `audioSeq` so the in-flight answer is discarded, and IPC is ordered, so the stop reaches
+    // main behind the start. Same one-liner and same reasoning as destroy().
+    if (!this.quality.systemAudio && window.native) return void (await this.sendAudio(null));
+    // Turning it back ON has to RE-ACQUIRE what turning it off dropped — and what a capture started
+    // with the toggle already off never had at all. Flipping the flag alone rebuilds from a stream
+    // carrying no system track: silence, under a panel claiming sound. `!this.live` because a native
+    // session already provides the track buildOutgoing will use; `this.stream` because `sourceId`
+    // outlives a Stop, and arming a capture for a window nobody is sharing is worse than nothing.
+    const stream = this.stream;
+    if (this.quality.systemAudio && stream && !this.live) {
+      // Everything below crosses an await, and none of it may assume the world held still: the
+      // controller can be torn down, the source changed, or the toggle clicked again meanwhile.
+      const stale = (): boolean => this.ac.signal.aborted || this.stream !== stream || !this.quality.systemAudio;
+      // A window follows its app here exactly as it does on the pick. WITHOUT this the fallback is
+      // the loopback track, which on Windows is the whole desktop mix: one click on "system" would
+      // start broadcasting every other app while the panel still names this one.
+      if (this.sourceId?.startsWith('window:')) {
+        await this.sendAudio({ sourceId: this.sourceId });
+        // Armed (sendAudio already rebuilt and repainted), or there is no longer anything to arm
+        // for. Otherwise: refused, i.e. no owning process — fall through and degrade to the system
+        // mix, which is what the pick does and what audioHint() is already telling the host.
+        if (this.live || stale()) return;
+      }
+      // A camera is NOT a display surface: main only stores `screen:`/`window:` ids, so
+      // getDisplayMedia would be refused here — and a refusal turns the toggle back off, which locks
+      // the per-app rows, i.e. the only way a camera share ever gets sound (see captureCamera).
+      // Leaving the flag on with no track is that documented behaviour: silence until a box is
+      // ticked. Grabbing would replace it with a switch that cannot be turned on at all.
+      if (!this.sourceId || !cameraDeviceId(this.sourceId)) {
+        // Still on the click's transient activation, which getDisplayMedia requires — on the window
+        // path above it is not, that one crossed an IPC round trip first. It fits either way:
+        // Chromium allows ~5 s, and on the desktop the shell answers from the source already
+        // approved, with no prompt and so no gesture to spend.
+        // ponytail: a refusal here only flips the toggle back off — no words. Actionable in exactly
+        // one case: `forgetPick` drops the approved source when a display is plugged in mid-share,
+        // and "re-pick the source" would fix it. Put that in audioHint(), next to audioFailed, if
+        // anyone actually hits it.
+        const track = stream.getAudioTracks().some(isLiveTrack) ? null : await this.loopbackAudioTrack();
+        // Re-tested after the await, not just `stale()`: two ON clicks inside one grab window each
+        // saw an empty stream, and adding both leaves a second full screen capture that nothing will
+        // ever stop, with the OS indicator lit for a track no one reads.
+        if (track && !stale() && !stream.getAudioTracks().some(isLiveTrack)) stream.addTrack(track);
+        else track?.stop();
+      }
+    }
     this.markAudioRows(); // the rows lock/unlock with system audio
     await this.pushOutgoing();
     this.renderSettings();
@@ -1298,6 +1353,10 @@ export function isAudible(spec: LiveSpec | null, name: string): boolean {
   if ('exclude' in spec) return name !== spec.exclude;
   return spec.include.includes(name); // an app not in the set has no session, so no sound
 }
+
+/** A track that can still carry sound. `readyState` is the only honest test: a loopback track ends
+ *  on its own when the default output device changes, and an ended one stays in the stream. */
+const isLiveTrack = (t: MediaStreamTrack): boolean => t.readyState === 'live';
 
 /** Which rows to draw: the listing, plus any app the live capture names that has dropped out of
  *  it. Minimising Discord to tray removes it from `Get-Process | Where MainWindowHandle` while its

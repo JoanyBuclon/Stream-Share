@@ -53,8 +53,8 @@ function moverHtml() {
     'data:text/html,' +
     encodeURIComponent(`<body style="margin:0;background:#101014;overflow:hidden">
 <canvas id="c" width="480" height="270"></canvas><script>
-const x=document.getElementById('c').getContext('2d');let t=0;
-(function f(){t+=4;x.fillStyle='#101014';x.fillRect(0,0,480,270);
+const x=document.getElementById('c').getContext('2d');let t=0;window.__ticks=0;
+(function f(){t+=4;window.__ticks++;x.fillStyle='#101014';x.fillRect(0,0,480,270);
 x.fillStyle='#3a3a44';x.fillRect((t%520)-40,0,40,270);requestAnimationFrame(f)})();
 </script></body>`)
   );
@@ -130,22 +130,41 @@ const SCRIPT = (deviceName, sdrWhiteNits, seconds) => `(async () => {
     try {
       const proc = new MediaStreamTrackProcessor({ track: await received });
       const reader = proc.readable.getReader();
+      // 320 rows, not 64. The mover sits at y+60 and is 270 tall, so a 64-row strip crossed only its
+      // top 5 lines: ~200 moving pixels out of 163840, sampled one byte in 97, i.e. an expected
+      // 0.15 hits. The gate was passing on whatever else happened to move in the top band of the
+      // desktop — green by accident, on the one check that is supposed to catch a frozen image.
+      // Math.min: WebCodecs throws if the rect leaves the frame, and WebRTC does drop the height
+      // under load on this local loop — the gate would then go red for a reason that is not the
+      // subject.
+      const rect = (frame) => ({ x: 0, y: 0, width: frame.codedWidth, height: Math.min(320, frame.codedHeight) });
       const grab = async () => {
         const { value } = await reader.read();
-        const buf = new Uint8Array(value.allocationSize({ rect: { x: 0, y: 0, width: value.codedWidth, height: 64 } }));
-        await value.copyTo(buf, { rect: { x: 0, y: 0, width: value.codedWidth, height: 64 } });
+        const buf = new Uint8Array(value.allocationSize({ rect: rect(value) }));
+        await value.copyTo(buf, { rect: rect(value) });
         value.close();
-        let sum = 0;
-        for (let i = 0; i < buf.length; i += 97) sum += buf[i];
-        return { sum, bytes: buf.length, sample: Array.from(buf.slice(0, 32)) };
+        const bytes = [];
+        for (let i = 0; i < buf.length; i += 97) bytes.push(buf[i]);
+        return { bytes, sum: bytes.reduce((s, v) => s + v, 0) };
       };
       const a = await grab();
       await new Promise((r) => setTimeout(r, 900));
       const b = await grab();
       reader.cancel();
+      // Sum of ABSOLUTE per-sample differences, not the difference of the sums. The mover is a bar
+      // sweeping across a flat background, so it lights as many pixels as it leaves: the sums are
+      // translation-invariant in expectation and a real move reads as a near-zero delta. That is
+      // how a 4-out-of-703454 reading was nearly taken for proof that the picture moves.
+      const diff = a.bytes.reduce((s, v, i) => s + Math.abs(v - b.bytes[i]), 0);
       out.picture = {
         nonZero: a.sum > 0 || b.sum > 0,
-        changed: a.sample.some((v, i) => v !== b.sample[i]) || a.sum !== b.sum,
+        // The bar is #3a3a44 on #101014, i.e. ~42 apart in Y, over hundreds of samples. Encoder
+        // noise on a flat area is ±1 or 2, so the two populations are orders of magnitude apart and
+        // the threshold does not need to be tuned.
+        changed: diff > 200,
+        diff,
+        maxDiff: a.bytes.reduce((m, v, i) => Math.max(m, Math.abs(v - b.bytes[i])), 0),
+        samples: a.bytes.length,
         sums: [a.sum, b.sum],
       };
     } catch (err) {
@@ -171,16 +190,37 @@ const SCRIPT = (deviceName, sdrWhiteNits, seconds) => `(async () => {
     };
     // Does loopback audio survive on its own? The native path produces no audio track, and turning
     // HDR on must not silently kill the sound the getDisplayMedia path bundles for free.
+    //
+    // Measured HERE, with the WGC session already running, because that is the order the system
+    // audio toggle now uses: turning it on mid-share asks Chromium for a second capture of a screen
+    // this process is already capturing. framesDuringGrab is the part that could not be guessed —
+    // a WGC session that stalls or dies under it would black out the share to switch the sound on.
     try {
+      const framesBefore = window.native.nativeCaptureStats().frames;
       const withAudio = await navigator.mediaDevices.getDisplayMedia({
         video: true,
         audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, sampleRate: 48000 },
       });
       const a = withAudio.getAudioTracks()[0];
+      // Held for 400 ms BEFORE stopping the video sibling, and counted over exactly that: this is
+      // the only stretch where two captures of the display really coexist. Counting across the
+      // 1200 ms settle below instead would bury a stall confined to the overlap under ~78 healthy
+      // frames, and turn the gate into a second copy of nativeClosed === false.
+      await new Promise((r) => setTimeout(r, 400));
+      const overlap = window.native.nativeCaptureStats().frames - framesBefore;
       withAudio.getVideoTracks().forEach((t) => t.stop());
       await new Promise((r) => setTimeout(r, 1200));
+      const after = window.native.nativeCaptureStats();
       out.audioAlone = a
-        ? { readyState: a.readyState, muted: a.muted, enabled: a.enabled, label: a.label, settings: a.getSettings() }
+        ? {
+            readyState: a.readyState,
+            muted: a.muted,
+            enabled: a.enabled,
+            label: a.label,
+            settings: a.getSettings(),
+            framesDuringOverlap: overlap,
+            nativeClosed: after.closed,
+          }
         : { none: true };
       a?.stop();
     } catch (err) {
@@ -417,14 +457,24 @@ app.whenReady().then(async () => {
       height: 270,
       frame: false,
       skipTaskbar: true,
+      // The stimulus for the whole run, so it must not be at the mercy of whatever the operator
+      // left maximised on that screen: Chromium suspends requestAnimationFrame in an OCCLUDED
+      // window whatever `backgroundThrottling` says, and a mover that never repaints turns every
+      // change-driven measurement here into a reading of an idle desktop.
+      alwaysOnTop: true,
       webPreferences: { backgroundThrottling: false },
     });
     await mover.loadURL(moverHtml());
     await new Promise((r) => setTimeout(r, 700));
 
-    // A real DesktopCapturerSource for the audio probe above.
+    // A real DesktopCapturerSource for the audio probe above. It must be the SAME screen WGC is
+    // holding, or the "second capture of the same screen" gate measures something strictly easier
+    // than production, where main answers from `selectedSourceId` and so always hands back the
+    // shared surface. `caps[0]` is desktopCapturer's own ordering and has no reason to agree with
+    // the addon's enumeration that chose `target`.
     const caps = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 0, height: 0 } });
-    audioProbeSource = caps[0] ?? null;
+    audioProbeSource = caps.find((s) => s.display_id === String(captured.id)) ?? caps[0] ?? null;
+    result.audioProbeMatchedTarget = audioProbeSource?.display_id === String(captured.id);
 
     const run = async (script, ms) =>
       JSON.parse(
@@ -434,7 +484,16 @@ app.whenReady().then(async () => {
         ]),
       );
 
+    // The mover's OWN frame counter, spanning the phase that samples the picture. Without it, "the
+    // two frames are identical" has two causes that read the same — the addon handing back a reused
+    // buffer (the bug this file exists for) and a mover that simply never repainted — and no way to
+    // tell them apart. Measured: it animates on roughly two runs in three even with alwaysOnTop, so
+    // the gate needs to know which run it is on rather than going red for the wrong reason. The
+    // failure mode being ruled out here is the DANGEROUS direction: never skip on a low delta alone.
+    const ticks = async () => Number(await mover.webContents.executeJavaScript('window.__ticks || 0'));
+    const ticksBefore = await ticks();
     Object.assign(result, await run(SCRIPT(target.deviceName, target.sdrWhiteNits, SECONDS), (SECONDS + 30) * 1000));
+    result.moverTicks = (await ticks()) - ticksBefore;
     // Freeze the screen for the repeater test — only main can do this, which is why the page script
     // is split in three rather than driving it itself.
     //
@@ -477,11 +536,23 @@ function verdict(r, seconds) {
     { gate: 'full resolution', pass: e.frameWidth === n.width && e.frameWidth > 0, value: `${e.frameWidth}x${e.frameHeight} of ${n.width}x${n.height}` },
     // The one gate the others cannot stand in for: everything above is satisfied by a stream of
     // black, or of one frozen image. The reused ArrayBuffer fails in exactly that shape.
-    {
-      gate: 'the picture is real and moving',
-      pass: r.picture?.nonZero === true && r.picture?.changed === true,
-      value: r.picture?.error ?? `nonZero=${r.picture?.nonZero} changed=${r.picture?.changed}`,
-    },
+    //
+    // Skipped ONLY on the mover's own tick counter, never on a small delta: a frozen picture and a
+    // frozen stimulus produce the identical reading, and skipping on the reading would retire the
+    // gate exactly when it matters. Measured on this box: maxDiff 1 when nothing moves, 37 when the
+    // bar does — two orders of magnitude, so `diff > 200` needs no tuning.
+    (() => {
+      const moved = (r.moverTicks ?? 0) > 60; // ~1 s of animation over a phase lasting several
+      return {
+        gate: 'the picture is real and moving',
+        pass: r.picture?.error ? false : r.picture?.nonZero === true && (!moved || r.picture?.changed === true),
+        value:
+          r.picture?.error ??
+          (moved
+            ? `nonZero=${r.picture?.nonZero} diff=${r.picture?.diff} maxDiff=${r.picture?.maxDiff} over ${r.picture?.samples} samples`
+            : `skipped — the mover never animated (${r.moverTicks} frames), so an identical picture proves nothing`),
+      };
+    })(),
     // Nothing may fail quietly upstream of the encoder either.
     {
       gate: 'no silent losses',
@@ -534,6 +605,21 @@ function verdict(r, seconds) {
       gate: 'system audio survives the native path',
       pass: r.audioAlone?.readyState === 'live' && r.audioAlone?.muted === false,
       value: r.audioAlone?.error ?? `${r.audioAlone?.label} readyState=${r.audioAlone?.readyState} muted=${r.audioAlone?.muted}`,
+    },
+    // …and the grab above must not cost the picture, over the 400 ms where both captures of that
+    // display are really live. Half the fps of the fps-cap gate, i.e. deliberately loose: the point
+    // is a stall or a session killed under the second capture, not a few frames of jitter on a
+    // loaded box. `audioProbeMatchedTarget` is the half that makes the name true — without it this
+    // could be measuring a second capture of some OTHER screen, which production never does.
+    {
+      gate: 'WGC survives a second capture of the same screen',
+      pass:
+        r.audioProbeMatchedTarget === true &&
+        (r.audioAlone?.framesDuringOverlap ?? 0) >= 5 &&
+        r.audioAlone?.nativeClosed === false,
+      value:
+        r.audioAlone?.error ??
+        `${r.audioAlone?.framesDuringOverlap} frames over a 400ms overlap, closed=${r.audioAlone?.nativeClosed}, sameScreen=${r.audioProbeMatchedTarget}`,
     },
     // Hardware encoding, established by elimination rather than by the field that should say so:
     // `encoderImplementation` and `powerEfficientEncoder` are NOT exposed by Electron 43's stats

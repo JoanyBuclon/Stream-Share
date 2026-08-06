@@ -79,7 +79,11 @@ async function reopenSettings(page: Page): Promise<void> {
 test('sharing a window captures that app alone and ticks only its box', async ({ browser }) => {
   const ctx = await browser.newContext();
   const page = await ctx.newPage();
-  await fakeDisplayMedia(page);
+  // `audio: true` is what makes the toggle assertion at the bottom mean anything: main answers
+  // `audio: 'loopback'` for a window too, so in production the whole desktop mix is sitting in this
+  // stream, unused. Without it the fixture has no audio track at all and the over-share it is
+  // supposed to pin cannot even be expressed.
+  await fakeDisplayMedia(page, { audio: true });
   await fakeNative(page);
   await shareWindowAndOpenSettings(page, 'Elden Ring');
 
@@ -93,6 +97,21 @@ test('sharing a window captures that app alone and ticks only its box', async ({
   // Ticking one back is an ordinary edit from there — nothing about the window pick is a mode.
   await row(page, 'Spotify').click();
   await captured(page).toMatchObject({ mode: 'include', names: ['Elden Ring', 'Spotify'] });
+
+  // Off then on must land back on THIS app, not on the loopback track. That track is a whole
+  // desktop mix (main answers `audio: 'loopback'` for a window too), it is sitting right there in
+  // the stream, and buildOutgoing picks it up the moment no native session is running — so the
+  // toggle used to turn a window share into a full-system broadcast, silently, with the panel
+  // still naming one app.
+  await page.click('#toggle-sysaudio');
+  await captured(page).toBeNull();
+  await page.click('#toggle-sysaudio');
+  await captured(page).toMatchObject({ mode: 'include', names: ['Elden Ring'] });
+  await onNativeTrack(page).toBe(true);
+  // Re-armed and NOTHING else: a version that also grabbed a fresh loopback track after a
+  // successful arm would satisfy every assertion above while leaving a second full screen capture
+  // running for a track no one reads.
+  expect(await page.evaluate(() => (window as unknown as { __gdm?: unknown[] }).__gdm?.length ?? 0)).toBe(1);
 
   await ctx.close();
 });
@@ -298,7 +317,10 @@ test('an app launched after an inclusion was armed shows up unticked, and tickin
 test('turning system audio off releases the capture and the rows go inert', async ({ browser }) => {
   const ctx = await browser.newContext();
   const page = await ctx.newPage();
-  await fakeDisplayMedia(page);
+  // `audio: true`: this shares a SCREEN, so the loopback track is the one viewers get back when
+  // the toggle comes on again. Without it the re-enable below finds no track, asks for one, gets
+  // nothing, and turns itself off — a faithful fake failure, but not this test's subject.
+  await fakeDisplayMedia(page, { audio: true });
   await fakeNative(page);
   await shareAndOpenSettings(page);
 
@@ -317,6 +339,45 @@ test('turning system audio off releases the capture and the rows go inert', asyn
   await page.click('#toggle-sysaudio');
   await expect(row(page, 'Discord')).toBeEnabled();
   await captured(page).toBeNull();
+  // The capture already carries a live loopback track, so nothing is re-asked for. A second
+  // getDisplayMedia here would be a whole extra screen capture — and on the web, a second prompt.
+  expect(await page.evaluate(() => (window as unknown as { __gdm?: unknown[] }).__gdm?.length ?? 0)).toBe(1);
+
+  await ctx.close();
+});
+
+// A camera is not a display surface, and `ss:select-source` only stores `screen:`/`window:` ids —
+// so asking getDisplayMedia for its sound is a guaranteed refusal, and a refusal turns the toggle
+// back OFF, which greys out the per-app rows. Those rows are the ONLY way a camera share ever gets
+// sound (see captureCamera), so "ask anyway" trades a documented silence for a switch that cannot
+// be turned on at all. Caught in review, after the re-acquire below was written without this guard.
+test('a camera share never asks for a loopback track, and keeps the per-app rows reachable', async ({ browser }) => {
+  const ctx = await browser.newContext();
+  const page = await ctx.newPage();
+  // Every getDisplayMedia refused — which is exactly what main does once the pick is a camera.
+  await fakeDisplayMedia(page, { rejectFrom: 0 });
+  await fakeNative(page);
+  await page.goto('/');
+  await page.click('#btn-start');
+  await expect(page.locator('#host-code')).not.toHaveText('—');
+  await page.click('#btn-choose-source');
+  await page.click('#btn-modal-source');
+  await page.locator('#source-grid-camera button').first().click();
+  await page.click('#btn-source-confirm');
+  await expect(page.locator('#host-video')).toBeVisible();
+  await page.click('#btn-settings');
+  await expect(page.locator('#audio-apps-section')).toBeVisible();
+
+  await page.click('#toggle-sysaudio');
+  await expect(page.locator('#toggle-sysaudio')).toHaveAttribute('aria-pressed', 'false');
+  await page.click('#toggle-sysaudio');
+  // Still on. A grab here would have been refused and flipped it straight back off — this single
+  // attribute is the whole regression.
+  await expect(page.locator('#toggle-sysaudio')).toHaveAttribute('aria-pressed', 'true');
+  // …and staying on is what keeps the only route to sound open.
+  await expect(row(page, 'Discord')).toBeEnabled();
+  await row(page, 'Discord').click();
+  await captured(page).toMatchObject({ mode: 'exclude', names: ['Discord'] });
 
   await ctx.close();
 });
