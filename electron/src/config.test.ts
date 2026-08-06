@@ -5,7 +5,7 @@ import {
   createWakeLockToggle,
   nativeDisplayFor,
   pickerSources,
-  approvedDeviceFor,
+  approvedTargetFor,
   rendererSecurity,
   type PowerBlocker,
   type NativeDisplay,
@@ -182,7 +182,7 @@ test('nativeDisplayFor: tolère un pixel d écart, et rend null sans corresponda
 // --- picker listing and the native consent gate ---
 //
 // Ce que ces tests gardent : le chemin natif ne passe PAS par setDisplayMediaRequestHandler, donc
-// `approvedDeviceFor` est sa seule porte, et elle lit la table construite par `pickerSources` —
+// `approvedTargetFor` est sa seule porte, et elle lit la table construite par `pickerSources` —
 // seul endroit du programme où un id de picker est associé à un nom DXGI (voir son docblock pour
 // ce qui se passait quand il y en avait deux).
 
@@ -213,20 +213,76 @@ test('pickerSources: la table des périphériques se limite aux écrans HDR appa
   const { devices } = pickerSources(RAW, PICKER_DISPLAYS, DISPLAYS, undefined);
   // L'écran SDR est apparié lui aussi, mais le chemin natif ne lui est jamais proposé : une porte
   // plus large que la fonctionnalité est une porte à refermer plus tard.
-  assert.deepEqual([...devices], [['screen:0:0', String.raw`\\.\DISPLAY1`]]);
+  assert.deepEqual([...devices], [['screen:0:0', { deviceName: String.raw`\\.\DISPLAY1` }]]);
 });
 
-// Une FENÊTRE qui rapporterait un display_id ne doit pas hériter du chemin natif : un clic dessus
-// lancerait une capture plein écran. Les fenêtres n'en rapportent pas sur cette machine (les six
-// ouvertes ont display_id=""), et c'est justement pour ne pas dépendre de ce détail que le contrôle
-// est sur le type d'id.
-test('pickerSources: une fenêtre qui rapporte un écran ne devient pas capturable en natif', () => {
+// Le `display_id` d'une fenêtre n'est JAMAIS la source de vérité : il est vide pour toutes les
+// fenêtres (mesuré : 0 sur 4), et s'il ne l'était pas il désignerait l'écran, pas la fenêtre — un
+// clic lancerait une capture plein écran. Seul le résolveur de handle fait autorité.
+test('pickerSources: le display_id d une fenêtre ne lui ouvre pas le chemin natif', () => {
   const sneaky: CapturerSource[] = [
     { id: 'window:12:0', name: 'Discord', display_id: '100', thumbnail: img('w'), appIcon: null },
   ];
   const { sources, devices } = pickerSources(sneaky, PICKER_DISPLAYS, DISPLAYS, undefined);
-  assert.equal(sources[0].hdr, false);
+  assert.equal(sources[0].hdr, false, 'sans résolveur, aucune fenêtre n est HDR');
   assert.equal(devices.size, 0);
+});
+
+// Le chantier « partager une app sur un écran HDR ». La fenêtre est reliée à son écran par son
+// HANDLE (l addon : MonitorFromWindow), seule chose qui puisse répondre — d où le résolveur injecté,
+// qui garde cette fonction pure et testable sans Electron ni addon.
+test('pickerSources: une fenêtre sur un écran HDR devient capturable en natif', () => {
+  const onHdr = (hwnd: number) => ({ device: hwnd === 12 ? String.raw`\\.\DISPLAY1` : null, pid: 900 });
+  const { sources, devices } = pickerSources(RAW, PICKER_DISPLAYS, DISPLAYS, undefined, onHdr);
+  const win = sources.find((s) => s.id === 'window:12:0');
+  assert.equal(win?.hdr, true);
+  // Le blanc de référence traverse aussi : l oublier ne casse rien visiblement, ça rend juste le
+  // tone map faux d un facteur 6.
+  assert.equal(win?.sdrWhiteNits, 480);
+  assert.equal(win?.sdrWhiteMeasured, true);
+  // La cible est le HANDLE, pas un nom d écran : capturer la fenêtre, pas le moniteur sous elle.
+  assert.deepEqual(approvedTargetFor({ sources, devices }, 'window:12:0', () => 900), { hwnd: 12, pid: 900 });
+  // Et surtout PAS la résolution de l écran : la tuile « Discord » afficherait 2560×1440.
+  assert.equal(win?.meta, '');
+});
+
+// Windows recycle les handles de fenêtre. La liste est prise à l ouverture du sélecteur ; le temps
+// que l utilisateur confirme, la fenêtre cliquée peut avoir disparu et son numéro appartenir à autre
+// chose. `IsWindow()` répondrait oui, et on capturerait une fenêtre que personne n a choisie — sans
+// prompt de l OS derrière ce chemin pour rattraper. Le pid est ce qui distingue les deux.
+test('approvedTargetFor: un handle de fenêtre recyclé est refusé, pas capturé', () => {
+  const onHdr = () => ({ device: String.raw`\\.\DISPLAY1`, pid: 900 });
+  const listing = pickerSources(RAW, PICKER_DISPLAYS, DISPLAYS, undefined, onHdr);
+  assert.deepEqual(approvedTargetFor(listing, 'window:12:0', () => 900), { hwnd: 12, pid: 900 });
+  assert.equal(approvedTargetFor(listing, 'window:12:0', () => 4321), null, 'autre processus = autre fenêtre');
+  assert.equal(approvedTargetFor(listing, 'window:12:0', () => null), null, 'la fenêtre a disparu');
+  // Un écran ne passe pas par là : un nom DXGI ne se fait pas recycler sous nos pieds.
+  assert.deepEqual(approvedTargetFor(listing, 'screen:0:0', () => null), { deviceName: String.raw`\\.\DISPLAY1` });
+});
+
+test('pickerSources: une fenêtre dont le pid est introuvable n est pas approuvable', () => {
+  // Sans pid, il n y a rien contre quoi revérifier le handle plus tard : mieux vaut pas de chemin
+  // natif qu une porte qu on ne peut plus refermer.
+  const noPid = () => ({ device: String.raw`\\.\DISPLAY1`, pid: null });
+  const { sources, devices } = pickerSources(RAW, PICKER_DISPLAYS, DISPLAYS, undefined, noPid);
+  assert.equal(sources.find((s) => s.id === 'window:12:0')?.hdr, true, 'la tuile reste honnête');
+  assert.equal(devices.has('window:12:0'), false);
+});
+
+test('pickerSources: une fenêtre sur un écran SDR reste sur le chemin clampé', () => {
+  const onSdr = () => ({ device: String.raw`\\.\DISPLAY5`, pid: 900 }); // apparié, mais pas en HDR
+  const { sources, devices } = pickerSources(RAW, PICKER_DISPLAYS, DISPLAYS, undefined, onSdr);
+  assert.equal(sources.find((s) => s.id === 'window:12:0')?.hdr, false);
+  assert.equal(devices.has('window:12:0'), false, 'une porte plus large que la fonctionnalité');
+});
+
+test('pickerSources: un résolveur qui ne connaît pas la fenêtre ne la casse pas', () => {
+  // Minimisée, fermée entre le listing et la résolution, ou hors Windows : la tuile reste, sans
+  // chemin natif. Perdre la source serait pire que perdre le HDR.
+  const { sources, devices } = pickerSources(RAW, PICKER_DISPLAYS, DISPLAYS, undefined, () => ({ device: null, pid: null }));
+  assert.equal(sources.length, 3);
+  assert.equal(sources.find((s) => s.id === 'window:12:0')?.hdr, false);
+  assert.equal(devices.size, 1, 'seul l écran HDR reste approuvable');
 });
 
 test('pickerSources: meta en pixels physiques, fenêtre propre exclue, icône vide traitée comme absente', () => {
@@ -260,17 +316,17 @@ test('pickerSources: une source sans écran correspondant reste listée, sans ch
   assert.equal(devices.size, 0);
 });
 
-test('approvedDeviceFor: seul un écran de la DERNIÈRE liste est approuvable', () => {
+test('approvedTargetFor: seule une source de la DERNIÈRE liste est approuvable', () => {
   const listing = pickerSources(RAW, PICKER_DISPLAYS, DISPLAYS, undefined);
-  assert.equal(approvedDeviceFor(listing, 'screen:0:0'), String.raw`\\.\DISPLAY1`);
+  assert.deepEqual(approvedTargetFor(listing, 'screen:0:0'), { deviceName: String.raw`\\.\DISPLAY1` });
   // Une fenêtre n a pas de sortie DXGI, et l écran SDR n est pas sur ce chemin.
-  assert.equal(approvedDeviceFor(listing, 'window:12:0'), '');
-  assert.equal(approvedDeviceFor(listing, 'screen:1:0'), '');
+  assert.equal(approvedTargetFor(listing, 'window:12:0'), null);
+  assert.equal(approvedTargetFor(listing, 'screen:1:0'), null);
   // Un id jamais listé — un renderer qui a sauté le picker, ou qui invente un id.
-  assert.equal(approvedDeviceFor(listing, 'screen:42:0'), '');
-  assert.equal(approvedDeviceFor(listing, null), '', 'rien de sélectionné n approuve rien');
+  assert.equal(approvedTargetFor(listing, 'screen:42:0'), null);
+  assert.equal(approvedTargetFor(listing, null), null, 'rien de sélectionné n approuve rien');
   // Liste invalidée (écran débranché, page rechargée) : on refuse, ce qui ne coûte que le HDR.
-  assert.equal(approvedDeviceFor(null, 'screen:0:0'), '');
+  assert.equal(approvedTargetFor(null, 'screen:0:0'), null);
 });
 
 // The renderer's sandbox is OFF (so the HDR addon can run in the preload), which promotes the other

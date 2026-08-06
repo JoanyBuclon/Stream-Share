@@ -62,6 +62,17 @@ const IDLE_REPEAT_MS = 500;
  * counter against wall time), not a bigger number here.
  */
 const MAX_REPEATS = 240; // 2 minutes at IDLE_REPEAT_MS
+/**
+ * The same net for a MINIMISED window, which is a different animal: measured, it produces no frames
+ * at all and is never reported closed, so the ordinary counter would end a share after two minutes
+ * of a window the host merely put away. Far longer, but not absent — a capture can still die while
+ * minimised, and "the addon says nothing" must not mean "repeat for ever".
+ */
+const MAX_MINIMIZED_REPEATS = 3600; // 30 minutes
+/** Both thresholds are minutes long by design, and no test can wait them out. Overridable from a
+ *  test page only; production never sets it, and reading it costs one property lookup per tick. */
+const limitsOverride = (): { max?: number; minimized?: number } | undefined =>
+  (window as unknown as { __ssRepeatLimits?: { max?: number; minimized?: number } }).__ssRepeatLimits;
 /** The port handover is synchronous inside `startNativeCapture`; this is 100x the margin. */
 const PORT_TIMEOUT_MS = 3000;
 
@@ -94,7 +105,14 @@ export function canCaptureNative(): boolean {
  * real HDR desktop is wrong by whatever the SDR brightness slider is set to: measured at 6x here,
  * and the difference between 0% and 70% of the highlights clipping.
  */
-export async function captureNative(sdrWhiteNits?: number, fps?: number): Promise<NativeCapture> {
+export async function captureNative(
+  sdrWhiteNits?: number,
+  fps?: number,
+  /** Called when the display the capture sits on reports a DIFFERENT reference white — a captured
+   *  window dragged to another screen, or the Windows SDR brightness slider moved. Polled off the
+   *  repeater, which already ticks at 2 Hz, so this costs no new timer and no new IPC. */
+  onDisplayWhite?: (nits: number) => void,
+): Promise<NativeCapture> {
   const native = window.native;
   if (!native?.startNativeCapture) throw new Error('native capture unavailable');
 
@@ -161,6 +179,8 @@ export async function captureNative(sdrWhiteNits?: number, fps?: number): Promis
   let lastSentUs = 0;
   let repeats = 0;
   let height = 0;
+  /** Last white reported by the addon, so the callback fires on change and not on every tick. */
+  let reportedWhite = 0;
   /**
    * Frames this module owns right now: received or created, and neither written nor closed.
    *
@@ -239,17 +259,32 @@ export async function captureNative(sdrWhiteNits?: number, fps?: number): Promis
    * item closed, and end the track — `ended` is what host.ts listens to for "the source is gone".
    *
    * MAX_REPEATS is the net for when the addon does NOT report it — see the constant for why it is
-   * as long as it is, and why that branch is not the one doing the work.
+   * as long as it is, and why that branch is not the one doing the work. A minimised window gets
+   * MAX_MINIMIZED_REPEATS instead: same net, sized for a state that is legitimately silent.
    */
   const repeater = setInterval(() => {
     if (stopped) return;
+    // One read per tick, for the three things that are only observable from the addon.
+    const stats = window.native?.nativeCaptureStats?.();
+    // The display the capture is on may have changed under us — a captured window dragged to
+    // another screen, or the Windows SDR brightness slider moved. The divisor is the caller's to
+    // recompute (it is this times their own correction), so hand over the raw value and let them.
+    // `?? 0` because these three fields are OPTIONAL: an older shell, and the non-Windows stub,
+    // report neither. Unmeasured means "keep whatever we last had" — never divide by nothing.
+    const white = (stats?.displaySdrWhiteMeasured ? stats.displaySdrWhiteNits : 0) ?? 0;
+    if (white > 0 && white !== reportedWhite) {
+      reportedWhite = white;
+      onDisplayWhite?.(white);
+    }
     // The death check runs FIRST, and in particular before the `!last` guard below. A capture can
     // die before it ever produces a frame — HDR switched off between the pick and the first frame,
     // or a capture item that was already closed — and treating "no frame yet" as "nothing to do"
     // left the host on a black preview labelled `live` for ever, which is the exact failure the
     // rest of this comment is about. `closed` is terminal in the addon (set by
     // GraphicsCaptureItem::Closed, cleared only by Stop), so this can never kill a live capture.
-    if (repeats >= MAX_REPEATS || window.native?.nativeCaptureStats?.()?.closed) {
+    const override = limitsOverride();
+    const cap = stats?.minimized ? (override?.minimized ?? MAX_MINIMIZED_REPEATS) : (override?.max ?? MAX_REPEATS);
+    if (repeats >= cap || stats?.closed) {
       clearInterval(repeater);
       // NOT `stopped = true`: that is stop()'s own guard, and setting it here would make the
       // host's stop() — which is exactly what `ended` triggers — return before releasing the WGC
@@ -260,6 +295,11 @@ export async function captureNative(sdrWhiteNits?: number, fps?: number): Promis
     }
     if (writing || !last) return;
     if (performance.now() - lastWriteMs < IDLE_REPEAT_MS) return;
+    // Counted either way — the threshold above is what differs. A monitor always changes
+    // eventually, which is what makes MAX_REPEATS safe there; a minimised window produces nothing
+    // at all for as long as it stays minimised (measured), so it gets the far longer cap rather
+    // than no cap: not counting at all would mean a capture that dies while minimised repeats for
+    // ever, which is the exact failure this whole branch exists to prevent.
     repeats++;
     try {
       // A monotonically increasing timestamp, tracked separately from the source frame: the encoder

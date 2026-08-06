@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import { loadCaptureAddon, type NativeFrame } from './native-addon.ts';
+import type { NativeTarget } from './config.ts';
 
 /**
  * Native HDR capture, and why it lives HERE rather than in the main process.
@@ -109,9 +110,14 @@ contextBridge.exposeInMainWorld('native', {
    */
   startNativeCapture: (sdrWhiteNits?: number, fps?: number) => {
     if (!addon) throw new Error('native capture unavailable');
-    const approved = ipcRenderer.sendSync('ss:approved-device') as string;
-    if (!approved) throw new Error('no display was picked by the user');
-    addon.startCapture(approved, sdrWhiteNits, pushFrame, fps);
+    const approved = ipcRenderer.sendSync('ss:approved-device') as NativeTarget | null;
+    // Shape-checked, not just truthy: a caller wired to an older main would hand back the bare
+    // device name this used to return, and `'hwnd' in <string>` throws something unreadable.
+    if (!approved || typeof approved !== 'object') throw new Error('nothing was picked by the user');
+    // A screen and a window are two different WGC factory calls, and main is the only side that
+    // knows which one the pick was. The page never sees either value.
+    if ('hwnd' in approved) addon.startCaptureWindow(approved.hwnd, sdrWhiteNits, pushFrame, fps);
+    else addon.startCapture(approved.deviceName, sdrWhiteNits, pushFrame, fps);
     closeFramePort();
     const channel = new MessageChannel();
     framePort = channel.port1;

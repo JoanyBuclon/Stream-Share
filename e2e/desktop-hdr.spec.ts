@@ -260,6 +260,92 @@ test('the HDR reference white reaches the shell, and only exists on the native p
   await ctx.close();
 });
 
+// Sharing an APP on an HDR screen. This was the last thing still washing out, and the cause was the
+// routing rather than the tone map: `desktopCapturer` reports no display for a window (measured: 0
+// of 4 carry a display_id), so nothing tied one to an HDR output and every app share fell back to
+// the clamped path. The shell resolves it through the window HANDLE instead.
+test('an app on an HDR screen is captured natively too, not just the whole screen', async ({ browser }) => {
+  const ctx = await browser.newContext();
+  const page = await ctx.newPage();
+  await fakeDisplayMedia(page, { audio: true });
+  await fakeNative(page, { nativeCapture: 'ok' });
+  await openPicker(page);
+  await pick(page, 'window', 'Elden Ring');
+
+  await expect(page.locator('#host-live-badge')).toBeVisible();
+  await previewHeight(page).toBe(720);
+  // A HANDLE, not a display name: capturing the window itself, not the monitor underneath it —
+  // which would share everything on that screen instead of the one app the host picked.
+  await nativeCalls(page).toMatchObject({ started: [{ device: 'hwnd:4242', sdrWhiteNits: 480 }] });
+  // And the reference-white control is offered here too: same tone map, same divisor.
+  await page.click('#btn-settings');
+  await expect(page.locator('#sdrwhite-value')).toHaveText('480 nits');
+
+  await ctx.close();
+});
+
+// A window is not a screen: it can be dragged to a display with a different reference white — 480
+// here, 80 on the SDR panel — and a divisor six times off is the whole bug this feature fixes.
+// Nothing tells the page; the addon re-reads the display and the page follows it.
+test('a captured window dragged to another screen follows its reference white', async ({ browser }) => {
+  const ctx = await browser.newContext();
+  const page = await ctx.newPage();
+  await fakeDisplayMedia(page, { audio: true });
+  await fakeNative(page, { nativeCapture: 'ok' });
+  await openPicker(page);
+  await pick(page, 'window', 'Elden Ring');
+  await previewHeight(page).toBe(720);
+  await page.click('#btn-settings');
+  await expect(page.locator('#sdrwhite-value')).toHaveText('480 nits');
+
+  // The window moves to the SDR panel: the display now reports 80.
+  await page.evaluate(() => {
+    (window as unknown as { __nativeWhite: number }).__nativeWhite = 80;
+  });
+  await expect(page.locator('#sdrwhite-value')).toHaveText('80 nits');
+  await nativeCalls(page).toMatchObject({ sdrWhite: [80] });
+
+  await ctx.close();
+});
+
+// A minimised window produces NO frames and is NOT reported closed (measured). Without a way to
+// tell it from a dead capture, the repeater's give-up counter would end a share the host never
+// stopped — after two minutes of a window they simply put away.
+test('a minimised window keeps the share alive instead of counting towards giving up', async ({ browser }) => {
+  const ctx = await browser.newContext();
+  const page = await ctx.newPage();
+  await fakeDisplayMedia(page, { audio: true });
+  await fakeNative(page, { nativeCapture: 'ok' });
+  // Both give-up thresholds are minutes long by design, so at real values this test would prove
+  // nothing but "the badge is still lit three seconds in" — which the tests above already say. Cut
+  // down: 4 ticks for an ordinary silent capture, 40 for a minimised one. The point is the
+  // DIFFERENCE, and that only the second applies while the window is away.
+  await page.addInitScript(() => {
+    (window as unknown as { __ssRepeatLimits: unknown }).__ssRepeatLimits = { max: 4, minimized: 40 };
+  });
+  await openPicker(page);
+  await pick(page, 'window', 'Elden Ring');
+  await previewHeight(page).toBe(720);
+
+  // Minimised: frames stop, nothing is reported dead, and no display can be resolved either.
+  await page.evaluate(() => {
+    const w = window as unknown as { __nativeMinimized: boolean; __nativeStall: boolean };
+    w.__nativeMinimized = true;
+    w.__nativeStall = true;
+  });
+  // Well past the ordinary threshold (4 × 500 ms): a share that counted minimised ticks the usual
+  // way would already be over.
+  await page.waitForTimeout(5000);
+  await expect(page.locator('#host-live-badge')).toBeVisible();
+  await expect(page.locator('#host-empty')).toBeHidden();
+  // And the divisor did not follow the minimised window to nowhere: an unresolvable display reports
+  // nothing measured, which must leave the last good value alone rather than divide by zero.
+  await page.click('#btn-settings');
+  await expect(page.locator('#sdrwhite-value')).toHaveText('480 nits');
+
+  await ctx.close();
+});
+
 // The compatibility branch the control's own comment leans on: an installer that predates the
 // reference white paired with a newer web bundle. HDR still runs — refusing it outright, the way
 // `canCaptureNative` refuses a shell with no fps setter, would trade the feature for a slider — but

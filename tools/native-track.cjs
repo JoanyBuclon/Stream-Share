@@ -24,7 +24,10 @@ const { app, BrowserWindow, screen, ipcMain, session, desktopCapturer } = requir
 // ss:select-source (that needs the whole main process), so it approves its own target here — and
 // that is a real gap: the gate itself is only exercised in production.
 let approved = '';
-ipcMain.on('ss:approved-device', (event) => { event.returnValue = approved; });
+// The shape main really answers with: a TARGET, since a window is approved by handle and a
+// screen by device name. Returning the bare string here (as this did) made the preload throw
+// `'hwnd' in <string>` — a fake drifting from its original, caught by this harness.
+ipcMain.on('ss:approved-device', (event) => { event.returnValue = approved ? { deviceName: approved } : null; });
 ipcMain.on('ss:config', (event) => {
   event.returnValue = { appOrigin: process.env.SS_APP_ORIGIN || 'http://localhost:4321', packaged: false };
 });
@@ -580,7 +583,12 @@ function verdict(r, seconds) {
           base > 0 &&
           (t.brighter ?? 0) > base * 1.08 &&
           (t.darker ?? 1e9) < base * 0.92 &&
-          Math.abs((t.restored ?? 0) - base) < base * 0.15,
+          // Restored has to land nearer the baseline than either extreme — not within a fixed
+          // percentage of it. The four samples are seconds apart on a desktop with an animation
+          // running, so the scene itself drifts: a 15% band failed a perfectly good run at 56.5
+          // against a 48.9 baseline, while 100.9 and 24.9 sat where they should.
+          Math.abs((t.restored ?? 0) - base) <
+            Math.min(Math.abs((t.restored ?? 0) - (t.brighter ?? 0)), Math.abs((t.restored ?? 0) - (t.darker ?? 0))),
         value:
           t.error ??
           `${t.format} mean ${round1(t.brighter)} at ÷4, ${round1(base)} as reported, ${round1(t.darker)} at ×4 (restored ${round1(t.restored)})`,

@@ -72,7 +72,10 @@ app.whenReady().then(async () => {
     result.sources = listed.ok ?? listed;
     const screens = (result.sources ?? []).filter((s) => s.kind === 'screen');
     const hdrScreen = screens.find((s) => s.hdr) ?? null;
-    const window0 = (result.sources ?? []).find((s) => s.kind === 'window') ?? null;
+    // NOT "the first window": whether that one sits on the HDR display is a property of the
+    // operator's desktop, and this gate would go red for correct behaviour depending on where they
+    // left their windows. The one that must be refused is a window with no tone map to apply.
+    const window0 = (result.sources ?? []).find((s) => s.kind === 'window' && !s.hdr) ?? null;
     result.hdrScreen = hdrScreen;
     // The whole point of the payload change: the page is handed no device names.
     result.payloadHasDeviceName = JSON.stringify(result.sources ?? []).includes('DISPLAY');
@@ -81,8 +84,7 @@ app.whenReady().then(async () => {
     await evaluate(win, `window.native.selectSource('screen:99999:0')`);
     result.afterBogusPick = await attempt(win);
 
-    // 4. A window. It has no DXGI output, so the native path must stay shut — otherwise a click on
-    //    a window would start a full-SCREEN capture.
+    // 4. A window on an SDR display: no tone map applies there, so the native path must stay shut.
     if (window0) {
       await evaluate(win, `window.native.selectSource(${JSON.stringify(window0.id)})`);
       result.afterWindowPick = await attempt(win);
@@ -99,6 +101,18 @@ app.whenReady().then(async () => {
       result.afterHdrPick = await evaluate(win, START);
       await new Promise((r) => setTimeout(r, 1500));
       result.stats = (await evaluate(win, 'window.native.nativeCaptureStats()')).ok;
+      await evaluate(win, 'window.native.stopNativeCapture()');
+    }
+
+    // 5b. A window ON an HDR display: the other half of the routing, and the only thing that
+    //     exercises the preload's screen-vs-window branch at all — the e2e never loads the preload.
+    const hdrWindow = (result.sources ?? []).find((s) => s.kind === 'window' && s.hdr) ?? null;
+    result.hdrWindow = hdrWindow;
+    if (hdrWindow) {
+      await evaluate(win, `window.native.selectSource(${JSON.stringify(hdrWindow.id)})`);
+      result.afterHdrWindowPick = await evaluate(win, START);
+      await new Promise((r) => setTimeout(r, 1200));
+      result.windowStats = (await evaluate(win, 'window.native.nativeCaptureStats()')).ok;
       await evaluate(win, 'window.native.stopNativeCapture()');
     }
 
@@ -165,6 +179,20 @@ function verdict(r) {
       gate: 'the SDR white level is measured, not guessed',
       pass: r.hdrScreen.sdrWhiteMeasured === true && r.hdrScreen.sdrWhiteNits > 0,
       value: `${r.hdrScreen.sdrWhiteNits} nits, measured=${r.hdrScreen.sdrWhiteMeasured}`,
+    },
+    // The other half of the routing, and the ONLY thing anywhere that runs the preload's
+    // screen-vs-window branch: the e2e replaces `window.native` wholesale and never loads it.
+    // Skipped rather than failed when no window happens to sit on the HDR display — that is the
+    // operator's desktop, not the code.
+    {
+      gate: 'an app on the HDR screen is approved and captures',
+      pass:
+        !r.hdrWindow ||
+        (r.afterHdrWindowPick?.ok === 'started' && (r.windowStats?.frames ?? 0) > 0 && r.windowStats?.closed === false),
+      value: !r.hdrWindow
+        ? 'skipped — no window is on the HDR display right now'
+        : (r.afterHdrWindowPick?.err ??
+          `${r.hdrWindow.name}: ${r.windowStats?.frames} frames, ${r.windowStats?.width}x${r.windowStats?.height}`),
     },
   );
   return gates;

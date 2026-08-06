@@ -345,6 +345,12 @@ struct FramePayload {
 class CaptureSession {
  public:
   bool Start(HMONITOR monitor, float sdr_white, napi_threadsafe_function sink, std::string* err);
+  /** The same pipeline against a single WINDOW instead of a monitor — how an app on an HDR screen
+   *  gets captured at all, since desktopCapturer ties no window to a display. Measured before it
+   *  was built (tools/window-hdr-probe.cjs): WGC hands back scRGB anchored on the reference white
+   *  of whichever display the window is on, so the tone map is unchanged — but the divisor has to
+   *  follow the window across screens, which is what CurrentDisplay() is for. */
+  bool StartWindow(HWND window, float sdr_white, napi_threadsafe_function sink, std::string* err);
   void Stop();
   CaptureStats Snapshot();
   /** A frame that was tone-mapped but could not be handed to JS (no buffer, or a detached one).
@@ -390,10 +396,43 @@ class CaptureSession {
     want_sdr_white_.store(f, std::memory_order_relaxed);
   }
   bool running() const { return session_ != nullptr; }
+  /** Exactly one of the two is set — WGC has a separate factory call per kind and nothing else in
+   *  the pipeline cares which one produced the item. */
+  struct ItemTarget {
+    HMONITOR monitor;
+    HWND window;
+  };
+  /**
+   * What this session is pointed at, for the JS thread to re-read the display state from.
+   *
+   * Written in StartItem and Stop, read in GetCaptureStats — all on the JS thread, so no
+   * synchronisation. Deliberately NOT consulted from OnFrame: resolving a display walks the
+   * DisplayConfig path list, and doing that under `pipeline_m_` would make Stop() wait on it and
+   * hiccup a frame, for a value nobody needs at frame rate.
+   */
+
+  /** The reference white of the display this session is on RIGHT NOW, plus whether the window (if
+   *  it is a window) is minimised. Polled at 2 Hz by the page, which owns the divisor: it is the
+   *  reported white times the host's own correction, and only the page knows that factor.
+   *
+   *  Re-read every call rather than cached on the monitor handle. Measured at 0.286 ms for the
+   *  whole display list, i.e. 0.06% of a core at that rate — and re-reading is what makes moving
+   *  the WINDOWS SDR brightness slider mid-share take effect, on both paths, for free. */
+  struct DisplayState {
+    float sdr_white_nits = 0.0f;
+    bool sdr_white_measured = false;
+    bool minimized = false;
+  };
+  DisplayState CurrentDisplay() const;
   /** Moved out, not copied: the caller gets the buffer and the session allocates a fresh one. */
   std::vector<uint8_t> TakeFrame(int32_t* w, int32_t* h);
 
  private:
+  bool StartItem(ItemTarget target, float sdr_white, napi_threadsafe_function sink, std::string* err);
+  /** What this session is pointed at — see the DisplayState docblock above. Private, because the
+   *  invariant they carry is "JS thread only" and a public member invites the opposite. */
+  HWND window_ = nullptr;
+  std::wstring monitor_device_;
   void OnFrame(wgc::Direct3D11CaptureFramePool const& pool, winrt::Windows::Foundation::IInspectable const&);
   bool BuildPipeline(std::string* err);
   bool EnsureTargets(int32_t width, int32_t height);
@@ -508,6 +547,16 @@ bool CaptureSession::EnsureTargets(int32_t width, int32_t height) {
 
 bool CaptureSession::Start(HMONITOR monitor, float sdr_white, napi_threadsafe_function sink,
                            std::string* err) {
+  return StartItem(ItemTarget{monitor, nullptr}, sdr_white, sink, err);
+}
+
+bool CaptureSession::StartWindow(HWND window, float sdr_white, napi_threadsafe_function sink,
+                                 std::string* err) {
+  return StartItem(ItemTarget{nullptr, window}, sdr_white, sink, err);
+}
+
+bool CaptureSession::StartItem(ItemTarget target, float sdr_white, napi_threadsafe_function sink,
+                               std::string* err) {
   // Takes ownership of `sink` on every path, including the failures — split ownership between here
   // and the caller is how a threadsafe function gets released twice.
   if (session_) {
@@ -570,8 +619,20 @@ bool CaptureSession::Start(HMONITOR monitor, float sdr_white, napi_threadsafe_fu
     rt_device_ = inspectable.as<winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice>();
 
     auto interop = winrt::get_activation_factory<wgc::GraphicsCaptureItem, ::IGraphicsCaptureItemInterop>();
-    winrt::check_hresult(
-        interop->CreateForMonitor(monitor, winrt::guid_of<wgc::GraphicsCaptureItem>(), winrt::put_abi(item_)));
+    // Remembered for the 2 Hz display poll on the JS thread (see CurrentDisplay). For a monitor
+    // the device name is fixed for the session; for a window it is resolved each time, because the
+    // window can be dragged to another screen.
+    window_ = target.window;
+    monitor_device_.clear();
+    if (target.monitor) {
+      MONITORINFOEXW info{};
+      info.cbSize = sizeof(info);
+      if (GetMonitorInfoW(target.monitor, &info)) monitor_device_ = info.szDevice;
+    }
+    winrt::check_hresult(target.monitor ? interop->CreateForMonitor(target.monitor, winrt::guid_of<wgc::GraphicsCaptureItem>(),
+                                                                      winrt::put_abi(item_))
+                                        : interop->CreateForWindow(target.window, winrt::guid_of<wgc::GraphicsCaptureItem>(),
+                                                                   winrt::put_abi(item_)));
 
     // R16G16B16A16Float is the whole point: it is scRGB, so HDR highlights arrive above 1.0 instead
     // of clamped the way getDisplayMedia's BGRA8 delivers them. Two buffers, because a deeper pool
@@ -800,6 +861,29 @@ void CaptureSession::OnFrame(wgc::Direct3D11CaptureFramePool const& pool,
   if (resized) stats_.recreated++;
 }
 
+/** Resolve the display this session is on, right now. JS thread only — see the members. */
+CaptureSession::DisplayState CaptureSession::CurrentDisplay() const {
+  DisplayState out;
+  std::wstring device = monitor_device_;
+  if (window_) {
+    // A minimised window has a rect at -32000, so MONITOR_DEFAULTTONEAREST would confidently name
+    // the primary display and swing the divisor onto the wrong screen. TONULL plus the flag lets
+    // the caller keep the last good value instead.
+    out.minimized = IsIconic(window_) != FALSE;
+    HMONITOR mon = MonitorFromWindow(window_, MONITOR_DEFAULTTONULL);
+    if (!mon) return out;
+    MONITORINFOEXW info{};
+    info.cbSize = sizeof(info);
+    if (!GetMonitorInfoW(mon, &info)) return out;
+    device = info.szDevice;
+  }
+  if (device.empty()) return out;
+  const auto white = SdrWhiteNits(device);
+  out.sdr_white_measured = white.has_value();
+  out.sdr_white_nits = white.value_or(80.0f);
+  return out;
+}
+
 bool CaptureSession::UploadParams() {
   if (!ctx_ || !params_) return false;
   D3D11_MAPPED_SUBRESOURCE mapped{};
@@ -854,6 +938,8 @@ void CaptureSession::Stop() {
   // would silently throttle the next capture. Same for a tone-map change nobody consumed.
   min_interval_100ns_.store(0, std::memory_order_relaxed);
   want_sdr_white_.store(0.0f, std::memory_order_relaxed);
+  window_ = nullptr;
+  monitor_device_.clear();
   ctx_ = nullptr;
   d3d_ = nullptr;
   std::lock_guard<std::mutex> lock(stats_m_);
@@ -1080,6 +1166,99 @@ napi_value SetSdrWhite(napi_env env, napi_callback_info info) {
   return nullptr;
 }
 
+/** startCaptureWindow(hwnd, sdrWhiteNits, onFrame, fps) — the window counterpart of startCapture.
+ *  Neither carries a consent gate of its own: main decides what may be captured and the preload
+ *  only ever passes what it was handed (see approvedTargetFor). */
+/** displayForWindow(hwnd) -> the Windows device name of the display the window sits on, or null.
+ *  A NAME rather than the whole display record: the caller already has the list from listDisplays,
+ *  and resolving one window must not cost a full DisplayConfig walk per tile when the picker opens.
+ *  Null for a minimised window — its rect is off-screen and any answer would be a guess. */
+napi_value DisplayForWindow(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  int64_t handle = 0;
+  napi_value null_value;
+  napi_get_null(env, &null_value);
+  // A real null, not a bare nullptr: N-API turns that into UNDEFINED, and both the docblock and the
+  // TypeScript signature promise null. It only worked because the caller coalesced it away.
+  if (argc < 1 || napi_get_value_int64(env, argv[0], &handle) != napi_ok || handle <= 0) return null_value;
+  HWND window = reinterpret_cast<HWND>(static_cast<intptr_t>(handle));
+  if (!IsWindow(window) || IsIconic(window)) return null_value;
+  HMONITOR mon = MonitorFromWindow(window, MONITOR_DEFAULTTONULL);
+  if (!mon) return null_value;
+  MONITORINFOEXW mi{};
+  mi.cbSize = sizeof(mi);
+  if (!GetMonitorInfoW(mon, &mi)) return null_value;
+  const std::wstring device(mi.szDevice);
+  napi_value out;
+  napi_create_string_utf16(env, reinterpret_cast<const char16_t*>(device.c_str()), device.size(), &out);
+  return out;
+}
+
+/** windowPid(hwnd) -> the owning process id, or null. The consent gate stores this next to the
+ *  handle: Windows recycles HWNDs, and a handle alone cannot tell the window the user picked from
+ *  whatever inherited its number after it closed. */
+napi_value WindowPid(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  int64_t handle = 0;
+  napi_value null_value;
+  napi_get_null(env, &null_value);
+  if (argc < 1 || napi_get_value_int64(env, argv[0], &handle) != napi_ok || handle <= 0) return null_value;
+  HWND window = reinterpret_cast<HWND>(static_cast<intptr_t>(handle));
+  if (!IsWindow(window)) return null_value;
+  DWORD pid = 0;
+  GetWindowThreadProcessId(window, &pid);
+  if (!pid) return null_value;
+  napi_value out;
+  napi_create_double(env, static_cast<double>(pid), &out);
+  return out;
+}
+
+napi_value StartCaptureWindow(napi_env env, napi_callback_info info) {
+  size_t argc = 4;
+  napi_value argv[4];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  int64_t handle = 0;
+  if (argc < 1 || napi_get_value_int64(env, argv[0], &handle) != napi_ok || handle <= 0) {
+    napi_throw_type_error(env, nullptr, "startCaptureWindow(hwnd, sdrWhiteNits) expects a window handle");
+    return nullptr;
+  }
+  HWND window = reinterpret_cast<HWND>(static_cast<intptr_t>(handle));
+  if (!IsWindow(window)) {
+    napi_throw_error(env, nullptr, "no such window");
+    return nullptr;
+  }
+  double sdr_white = 0;
+  if (argc > 1) napi_get_value_double(env, argv[1], &sdr_white);
+  napi_threadsafe_function sink = nullptr;
+  napi_valuetype type = napi_undefined;
+  if (argc > 2) napi_typeof(env, argv[2], &type);
+  if (type == napi_function) {
+    napi_value name;
+    napi_create_string_utf8(env, "streamshare_frames", NAPI_AUTO_LENGTH, &name);
+    if (napi_create_threadsafe_function(env, argv[2], nullptr, name, 1, 1, nullptr,
+                                        [](napi_env, void*, void*) { g_capture.ForgetSink(); }, nullptr, DeliverFrame,
+                                        &sink) != napi_ok) {
+      napi_throw_error(env, nullptr, "could not create the frame callback");
+      return nullptr;
+    }
+  }
+  double fps = 0;
+  napi_valuetype fps_type = napi_undefined;
+  if (argc > 3) napi_typeof(env, argv[3], &fps_type);
+  if (fps_type == napi_number) napi_get_value_double(env, argv[3], &fps);
+  std::string err;
+  if (!g_capture.StartWindow(window, static_cast<float>(sdr_white), sink, &err)) {
+    napi_throw_error(env, nullptr, err.c_str());
+    return nullptr;
+  }
+  g_capture.SetFps(fps);
+  return nullptr;
+}
+
 napi_value StopCapture(napi_env env, napi_callback_info) {
   g_capture.Stop();
   // The reused frame buffer is up to 33 MB at 4K and was otherwise pinned for the life of the
@@ -1134,6 +1313,15 @@ napi_value GetCaptureStats(napi_env env, napi_callback_info) {
   napi_value running;
   napi_get_boolean(env, g_capture.running(), &running);
   napi_set_named_property(env, obj, "running", running);
+  // Live display state, resolved here on the JS thread. The page polls this at 2 Hz and owns the
+  // divisor (reported white x the host's correction), so a window dragged to another screen — or
+  // the Windows SDR brightness slider moving under a share — is picked up within half a second.
+  const auto display = g_capture.CurrentDisplay();
+  num("displaySdrWhiteNits", display.sdr_white_nits);
+  flag("displaySdrWhiteMeasured", display.sdr_white_measured);
+  // A minimised window produces NO frames and does NOT report itself closed (measured). Without
+  // this flag the page cannot tell it apart from a dead capture, and would end the share.
+  flag("minimized", display.minimized);
   return obj;
 }
 
@@ -1155,6 +1343,7 @@ napi_value StartCapture(napi_env env, napi_callback_info) {
   return nullptr;
 }
 napi_value StopCapture(napi_env, napi_callback_info) { return nullptr; }
+napi_value StartCaptureWindow(napi_env, napi_callback_info) { return nullptr; }
 napi_value SetFps(napi_env, napi_callback_info) { return nullptr; }
 napi_value SetSdrWhite(napi_env, napi_callback_info) { return nullptr; }
 napi_value GetCaptureStats(napi_env env, napi_callback_info) {
@@ -1164,6 +1353,8 @@ napi_value GetCaptureStats(napi_env env, napi_callback_info) {
   napi_set_named_property(env, obj, "running", running);
   return obj;
 }
+napi_value DisplayForWindow(napi_env, napi_callback_info) { return nullptr; }
+napi_value WindowPid(napi_env, napi_callback_info) { return nullptr; }
 napi_value TakeFrame(napi_env env, napi_callback_info) {
   napi_value obj;
   napi_create_object(env, &obj);
@@ -1179,6 +1370,9 @@ namespace {
 napi_value Init(napi_env env, napi_value exports) {
   for (const auto& [name, cb] : {std::pair<const char*, napi_callback>{"listDisplays", ListDisplays},
                                  {"startCapture", StartCapture},
+                                 {"startCaptureWindow", StartCaptureWindow},
+                                 {"displayForWindow", DisplayForWindow},
+                                 {"windowPid", WindowPid},
                                  {"stopCapture", StopCapture},
                                  {"setFps", SetFps},
                                  {"setSdrWhite", SetSdrWhite},

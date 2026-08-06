@@ -26,7 +26,7 @@ import {
   createWakeLockToggle,
   kindOf,
   pickerSources,
-  approvedDeviceFor,
+  approvedTargetFor,
   rendererSecurity,
   type AudioApp,
   type NativeDisplay,
@@ -59,8 +59,8 @@ const SOURCE_TYPES: Array<'screen' | 'window'> = ['screen', 'window'];
 // one's consent is read from. Per-webContents state would be required the day a second window can
 // capture.
 let selectedSourceId: string | null = null;
-/** The last thing the picker was shown, with the device names that never left main. The native
- *  capture path's consent gate reads from here — see `approvedDeviceFor`. */
+/** The last thing the picker was shown, with the capture targets that never left main. The native
+ *  capture path's consent gate reads from here — see `approvedTargetFor`. */
 let lastListing: Listing | null = null;
 // The local build carries no CSP (nginx sets it in prod), so we attach the mirrored policy to
 // every app:// response — more robust than a webRequest listener, which doesn't reliably see
@@ -285,9 +285,11 @@ ipcMain.on('ss:config', (event) => {
 
 /** Displays in HDR mode, or [] when the addon is missing. Never throws: this sits on the path of
  *  "open the source picker", which must keep working whatever the native side is doing. */
+const captureAddon = () => loadCaptureAddon(__dirname, app.isPackaged, process.resourcesPath);
+
 function nativeDisplays(): NativeDisplay[] {
   try {
-    return loadCaptureAddon(__dirname, app.isPackaged, process.resourcesPath)?.listDisplays() ?? [];
+    return captureAddon()?.listDisplays() ?? [];
   } catch (err) {
     console.error('stream-share: querying displays failed', err);
     return [];
@@ -310,7 +312,13 @@ ipcMain.handle('ss:sources', async (event) => {
   });
   // Kept for the consent gate, which reads the device name of whatever the user then picks out of
   // THIS listing rather than deriving it a second time. Only the `sources` half crosses IPC.
-  lastListing = pickerSources(sources, screen.getAllDisplays(), nativeDisplays(), own);
+  // The addon resolves a window handle to the display it sits on; nothing else can, which is why
+  // sharing an app on an HDR screen took the clamped path until now.
+  const addon = captureAddon();
+  lastListing = pickerSources(sources, screen.getAllDisplays(), nativeDisplays(), own, (hwnd) => ({
+    device: addon?.displayForWindow(hwnd) ?? null,
+    pid: addon?.windowPid(hwnd) ?? null,
+  }));
   return lastListing.sources;
 });
 
@@ -568,10 +576,13 @@ ipcMain.handle('ss:select-source', (event, id: unknown) => {
 
 /** Reply to `ss:approved-device`: the ONE display the preload may capture natively. The native path
  *  does not go through setDisplayMediaRequestHandler — it drives the addon directly — so this is
- *  its consent gate. See `approvedDeviceFor`. */
+ *  its consent gate. See `approvedTargetFor`. */
 ipcMain.on('ss:approved-device', (event) => {
   const internal = isInternalUrl(event.senderFrame?.url ?? '');
-  event.returnValue = internal ? approvedDeviceFor(lastListing, selectedSourceId) : '';
+  // The pid is re-read HERE, not trusted from the listing: that is the whole point of storing it.
+  event.returnValue = internal
+    ? approvedTargetFor(lastListing, selectedSourceId, (hwnd) => captureAddon()?.windowPid(hwnd) ?? null)
+    : null;
 });
 
 // The listing is what the gate approves from, so it must not outlive the arrangement it described:

@@ -115,6 +115,10 @@ export class HostController {
   /** Why the last share ended, when it ended by itself. Shown on the empty stage and cleared as it
    *  is read — see onSourceEnded. */
   private endedReason = '';
+  /** Whether the live native capture is a WINDOW. Only used to say something true when it dies:
+   *  a window's capture item closes because the user closed the window, which has nothing to do
+   *  with a display changing. */
+  private sourceIsWindow = false;
   private readonly mixer = new AudioMixer();
   private readonly audioQueue = serial(); // serializes outgoing rebuilds — no interleaving
   private readonly wakeLock = createWakeLock(); // keep the screen awake while hosting
@@ -289,6 +293,7 @@ export class HostController {
     // fallback is wrong by up to 6x on a real HDR desktop — which is precisely why it is now a
     // BASE the host can correct rather than a number to hide behind `undefined`.
     this.sourceSdrNits = source.sdrWhiteMeasured ? source.sdrWhiteNits : 80;
+    this.sourceIsWindow = source.kind === 'window';
     let capture: NativeCapture;
     try {
       capture = await captureNative(
@@ -296,6 +301,15 @@ export class HostController {
         // measured value and jumps when the panel repaints is a flash the host did not ask for.
         this.sdrWhiteNits(),
         this.quality.fps,
+        // The reported white is not fixed for the session. A captured WINDOW can be dragged to a
+        // display with a different reference white — 480 here, 80 on the SDR panel next to it, so
+        // six times off — and the Windows brightness slider can move under either kind of capture.
+        // The host's correction rides on top and stays where they put it.
+        (nits) => {
+          if (nits === this.sourceSdrNits) return;
+          this.sourceSdrNits = nits;
+          this.setSdrStops(this.sdrStops, false, true); // re-send and repaint: the label is in nits
+        },
       );
     } catch (e) {
       audio?.stop();
@@ -1127,7 +1141,9 @@ export class HostController {
     // the NEXT teardown — which is a deliberate one, wearing an explanation that is not true.
     if (!this.stream) return;
     if (this.nativeCapture && window.native?.nativeCaptureStats?.()?.closed === true) {
-      this.endedReason = 'HDR capture stopped — the display changed, or HDR was switched off (Win+Alt+B).';
+      this.endedReason = this.sourceIsWindow
+        ? 'That app closed, so the share stopped. Pick another source to carry on.'
+        : 'HDR capture stopped — the display changed, or HDR was switched off (Win+Alt+B).';
     }
     this.stopSource();
   };

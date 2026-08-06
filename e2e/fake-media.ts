@@ -102,7 +102,10 @@ const FAKE_SOURCES = [
   { id: 'screen:1:0', name: 'Screen 2', kind: 'screen', meta: '1920×1080', hdr: false, sdrWhiteNits: 80, sdrWhiteMeasured: true },
   // 4242 is the one whose owning process resolves (see setAudioCapture); the others stand in for
   // a window that is not its process's main window, where app-only sound is impossible.
-  { id: 'window:4242:0', name: 'Elden Ring', kind: 'window', meta: '', hdr: false, sdrWhiteNits: 0, sdrWhiteMeasured: false },
+  // It is also the HDR one: a window on an HDR screen takes the native path too, and the shell is
+  // the only side that can know — desktopCapturer reports no display for a window at all. `meta`
+  // stays empty: that column is the SCREEN's resolution, and a window is not its screen.
+  { id: 'window:4242:0', name: 'Elden Ring', kind: 'window', meta: '', hdr: true, sdrWhiteNits: 480, sdrWhiteMeasured: true },
   { id: 'window:11:0', name: 'Google Chrome', kind: 'window', meta: '', hdr: false, sdrWhiteNits: 0, sdrWhiteMeasured: false },
   { id: 'window:12:0', name: 'Discord', kind: 'window', meta: '', hdr: false, sdrWhiteNits: 0, sdrWhiteMeasured: false },
 ];
@@ -156,7 +159,12 @@ export async function fakeNative(
       // table and the page never sees one. HDR screens only, like the real table — the native path
       // is never offered for anything else, and a gate wider than the feature is a gate to close
       // again later.
-      const DEVICE_BY_ID: Record<string, string> = { 'screen:0:0': String.raw`\\.\DISPLAY1` };
+      const DEVICE_BY_ID: Record<string, string> = {
+        'screen:0:0': String.raw`\\.\DISPLAY1`,
+        // A window resolves to a HANDLE, not a display name — WGC has a separate factory call for
+        // each, and the shell is the only side that knows which the pick was.
+        'window:4242:0': 'hwnd:4242',
+      };
       const cap = window as unknown as {
         __native: {
           started: Array<{ device: string; sdrWhiteNits?: number; fps?: number }>;
@@ -168,6 +176,11 @@ export async function fakeNative(
         __nativeClosed?: boolean;
         /** The frames stop while the addon keeps claiming everything is fine. */
         __nativeStall?: boolean;
+        /** What the display under the capture reports — moved by a test to simulate a captured
+         *  window being dragged to a screen with a different reference white. */
+        __nativeWhite?: number;
+        /** A captured window that is minimised: no frames, and NOT dead. */
+        __nativeMinimized?: boolean;
       };
       cap.__native = { started: [], stopped: 0, fps: [], sdrWhite: [] };
       let framePort: MessagePort | null = null;
@@ -253,7 +266,17 @@ export async function fakeNative(
           },
           // Only `closed` is ever read (native-video.ts's repeater); the other twenty counters are
           // diagnostics with no caller in the page.
-          nativeCaptureStats: () => ({ closed: !!cap.__nativeClosed }),
+          nativeCaptureStats: () => ({
+            closed: !!cap.__nativeClosed,
+            // The display the capture is on, as the addon re-reads it. A test can move it to make
+            // the page follow a window onto another screen.
+            // A minimised window resolves to NO display in the real addon (MonitorFromWindow
+            // returns null for an off-screen rect), so it reports nothing measured. Saying
+            // otherwise here would leave the guard that keeps the divisor off zero untested.
+            displaySdrWhiteNits: cap.__nativeMinimized ? 0 : (cap.__nativeWhite ?? 480),
+            displaySdrWhiteMeasured: !cap.__nativeMinimized,
+            minimized: !!cap.__nativeMinimized,
+          }),
           selectSource: async (id: string) => {
             (window as unknown as { __picked?: string }).__picked = id;
           },

@@ -134,7 +134,7 @@ export interface CapturerSource {
 }
 
 /** One capturable surface as the picker receives it. Note what is NOT here: the Windows device
- *  name. The renderer never learns it — see `approvedDeviceFor`. */
+ *  name. The renderer never learns it — see `approvedTargetFor`. */
 export interface PickerSource {
   id: string;
   name: string;
@@ -147,11 +147,25 @@ export interface PickerSource {
   icon: string | null;
 }
 
-/** What the picker gets, plus the id→device-name table the consent gate reads. */
+/**
+ * What the addon should capture. A screen is named by its DXGI device, a window by its handle —
+ * WGC has a separate factory call for each, and nothing above main needs to know which.
+ *
+ * A window carries its owning `pid` as well, and that is not bookkeeping: **Windows recycles window
+ * handles.** The listing is taken when the picker opens; by the time the user confirms, the window
+ * they clicked may have closed and something else may hold its number. `IsWindow()` would happily
+ * say yes, and we would capture a window nobody chose — with no OS prompt behind this path to catch
+ * it. The pid is what tells the two apart. (The neighbouring paths do the same thing differently:
+ * `getDisplayMedia` re-lists before confirming, and per-app audio re-resolves on every call.)
+ */
+export type NativeTarget = { deviceName: string } | { hwnd: number; pid: number };
+
+/** What the picker gets, plus the id→target table the consent gate reads. */
 export interface Listing {
   sources: PickerSource[];
-  /** Screens the addon matched, by picker id. Kept in main and NEVER sent to the renderer. */
-  devices: Map<string, string>;
+  /** Sources the native path is offered for, by picker id. Kept in main and NEVER sent to the
+   *  renderer — the page picks a source, it does not name a display or a window handle. */
+  devices: Map<string, NativeTarget>;
 }
 
 /**
@@ -176,36 +190,55 @@ export function pickerSources(
   displays: readonly PickerDisplay[],
   native: readonly NativeDisplay[],
   ownId: string | undefined,
+  /** Which display a WINDOW is on, by device name, and which process owns it — the addon's
+   *  `displayForWindow` / `windowPid`. Injected rather than called from in here so this stays pure
+   *  and testable without Electron or the addon. The default answers "nowhere", which is what every
+   *  non-Windows build reports. */
+  forWindow: (hwnd: number) => { device: string | null; pid: number | null } = () => ({ device: null, pid: null }),
 ): Listing {
-  const devices = new Map<string, string>();
+  const devices = new Map<string, NativeTarget>();
   const sources = raw
     .filter((s) => s.id !== ownId) // our own window is capturable, and picking it is an infinite mirror
     .map((s) => {
-      // display_id is documented as possibly empty — no match just means no resolution label.
+      const kind = kindOf(s.id);
+      // display_id is documented as possibly empty — no match just means no resolution label. It is
+      // also EMPTY FOR EVERY WINDOW (measured: 0 of 4), which is the whole reason sharing an app on
+      // an HDR screen used to wash out: nothing tied a window to an output, so `hdr` was false and
+      // the share fell back to the clamped path. A window is resolved through its handle instead.
       const display = displays.find((d) => String(d.id) === s.display_id);
-      // `kindOf`, structurally, rather than trusting that a WINDOW never reports a display_id: it
-      // happens not to on this machine (all six were empty, measured), which is a platform detail
-      // nobody documented. Without the check, a window that did report one would come out
-      // `hdr: true` and a click on it would start a full-SCREEN native capture.
-      const output = display && kindOf(s.id) === 'screen' ? nativeDisplayFor(native, display) : null;
+      const hwnd = kind === 'window' ? hwndFromSourceId(s.id) : null;
+      const win = hwnd === null ? { device: null, pid: null } : forWindow(hwnd);
+      const output =
+        kind === 'screen'
+          ? (display && nativeDisplayFor(native, display)) || null
+          : (win.device !== null && native.find((d) => d.deviceName === win.device)) || null;
       // HDR only, so the table holds exactly the sources for which the native path is on offer —
       // `hdr` below is what the renderer routes on, and a gate that approves more than that is a
-      // gate that is wider than the feature.
-      if (output?.hdr) devices.set(s.id, output.deviceName);
+      // gate that is wider than the feature. A window also needs its pid resolved, or there is
+      // nothing to re-check the handle against later — see NativeTarget.
+      if (output?.hdr) {
+        if (hwnd === null) devices.set(s.id, { deviceName: output.deviceName });
+        else if (win.pid !== null) devices.set(s.id, { hwnd, pid: win.pid });
+      }
       return {
         id: s.id,
         name: s.name,
-        kind: kindOf(s.id),
+        kind,
         // getAllDisplays() reports DIP: a 2560×1440 monitor at 150% would read 1707×960, a
         // resolution the user has never seen. scaleFactor brings it back to physical pixels.
         // The addon's rectangle when we have it — those ARE physical pixels. The DIP fallback
         // rounds, and a 1707-DIP display at 150% comes out as "2561×1440", a resolution nobody has
         // ever seen on a box. Same reason nativeDisplayFor carries a pixel of slack.
-        meta: output
-          ? `${output.right - output.left}×${output.bottom - output.top}`
-          : display
-            ? `${Math.round(display.bounds.width * display.scaleFactor)}×${Math.round(display.bounds.height * display.scaleFactor)}`
-            : '',
+        // Screens only. A window now resolves to an `output` too, and printing its size here would
+        // label the "Discord" tile with the resolution of the MONITOR it happens to sit on.
+        meta:
+          kind !== 'screen'
+            ? ''
+            : output
+              ? `${output.right - output.left}×${output.bottom - output.top}`
+              : display
+                ? `${Math.round(display.bounds.width * display.scaleFactor)}×${Math.round(display.bounds.height * display.scaleFactor)}`
+                : '',
         // Whether THIS screen is in HDR mode right now — the switch that decides between the
         // native capture path and getDisplayMedia. Per source, not per machine: sharing the SDR
         // monitor of a machine that also has an HDR one must not take the native path. It doubles
@@ -237,8 +270,18 @@ export function pickerSources(
  * or one calling after the listing was invalidated — is refused, which costs the HDR path and
  * nothing else: getDisplayMedia has its own gate and does its own fresh enumeration.
  */
-export function approvedDeviceFor(listing: Listing | null, id: string | null): string {
-  return listing?.devices.get(id ?? '') ?? '';
+export function approvedTargetFor(
+  listing: Listing | null,
+  id: string | null,
+  /** Re-reads the owning process of a window handle, right now. See NativeTarget for why a handle
+   *  alone is not enough. Screens skip it: a DXGI device name does not get recycled under us. */
+  pidOf: (hwnd: number) => number | null = () => null,
+): NativeTarget | null {
+  const target = listing?.devices.get(id ?? '') ?? null;
+  if (!target || !('hwnd' in target)) return target;
+  // The window that was listed may have closed since, and its handle may now belong to something
+  // the user never saw. Same pid, same window; anything else is refused rather than guessed at.
+  return pidOf(target.hwnd) === target.pid ? target : null;
 }
 
 /** An app the user could exclude from the shared audio. `pid` is the ROOT process — WASAPI

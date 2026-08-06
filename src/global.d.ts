@@ -134,8 +134,19 @@ interface NativeCaptureStats {
   readonly skipped: number;
   /** Frames produced while no page was listening. */
   readonly orphanedFrames: number;
-  /** The capture item went away: monitor unplugged, RDP session, HDR switched off. */
+  /** The capture item went away: monitor unplugged, RDP session, HDR switched off, or — for a
+   *  window — the window closed (measured: `GraphicsCaptureItem::Closed` does fire for one). */
   readonly closed: boolean;
+  /** Reference white of the display the capture is on RIGHT NOW, re-read on every call. It moves
+   *  when a captured WINDOW is dragged to another screen, and when the user moves the Windows SDR
+   *  brightness slider under either kind of capture. The page owns the divisor — this times the
+   *  host's own correction — so it watches this rather than being told. */
+  readonly displaySdrWhiteNits?: number;
+  readonly displaySdrWhiteMeasured?: boolean;
+  /** The captured WINDOW is minimised. Measured: it then produces no frames at all and is NOT
+   *  reported closed, so without this the page cannot tell it from a dead capture — and would end
+   *  a share the host never stopped. */
+  readonly minimized?: boolean;
   readonly recreated: number;
   readonly width: number;
   readonly height: number;

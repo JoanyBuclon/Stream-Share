@@ -664,6 +664,56 @@ figée — c'est exactement la forme que prend la panne du buffer réutilisé. L
 tire maintenant deux frames de la track *reçue*, à une seconde d'intervalle, et exige
 qu'elles soient non nulles et différentes.
 
+##### Partager une app, pas seulement un écran
+
+Le HDR marchait sur un écran entier et **pas** sur une fenêtre de ce même écran. Ce
+n'était pas le tone map : `desktopCapturer` ne rapporte **aucun `display_id` pour une
+fenêtre** (mesuré : 0 sur 4), donc rien ne la reliait à une sortie HDR, `hdr` restait
+faux, et chaque partage d'app repartait sur `getDisplayMedia`, qui clampe.
+
+WGC sait capturer une fenêtre seule, mais encore fallait-il savoir **dans quel espace
+colorimétrique**. Mesuré avant d'écrire la feature (`tools/window-hdr-probe.cjs`) — une
+fenêtre gris moyen `#808080`, capturée à travers le même tone map, même diviseur :
+
+| | mesuré | prédit |
+|---|---|---|
+| sur l'écran HDR (480 nits) | **128** | 128 si scRGB |
+| sur l'écran SDR (80 nits) | **53** | 56 si déjà composité |
+
+L'espace **suit l'écran**. Le tone map n'a pas changé d'une ligne ; en revanche le
+diviseur doit suivre la fenêtre quand elle change d'écran — sinon il est faux d'un
+facteur 6, ce qui est exactement le bug qu'on répare.
+
+> Le premier témoin échantillonnait le rectangle de la fenêtre dans une capture
+> d'**écran** et n'y trouvait que le bureau. La raison vaut d'être notée : **WGC rend la
+> surface propre d'une fenêtre, qu'elle soit visible ou non** — donc la géométrie ne
+> prouve rien ici. Le témoin retenu est le différentiel ci-dessus.
+
+Deux comportements qu'un écran n'a jamais, mesurés eux aussi :
+
+- **Fenêtre réduite** : zéro frame, et l'item n'est **pas** signalé fermé. Sans un
+  drapeau explicite, la page ne peut pas la distinguer d'une capture morte et le
+  répéteur terminerait le partage au bout de 2 minutes — pour un hôte qui a juste rangé
+  une fenêtre. `minimized` remonte dans les stats et gèle le compteur d'abandon.
+- **Fenêtre fermée** : `GraphicsCaptureItem::Closed` **se déclenche**, donc le partage se
+  termine proprement par le chemin qui existait déjà.
+
+**Une fenêtre s'approuve par son handle *et* son pid.** Windows recycle les handles :
+la liste est prise à l'ouverture du sélecteur, et le temps que l'utilisateur confirme,
+la fenêtre cliquée peut avoir disparu en laissant son numéro à une autre. `IsWindow()`
+répondrait oui et on capturerait une fenêtre que personne n'a choisie — sans prompt de
+l'OS derrière ce chemin pour rattraper. Le pid est relu au moment d'approuver ; s'il a
+changé, on refuse. Les deux chemins voisins font déjà l'équivalent (`getDisplayMedia`
+re-liste avant de confirmer, l'audio par app re-résout à chaque appel) ; celui-ci ne le
+faisait pas, et c'était le seul sans garde-fou système.
+
+Le diviseur reste la propriété du **renderer**, parce que la valeur envoyée est « ce que
+rapporte l'écran × la correction de l'hôte » et que l'addon ignore la correction.
+L'addon publie donc le blanc courant dans `captureStats()`, relu à chaque appel — 0,286 ms
+pour l'interrogation complète des écrans, soit 0,06 % d'un cœur au rythme de 2 Hz auquel
+le répéteur sonde déjà. Bénéfice gratuit : bouger le **curseur SDR de Windows** en cours
+de partage est désormais pris en compte, sur les deux chemins, ce que rien ne détectait.
+
 ##### La porte de consentement du chemin natif
 
 `setDisplayMediaRequestHandler` est documenté dans `main.ts` comme **étant** la porte
@@ -713,7 +763,7 @@ index `screen:N:0` ne désigne pas forcément le même moniteur une fois qu'un �
 parti. Pas sur `display-metrics-changed`, qui se déclenche aussi pour un changement de
 zone de travail : les ids nomment toujours les mêmes panneaux.
 
-> Couverture unitaire : `pickerSources` et `approvedDeviceFor`
+> Couverture unitaire : `pickerSources` et `approvedTargetFor`
 > (`electron/src/config.test.ts`) — le HDR par source, la table réduite aux écrans HDR
 > appariés, une fenêtre qui rapporterait un écran, un id jamais listé, une liste
 > invalidée.
