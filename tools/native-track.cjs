@@ -211,6 +211,11 @@ const SCRIPT = (deviceName, sdrWhiteNits, seconds) => `(async () => {
     window.__ss = { capture, pc1, pc2, received: await received };
 
     out.droppedInPage = capture.droppedInPage();
+    // Frames the page owns and has neither written nor closed, after several seconds of real ones.
+    // The leak this whole file exists to avoid has been found three times by reading the code and
+    // never once by a test — because the track's sink closes frames internally, without going
+    // through JS. This counts only OUR side of the contract, which is exactly where it leaked.
+    out.heldFrames = capture.heldFrames();
     out.native = window.native.nativeCaptureStats();
     out.steady = { frames: out.native.frames - afterSetup.frames, dropped: out.native.dropped - afterSetup.dropped };
     out.duringSetup = { frames: afterSetup.frames, dropped: afterSetup.dropped };
@@ -323,7 +328,15 @@ const FINISH = (sdrWhiteNits) => `(async () => {
     const { captureNative } = await import('/src/lib/native-video.ts');
     const { capture, pc1, pc2 } = window.__ss;
     capture.stop();
-    out.afterStop = { readyState: capture.track.readyState, running: window.native.nativeCaptureStats()?.running };
+    // A tick, so the port drain and the rejected in-flight write have run: both close frames, and
+    // both are asynchronous. Teardown is where a leak is worst — the session is gone and nothing
+    // will ever come back for those buffers.
+    await new Promise((r) => setTimeout(r, 200));
+    out.afterStop = {
+      readyState: capture.track.readyState,
+      running: window.native.nativeCaptureStats()?.running,
+      heldFrames: capture.heldFrames(),
+    };
     pc1.close(); pc2.close();
     // The old two-call handshake closed the live frame port BEFORE the call that could fail, so a
     // second capture threw "already running" and left the first live and frozen. Happy paths never
@@ -530,6 +543,23 @@ function verdict(r, seconds) {
       value: `${r.steady?.dropped} steady (${r.duringSetup?.dropped} during setup), ${r.droppedInPage} in the page`,
     },
     { gate: 'stop() actually stops', pass: r.afterStop?.running === false, value: `running=${r.afterStop?.running}` },
+    // Two halves of the same invariant, and the reason this counter exists: 1 in flight is the
+    // repeater's clone, 2 is that clone mid-replacement, and 0 is the only acceptable number once
+    // the session is over. `?? -1` so a run that never reported fails instead of passing on
+    // undefined — the mistake this file's verdict was rewritten to make impossible.
+    {
+      // 1, not "at most 2": the paths that briefly hold two frames run to completion without
+      // yielding, so from out here the counter can only ever be 0 or 1. Allowing 2 would have
+      // tolerated exactly one leaked frame, permanently and invisibly.
+      gate: 'no frames left unaccounted for while running',
+      pass: (r.heldFrames ?? -1) >= 0 && (r.heldFrames ?? -1) <= 1,
+      value: `${r.heldFrames} held after ${seconds}s`,
+    },
+    {
+      gate: 'every frame is released at teardown',
+      pass: r.afterStop?.heldFrames === 0,
+      value: `${r.afterStop?.heldFrames} held after stop()`,
+    },
     {
       gate: 'repeated frames advance in time',
       pass: r.idle?.stampsIncrease === true,

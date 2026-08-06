@@ -75,6 +75,12 @@ import { SDR_STOPS_MAX } from '../lib/settings.ts';
           <div class="mb-[22px] text-sm leading-[1.55] text-muted-2">
             Pick a screen, window or tab to start sharing with your friends.
           </div>
+          <!-- Why the share ended, when it ended on its own. Empty (and hidden) after a deliberate
+               stop: the host does not need to be told what they just clicked. -->
+          <!-- `aria-live`: this is the one piece of text in the app whose entire purpose is "the
+               host is TOLD", and it appears without any action of theirs. Same treatment as
+               #source-status. -->
+          <div id="host-ended-reason" hidden role="status" aria-live="polite" class="mb-[22px] text-sm leading-[1.55] text-amber-300/90"></div>
           <button
             id="btn-choose-source"
             class="cursor-pointer rounded-[10px] bg-cream px-[22px] py-3 text-sm font-semibold text-ink hover:bg-white"

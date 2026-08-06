@@ -21,6 +21,11 @@ export interface NativeCapture {
   /** Frames the page could not keep up with. Distinct from the addon's own `dropped` counter,
    *  which counts frames that never crossed. */
   droppedInPage(): number;
+  /** Frames this module currently owns and has neither written nor closed. The leak counter: from
+   *  outside it can only ever read 1 (the repeater's clone) or 0 (after `stop()`) — every path that
+   *  briefly holds two runs to completion without yielding. A number that climbs is a
+   *  hardware-buffer leak, and ~30 of them wedges the renderer. */
+  heldFrames(): number;
   /** Cap the capture rate; 0 means uncapped. Goes to the addon, which refuses frames before the
    *  tone map — the generated track rejects `applyConstraints` outright. */
   setFps(fps: number): void;
@@ -156,6 +161,20 @@ export async function captureNative(sdrWhiteNits?: number, fps?: number): Promis
   let lastSentUs = 0;
   let repeats = 0;
   let height = 0;
+  /**
+   * Frames this module owns right now: received or created, and neither written nor closed.
+   *
+   * The header of this file states an invariant — every frame is either written (the track takes
+   * ownership and closes it) or closed here — and until now nothing checked it, while three
+   * separate leaks were found by reading the code. This is the check. It cannot count what the
+   * track's sink does internally (that closes frames without going through JS), and it does not
+   * need to: what leaked, every time, was OUR side letting a frame fall between two paths.
+   *
+   * Steady state is 1 — the `last` clone kept for the repeater — with a brief 2 while a new frame
+   * replaces it. Anything that climbs is the leak this file exists to avoid, and ~30 of them is
+   * enough to wedge the renderer (measured).
+   */
+  let held = 0;
 
   /**
    * End the track in the way host.ts can HEAR — i.e. from the source side.
@@ -173,9 +192,19 @@ export async function captureNative(sdrWhiteNits?: number, fps?: number): Promis
    */
   const endTrack = (): void => void writer.close().catch(() => {});
 
+  /** Every disposal goes through here, so the counter cannot drift away from the frames. */
+  const release = (frame: VideoFrame): void => {
+    frame.close();
+    held--;
+  };
+
   const send = (frame: VideoFrame): void => {
     writing = true;
     lastWriteMs = performance.now();
+    // Ownership passes to the writer here, whatever happens next: a write that succeeds has the
+    // track close the frame, and a write that rejects is closed by the catch below. Either way it
+    // is no longer ours to account for.
+    held--;
     // Read BEFORE the write hands ownership over. Tracked separately from `last.timestamp` because
     // `last` only changes when a real frame arrives: repeating off it produced the SAME timestamp
     // on every tick of an idle run, which an encoder is entitled to drop.
@@ -235,7 +264,9 @@ export async function captureNative(sdrWhiteNits?: number, fps?: number): Promis
     try {
       // A monotonically increasing timestamp, tracked separately from the source frame: the encoder
       // is entitled to discard a repeat that carries the same one, and `last` does not move.
-      send(new VideoFrame(last, { timestamp: lastSentUs + IDLE_REPEAT_MS * 1000 }));
+      const repeat = new VideoFrame(last, { timestamp: lastSentUs + IDLE_REPEAT_MS * 1000 });
+      held++;
+      send(repeat);
     } catch {
       /* the source frame was closed under us; the next real frame restarts the cycle */
     }
@@ -243,18 +274,33 @@ export async function captureNative(sdrWhiteNits?: number, fps?: number): Promis
 
   port.onmessage = (event: MessageEvent<VideoFrame>): void => {
     const frame = event.data;
+    held++; // transferred to us: ours to write or to close, from this line on
     // Never queue. (Not "newest wins": the frame kept is the one already being written, i.e. the
     // older one — we refuse the arrival.) Awaiting each write while frames keep arriving would
     // build an unbounded backlog, which on a live stream is worse than a dropped frame: latency
     // grows without bound and never recovers.
     if (stopped || writing) {
       dropped++;
-      frame.close();
+      release(frame);
       return;
     }
     height = frame.codedHeight;
-    last?.close();
-    last = frame.clone();
+    if (last) release(last);
+    // `last = null` FIRST, and the clone guarded: `clone()` throws on a detached frame, and the
+    // old shape left `last` pointing at the frame just released — so the next arrival released it
+    // a second time. `close()` is idempotent, the counter is not: it would drift down for ever and
+    // the leak gate would read healthy while frames piled up. The repeater does the same dance
+    // correctly three lines below; this path did not.
+    last = null;
+    try {
+      // `clone()` shares the buffer rather than copying it, but it is a second reference to a
+      // hardware buffer all the same — so it counts, and it is released above on the next frame.
+      last = frame.clone();
+      held++;
+    } catch {
+      release(frame); // ours, and now nothing else will take it
+      return;
+    }
     repeats = 0; // a real frame means the capture is alive; the give-up counter starts over
     send(frame);
   };
@@ -263,6 +309,7 @@ export async function captureNative(sdrWhiteNits?: number, fps?: number): Promis
     track: generator,
     droppedInPage: () => dropped,
     height: () => height,
+    heldFrames: () => held,
     // Both guarded on `stopped`: the addon is a process-wide singleton, so a NativeCapture the host
     // has already dropped would otherwise reach across and re-tune the session that replaced it.
     // Not reachable today (stopNative nulls the reference first), and one line each to keep it that
@@ -277,7 +324,7 @@ export async function captureNative(sdrWhiteNits?: number, fps?: number): Promis
       if (stopped) return;
       stopped = true;
       clearInterval(repeater);
-      last?.close();
+      if (last) release(last);
       last = null;
       // Stop producing first, then let the port DRAIN. Closing it here instead would discard the
       // messages still queued on it, and each of those carries a transferred VideoFrame that would

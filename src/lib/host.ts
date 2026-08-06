@@ -112,6 +112,9 @@ export class HostController {
    *  hidden), and the next HDR share overwrites it before anything can. */
   private sdrStops = loadSdrStops();
   private sourceSdrNits = 0;
+  /** Why the last share ended, when it ended by itself. Shown on the empty stage and cleared as it
+   *  is read — see onSourceEnded. */
+  private endedReason = '';
   private readonly mixer = new AudioMixer();
   private readonly audioQueue = serial(); // serializes outgoing rebuilds — no interleaving
   private readonly wakeLock = createWakeLock(); // keep the screen awake while hosting
@@ -364,7 +367,10 @@ export class HostController {
     if (video) {
       video.contentHint = contentHintFor(this.quality);
       // `once`: a new track per source change would otherwise stack a `stop` listener each time.
-      video.addEventListener('ended', this.stopSource, { once: true, signal: this.ac.signal }); // "Stop sharing" from the browser chrome, or the shared window closing
+      // `onSourceEnded`, not `stopSource`: the share is ending without the host asking, so it also
+      // gets to say why. "Stop sharing" from the browser chrome, the shared window closing, or —
+      // on the native path — the capture dying.
+      video.addEventListener('ended', this.onSourceEnded, { once: true, signal: this.ac.signal });
     }
     this.applyFps();
     const preview = el<HTMLVideoElement>('host-video');
@@ -1101,6 +1107,31 @@ export class HostController {
     this.nativeCapture = null;
   }
 
+  /**
+   * The track ended without the host pressing anything here.
+   *
+   * Only ONE case earns a message, and it is narrow on purpose. On the native path a deliberate
+   * stop is silent (see endTrack in native-video.ts), so `ended` plus a capture item the addon
+   * reports as closed means the capture died — the host is looking at a "choose source" screen they
+   * did not ask for, and `Win+Alt+B` is one keystroke away, so the message names it.
+   *
+   * Everywhere else, saying anything would be a lie: on getDisplayMedia this same event is mostly
+   * the host clicking "Stop sharing" in the browser chrome, which is as deliberate as our own
+   * button. Silence is the honest answer for a stop we cannot tell apart from an intentional one.
+   *
+   * Both reads happen BEFORE stopSource: `stopNative` clears `nativeCapture`, and the addon resets
+   * its counters in Stop() — so a line later, `closed` is false and this says nothing.
+   */
+  private onSourceEnded = (): void => {
+    // stopSource returns immediately with no stream, so a reason set here would sit unread until
+    // the NEXT teardown — which is a deliberate one, wearing an explanation that is not true.
+    if (!this.stream) return;
+    if (this.nativeCapture && window.native?.nativeCaptureStats?.()?.closed === true) {
+      this.endedReason = 'HDR capture stopped — the display changed, or HDR was switched off (Win+Alt+B).';
+    }
+    this.stopSource();
+  };
+
   private stopSource = (): void => {
     if (!this.stream) return; // already sourceless
     this.stopNative();
@@ -1131,6 +1162,11 @@ export class HostController {
     preview.srcObject = null;
     hide(preview);
     show(el('host-empty'));
+    // Consumed here and cleared, so it only ever explains the share that just ended — not the next
+    // one the host stops themselves.
+    setText('host-ended-reason', this.endedReason);
+    el('host-ended-reason').hidden = !this.endedReason;
+    this.endedReason = '';
     hide(el('host-stage-meta'));
     hide(el('host-live-badge'));
     hide(el('host-paused'));

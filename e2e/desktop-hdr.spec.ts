@@ -300,6 +300,20 @@ test('a capture that dies ends the share instead of freezing on the last frame',
   await expect(page.locator('#host-live-badge')).toBeHidden();
   // And the session is released, not just the track: stopSource has to reach the shell.
   await nativeCalls(page).toMatchObject({ stopped: 1 });
+  // …and the host is TOLD. A share that ends by itself and leaves them on "choose source" with no
+  // explanation is the worst version of this: the likeliest cause is one keystroke away, so the
+  // message names it.
+  await expect(page.locator('#host-ended-reason')).toBeVisible();
+  await expect(page.locator('#host-ended-reason')).toContainText('Win+Alt+B');
+
+  // And it does not linger: stopping the next share on purpose needs no explanation.
+  await page.click('#btn-choose-source');
+  await page.click('#btn-modal-source');
+  await pick(page, 'window', 'Discord');
+  await expect(page.locator('#host-video')).toBeVisible();
+  await page.click('#btn-stop');
+  await expect(page.locator('#host-empty')).toBeVisible();
+  await expect(page.locator('#host-ended-reason')).toBeHidden();
 
   await ctx.close();
 });

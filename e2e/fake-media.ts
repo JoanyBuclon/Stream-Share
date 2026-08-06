@@ -245,6 +245,11 @@ export async function fakeNative(
             clearInterval(pump);
             framePort?.close();
             framePort = null;
+            // The real addon does `stats_ = {}` at the end of Stop(), so `closed` goes back to
+            // false. Without that here, a reader that consulted the stats AFTER stopping would
+            // still see `closed` and the suite would go green on an ordering bug that shows the
+            // wrong message in production.
+            cap.__nativeClosed = false;
           },
           // Only `closed` is ever read (native-video.ts's repeater); the other twenty counters are
           // diagnostics with no caller in the page.
