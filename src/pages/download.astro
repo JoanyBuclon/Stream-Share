@@ -23,7 +23,8 @@ const WINDOWS_INSTALLER_URL = `${REPO_URL}/releases/download/v${version}/StreamS
 // trusting us with an unsigned installer, so a promise has to look like a promise — the page used
 // to present tone-mapped HDR, guaranteed frame rate and global shortcuts as if they already worked.
 // The shortcuts were dropped, "guaranteed 120 fps" turned out to be a non-problem when measured
-// (the browser already honours it), and HDR is the last real phase-3 item.
+// (the browser already honours it), and HDR shipped (src/lib/native-video.ts) — so nothing is
+// pending right now. Leave the flag: it is the rail the next unshipped card has to go through.
 //
 // The bar is narrower than "is it good": it has to be something the BROWSER cannot do — that is
 // the page's title and the whole argument for downloading anything. Hardware H.265 encoding was
@@ -46,7 +47,7 @@ const benefits = [
   {
     tag: 'HDR',
     title: 'Correct HDR capture',
-    soon: true,
+    soon: false,
     body: 'Tone-mapped capture so HDR games keep their contrast instead of arriving washed out on your friends’ screens.',
   },
   // The catch-all. `items` is rendered as a short list under the body — the only card that uses it,
