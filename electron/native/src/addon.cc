@@ -433,6 +433,9 @@ class CaptureSession {
     double buffer = 0, rtDevice = 0, item = 0, pool = 0, session = 0, total = 0;
   };
   StartupTiming Startup() const { return startup_; }
+  /** Create the device and pipeline ahead of the first capture, if they are not already there.
+   *  Safe to call at any time: with a capture running the device exists, so this is a read. */
+  void WarmUp();
   DisplayState CurrentDisplay() const;
   /** Moved out, not copied: the caller gets the buffer and the session allocates a fresh one. */
   std::vector<uint8_t> TakeFrame(int32_t* w, int32_t* h);
@@ -577,6 +580,49 @@ bool CaptureSession::StartWindow(HWND window, float sdr_white, napi_threadsafe_f
   return StartItem(ItemTarget{nullptr, window}, sdr_white, sink, err);
 }
 
+/** Machine-constant, and it measured 14-19 ms EVERY time it was called. A free function rather than
+ *  a static inside StartItem, so the warm-up below can prime it too — otherwise the first start
+ *  still paid it even with a warm device. */
+static bool WgcSupported() {
+  static const bool supported = wgc::GraphicsCaptureSession::IsSupported();
+  return supported;
+}
+
+void CaptureSession::WarmUp() {
+  if (d3d_) return; // already built, by a warm-up or by a capture that is still running
+  try {
+    // Same as StartItem's, and needed for the same reason: COM on this thread. Cheap (0.1 ms
+    // measured) and it throws RPC_E_CHANGED_MODE on a thread that already has an apartment.
+    try {
+      winrt::init_apartment(winrt::apartment_type::multi_threaded);
+    } catch (winrt::hresult_error const&) {
+    }
+    WgcSupported(); // primed here so the first real start does not pay it
+    winrt::com_ptr<ID3D11Device> device;
+    winrt::com_ptr<ID3D11DeviceContext> ctx;
+    winrt::check_hresult(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                                           nullptr, 0, D3D11_SDK_VERSION, device.put(), nullptr, ctx.put()));
+    // Published only once BOTH halves exist: StartItem reads `d3d_` alone to decide whether the
+    // pipeline is cached too, so a device left behind by a failed BuildPipeline would be taken for
+    // a complete one and the shaders would never be built.
+    d3d_ = device;
+    ctx_ = ctx;
+    std::string err;
+    if (!BuildPipeline(&err)) {
+      vs_ = nullptr;
+      ps_ = nullptr;
+      sampler_ = nullptr;
+      ctx_ = nullptr;
+      d3d_ = nullptr;
+    }
+  } catch (winrt::hresult_error const&) {
+    // Swallowed on purpose: a warm-up that fails costs nothing but the time the start was going to
+    // spend anyway, and there is no caller to tell.
+    ctx_ = nullptr;
+    d3d_ = nullptr;
+  }
+}
+
 bool CaptureSession::StartItem(ItemTarget target, float sdr_white, napi_threadsafe_function sink,
                                std::string* err) {
   // Takes ownership of `sink` on every path, including the failures — split ownership between here
@@ -607,11 +653,7 @@ bool CaptureSession::StartItem(ItemTarget target, float sdr_white, napi_threadsa
     } catch (winrt::hresult_error const&) {
     }
     startup_.apartment = since(t_mark);
-    // Static: a machine property, and it measured 14.4 ms on EVERY start (the apartment call next
-    // to it is 0.1 — they were one timer until the split showed which was which). Magic statics are
-    // thread-safe under MSVC and re-run if the initializer throws.
-    static const bool kSupported = wgc::GraphicsCaptureSession::IsSupported();
-    if (!kSupported) {
+    if (!WgcSupported()) {
       *err = "Windows Graphics Capture is not supported on this machine";
       // Stop(), not a bare return: `sink_` is already set, and this is the one failure path that
       // used to skip the release — leaking the threadsafe function, which keeps a reference on the
@@ -1362,6 +1404,21 @@ napi_value StopCapture(napi_env env, napi_callback_info) {
   return nullptr;
 }
 
+/**
+ * Build the device and the pipeline WITHOUT starting a capture, so the next start finds them
+ * cached. Everything expensive about a start that does not depend on the target: measured at ~96 ms
+ * for D3D11CreateDevice plus ~5 for the two HLSL compilations, out of a ~148 ms cold start.
+ *
+ * Called when the picker opens, from an idle callback — the host has signalled intent, the picker
+ * stays up while they read it, and the block lands where nothing else is happening instead of on
+ * the "share" click. Best effort in every sense: no error is surfaced, because the only consequence
+ * of failing is that the start pays what it pays today.
+ */
+napi_value WarmUpCapture(napi_env, napi_callback_info) {
+  g_capture.WarmUp();
+  return nullptr;
+}
+
 void StopCaptureForTeardown() { g_capture.Stop(/*drop_device=*/true); }
 
 /** Called from the env cleanup hook: the reused frame buffer must not outlive the environment that
@@ -1451,6 +1508,7 @@ napi_value StartCapture(napi_env env, napi_callback_info) {
   return nullptr;
 }
 napi_value StopCapture(napi_env, napi_callback_info) { return nullptr; }
+napi_value WarmUpCapture(napi_env, napi_callback_info) { return nullptr; }
 napi_value StartCaptureWindow(napi_env, napi_callback_info) { return nullptr; }
 napi_value SetFps(napi_env, napi_callback_info) { return nullptr; }
 napi_value SetSdrWhite(napi_env, napi_callback_info) { return nullptr; }
@@ -1482,6 +1540,7 @@ napi_value Init(napi_env env, napi_value exports) {
                                  {"displayForWindow", DisplayForWindow},
                                  {"windowPid", WindowPid},
                                  {"stopCapture", StopCapture},
+                                 {"warmUpCapture", WarmUpCapture},
                                  {"setFps", SetFps},
                                  {"setSdrWhite", SetSdrWhite},
                                  {"captureStats", GetCaptureStats},

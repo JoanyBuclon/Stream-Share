@@ -15,7 +15,7 @@
 //   pnpm exec electron ../tools/native-track.cjs
 const fs = require('node:fs');
 const path = require('node:path');
-const { app, BrowserWindow, screen, ipcMain, session, desktopCapturer } = require('electron');
+const { app, BrowserWindow, screen, ipcMain, session, desktopCapturer, net } = require('electron');
 
 // The real preload asks main for this synchronously, before anything else. With no handler it gets
 // undefined, throws, and Electron fails the whole page load with a bare ERR_FAILED — which reads
@@ -194,6 +194,11 @@ const SCRIPT = (deviceName, sdrWhiteNits, seconds) => `(async () => {
       frameHeight: rtp?.frameHeight ?? 0,
       encoder: rtp?.encoderImplementation ?? '',
       powerEfficient: rtp?.powerEfficientEncoder ?? null,
+      // Unlike encoderImplementation, this one IS exposed by Electron 43 (checked against
+      // Object.keys). It says whether the encoder CHOSE to scale down, and why — which is the only
+      // way to tell "our pipeline lost resolution" from "this box was busy".
+      limitedBy: rtp?.qualityLimitationReason ?? 'unknown',
+      resolutionChanges: rtp?.qualityLimitationResolutionChanges ?? 0,
       codec: (codec?.mimeType ?? '').replace(/^video\\//, ''),
     };
     // Does loopback audio survive on its own? The native path produces no audio track, and turning
@@ -426,6 +431,22 @@ app.whenReady().then(async () => {
   const result = {};
   let win = null;
   let mover = null;
+  let pageLoads = 0;
+  // The dev server is a PREREQUISITE, not an optional convenience: this harness runs the real page
+  // and FINISH imports src/lib/native-video.ts straight off it. Without it every single gate fails
+  // and the report reads as twenty broken features rather than one missing server — which is
+  // exactly how a phantom "intermittent stop/start bug" got chased for an afternoon. Worse, a
+  // Playwright run OWNS this port (playwright.config.ts starts astro and stops it again on the way
+  // out), so it can vanish between two harness runs, or mid-run: the phases before the import pass
+  // and the ones after it fail, which looks precisely like a race in the capture code.
+  try {
+    const probe = await net.fetch(PAGE);
+    if (!probe.ok) throw new Error(`HTTP ${probe.status}`);
+  } catch (err) {
+    console.error(`\nDEV SERVER UNREACHABLE at ${PAGE} — ${String(err)}\nStart it first: pnpm dev\n`);
+    app.exit(2);
+    return;
+  }
   try {
     const addon = require(path.join(__dirname, '..', 'electron', 'native', 'build', 'Release', 'streamshare_capture.node'));
     const all = addon.listDisplays();
@@ -462,6 +483,13 @@ app.whenReady().then(async () => {
         sandbox: false,
         backgroundThrottling: false,
       },
+    });
+    // The phases hand state to each other through `window.__ss`, so a page reload between two of
+    // them wipes it — and Vite hot-reloads this page whenever a source file is SAVED. The result is
+    // not an obvious error but five red gates (the tone map plus everything in FINISH), which reads
+    // exactly like a regression in the capture code. Diagnosed the hard way; counted from now on.
+    win.webContents.on('did-finish-load', () => {
+      if (++pageLoads > 1) console.error('\nPAGE RELOADED MID-RUN — a source file was saved and the dev server hot-reloaded it.\n');
     });
     await win.loadURL(PAGE);
 
@@ -525,6 +553,9 @@ app.whenReady().then(async () => {
   } catch (err) {
     result.error = String(err && err.stack ? err.stack : err);
   } finally {
+    // Recorded here rather than at the end of the try: a run that THREW is exactly when this
+    // matters, because a mid-run reload is one of the things that makes it throw.
+    result.pageLoads = pageLoads;
     // In `finally`, not at the end of the try: a run that blew up in one phase used to write a
     // result file with NO verdict at all, which reads as "the tool is broken" and hides both which
     // stage failed and how far the run got. Every gate reads through `?.`, so the ones whose data
@@ -546,6 +577,14 @@ function verdict(r, seconds) {
   const e = r.encoded ?? {};
   const n = r.native ?? {};
   return [
+    // FIRST, because when it fails nothing below means anything: the phases pass state through
+    // `window.__ss` and a reload drops it, so the tone map and all of FINISH go red for a reason
+    // that has nothing to do with capture. One named gate instead of five misleading ones.
+    {
+      gate: 'the page did not reload mid-run',
+      pass: (r.pageLoads ?? 1) === 1,
+      value: r.pageLoads === undefined ? 'not reached' : `${r.pageLoads} loads (a saved file hot-reloads it)`,
+    },
     { gate: 'addon loaded in the preload', pass: r.canCaptureNative === true, value: String(r.canCaptureNative) },
     { gate: 'track is live', pass: r.trackReadyState === 'live', value: String(r.trackReadyState) },
     { gate: 'a track reached the peer', pass: r.remoteTrack === 'video', value: String(r.remoteTrack) },
@@ -554,7 +593,23 @@ function verdict(r, seconds) {
       pass: e.framesEncoded >= seconds * 20,
       value: `${e.framesEncoded} in ${seconds}s (need ${seconds * 20})`,
     },
-    { gate: 'full resolution', pass: e.frameWidth === n.width && e.frameWidth > 0, value: `${e.frameWidth}x${e.frameHeight} of ${n.width}x${n.height}` },
+    // Skipped when the ENCODER chose to scale down, on the same principle as the still-screen and
+    // H.265 gates: WebRTC's quality scaler drops resolution under CPU or bandwidth pressure, which
+    // is correct behaviour and a property of the box, not of this pipeline. Measured before this:
+    // 5 red out of 12 runs on an otherwise idle machine, all of them 1440p→1080p — a gate that cries
+    // wolf that often is one nobody reads. `limitedBy === 'none'` keeps the real failure: losing
+    // resolution with the encoder saying it was never constrained.
+    (() => {
+      const full = e.frameWidth === n.width && e.frameWidth > 0;
+      const limited = e.limitedBy && e.limitedBy !== 'none' && e.limitedBy !== 'unknown';
+      return {
+        gate: 'full resolution',
+        pass: full || limited,
+        value: full
+          ? `${e.frameWidth}x${e.frameHeight}`
+          : `skipped — the encoder scaled to ${e.frameWidth}x${e.frameHeight} of ${n.width}x${n.height}, limited by ${e.limitedBy} (${e.resolutionChanges} changes)`,
+      };
+    })(),
     // The one gate the others cannot stand in for: everything above is satisfied by a stream of
     // black, or of one frozen image. The reused ArrayBuffer fails in exactly that shape.
     //

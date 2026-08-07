@@ -35,6 +35,14 @@ app.whenReady().then(async () => {
     result.target = target?.deviceName ?? null;
     if (!target) throw new Error('no display reported');
 
+    // SS_WARM=1 pays the device + pipeline BEFORE the first start, which is what the picker now
+    // does from an idle callback. Round 0 should then look like the warm rounds.
+    if (process.env.SS_WARM === '1') {
+      const t0 = process.hrtime.bigint();
+      addon.warmUpCapture();
+      result.warmUpMs = Number(process.hrtime.bigint() - t0) / 1e6;
+    }
+
     for (let i = 0; i < ROUNDS; i++) {
       // The sink is required, and its frames are irrelevant here — only the start cost is.
       addon.startCapture(target.deviceName, target.sdrWhiteMeasured ? target.sdrWhiteNits : 80);
@@ -51,6 +59,7 @@ app.whenReady().then(async () => {
   const keys = ['total', 'apartment', 'supported', 'device', 'compileVs', 'compilePs', 'item', 'session', 'buffer', 'pool'];
   console.log('round  ' + keys.map((k) => k.padStart(10)).join(''));
   result.rounds.forEach((r, i) => console.log(String(i).padEnd(7) + keys.map((k) => String(r[k] ?? '-').padStart(10)).join('')));
+  if (result.warmUpMs !== undefined) console.log(`warmUpCapture: ${result.warmUpMs.toFixed(1)} ms (paid off the click)`);
   if (result.error) console.log('ERROR', result.error);
   app.exit(0);
 });

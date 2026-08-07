@@ -93,6 +93,9 @@ export class HostController {
    *  before it stops anything), so the boxes stay honest — but a click that does nothing needs to
    *  say so, or it reads as a broken button. */
   private audioFailed = false;
+  /** The last loopback grab was refused. Set by loopbackAudioTrack, cleared by `capture()` — i.e. a
+   *  new pick re-decides, which is also the action the message asks for. */
+  private audioStartFailed = false;
   // Sticky: the shared window has no owning process, so app-only sound is impossible for it. Kept
   // as state, not just as text — the pick happens before the panel opens, and opening it resets
   // the hint line.
@@ -251,6 +254,8 @@ export class HostController {
     // still live. setStream is the commit point for everything else about a source; it is the
     // commit point for its identity too.
     this.pendingSource = source ?? null;
+    // A new pick is exactly what the message asks the host to do, so it is also what retires it.
+    this.audioStartFailed = false;
     const deviceId = source ? cameraDeviceId(source.id) : null;
     if (deviceId) return this.captureCamera(deviceId);
     // `hdr` alone: it is only ever true when the shell holds a DXGI output for this source, and
@@ -386,7 +391,10 @@ export class HostController {
       });
       stream.getVideoTracks().forEach((t) => t.stop());
       const track = stream.getAudioTracks()[0] ?? null;
-      if (track) return track;
+      if (track) {
+        this.audioStartFailed = false;
+        return track;
+      }
     } catch (e) {
       console.error('stream-share: no system audio alongside the native capture', e);
     }
@@ -395,6 +403,10 @@ export class HostController {
     // `settings-source-hint`, which the renderSettings that follows on BOTH callers overwrites with
     // the source label; it was never once visible. Words about audio belong in audioHint().
     this.quality = { ...this.quality, systemAudio: false };
+    // The toggle snapping back off says THAT it failed; audioHint() is the only place that can say
+    // what to do about it. Desktop only — the per-app section is hidden in a browser — which is
+    // also where the actionable cause lives (`forgetPick` on a display change).
+    this.audioStartFailed = true;
     return null;
   }
 
@@ -848,10 +860,6 @@ export class HostController {
         // path above it is not, that one crossed an IPC round trip first. It fits either way:
         // Chromium allows ~5 s, and on the desktop the shell answers from the source already
         // approved, with no prompt and so no gesture to spend.
-        // ponytail: a refusal here only flips the toggle back off — no words. Actionable in exactly
-        // one case: `forgetPick` drops the approved source when a display is plugged in mid-share,
-        // and "re-pick the source" would fix it. Put that in audioHint(), next to audioFailed, if
-        // anyone actually hits it.
         const track = stream.getAudioTracks().some(isLiveTrack) ? null : await this.loopbackAudioTrack();
         // Re-tested after the await, not just `stale()`: two ON clicks inside one grab window each
         // saw an empty stream, and adding both leaves a second full screen capture that nothing will
@@ -937,6 +945,10 @@ export class HostController {
   }
 
   private audioHint(usable: boolean): string {
+    // BEFORE the `usable` branch, and that ordering is the whole point: a refused grab turns
+    // systemAudio off, so `usable` is false, so without this the panel answers a failure with
+    // "turn system audio on to change this" — advice to redo the exact thing that just failed.
+    if (this.audioStartFailed) return AUDIO_NO_SYSTEM;
     if (!usable) return this.stream ? 'turn system audio on to change this' : 'pick a source first';
     if (this.audioNoOwner) return AUDIO_NO_OWNER;
     if (this.audioFailed) return AUDIO_FAILED;
@@ -1382,6 +1394,10 @@ const AUDIO_SNAPSHOT = 'only the ticked apps are sent — anything started later
 const AUDIO_NO_OWNER = "this window has no app audio of its own — sharing all system sound";
 /** A click the shell turned down. Whatever was running still is, so the boxes are still true. */
 const AUDIO_FAILED = 'that change did not take — the app may have quit; nothing else was altered';
+/** The loopback grab was refused, so the toggle turned itself back off. The one cause the host can
+ *  act on is a display plugged in or unplugged mid-share: main drops the approved source then
+ *  (`forgetPick`), and re-picking is what restores it. */
+const AUDIO_NO_SYSTEM = 'system audio could not start — pick the source again, then turn it back on';
 
 /** A capture the shell is running. */
 export type LiveSpec = { exclude: string } | { include: string[] };

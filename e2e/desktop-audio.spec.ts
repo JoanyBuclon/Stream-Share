@@ -346,6 +346,31 @@ test('turning system audio off releases the capture and the rows go inert', asyn
   await ctx.close();
 });
 
+// A refused grab turns the toggle back off, which is honest but mute. The one cause the host can
+// act on is a display plugged in or unplugged mid-share: main drops the approved source
+// (`forgetPick`), every later getDisplayMedia is refused, and re-picking is the fix. Without the
+// ordering inside audioHint() the panel answers this with "turn system audio on to change this" —
+// advice to redo the exact thing that just failed, since a refusal turns the flag off.
+test('a refused system-audio grab says what to do about it, not "turn it on"', async ({ browser }) => {
+  const ctx = await browser.newContext();
+  const page = await ctx.newPage();
+  // The share itself goes through; every LATER getDisplayMedia is refused — what main does once the
+  // approved source has been dropped.
+  await fakeDisplayMedia(page, { rejectFrom: 1 });
+  await fakeNative(page);
+  await shareAndOpenSettings(page);
+
+  await page.click('#toggle-sysaudio');
+  await expect(page.locator('#toggle-sysaudio')).toHaveAttribute('aria-pressed', 'false');
+  await page.click('#toggle-sysaudio');
+
+  // Snapped back off, and the panel names the way out instead of pointing at the toggle.
+  await expect(page.locator('#toggle-sysaudio')).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('#audio-apps-hint')).toContainText('pick the source again');
+
+  await ctx.close();
+});
+
 // A camera is not a display surface, and `ss:select-source` only stores `screen:`/`window:` ids —
 // so asking getDisplayMedia for its sound is a guaranteed refusal, and a refusal turns the toggle
 // back OFF, which greys out the per-app rows. Those rows are the ONLY way a camera share ever gets

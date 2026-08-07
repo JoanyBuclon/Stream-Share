@@ -84,6 +84,10 @@ export interface CaptureAddon {
    *  a perfectly still screen is not immediately. A non-positive or non-finite value is ignored. */
   setSdrWhite(nits: number): void;
   stopCapture(): void;
+  /** Build the device and pipeline ahead of the first capture, so `startCapture` finds them cached.
+   *  Synchronous and best-effort — it reports nothing, because failing only means the next start
+   *  pays what it pays today. Optional: an older addon paired with a newer shell has no such export. */
+  warmUpCapture?(): void;
   captureStats(): CaptureStats;
   takeFrame(): { width: number; height: number; data: ArrayBuffer };
 }

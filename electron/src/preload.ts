@@ -63,7 +63,19 @@ function pushFrame(frame: NativeFrame): void {
 // custom source picker needs: list what can be captured, then name the pick.
 contextBridge.exposeInMainWorld('native', {
   appOrigin: config.appOrigin,
-  listSources: () => ipcRenderer.invoke('ss:sources'),
+  listSources: () => {
+    // The picker is opening, so a native capture is one click away. Build the D3D device and the
+    // tone-map pipeline NOW: they do not depend on which source is picked, and they are ~100 ms of
+    // the ~185 ms that `startNativeCapture` otherwise spends on this very thread, holding the UI
+    // while the host waits for their share to appear.
+    //
+    // In an idle callback, not inline: this is the same synchronous C++ either way, and running it
+    // inline would just move the freeze onto the picker's own opening. `requestIdleCallback` puts it
+    // in the gap while the host reads the tiles. Main's copy of the addon is a DIFFERENT instance —
+    // the capture runs in this one, so warming main's would buy nothing.
+    requestIdleCallback(() => addon?.warmUpCapture?.());
+    return ipcRenderer.invoke('ss:sources');
+  },
   // Awaited by the renderer: main must hold the id before getDisplayMedia is called.
   selectSource: (id: string) => ipcRenderer.invoke('ss:select-source', id),
 
