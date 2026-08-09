@@ -414,7 +414,7 @@ class CaptureSession {
    */
 
   /** The reference white of the display this session is on RIGHT NOW, plus whether the window (if
-   *  it is a window) is minimised. Polled at 2 Hz by the page, which owns the divisor: it is the
+   *  it is a window) is minimised. Polled at 10 Hz by the page, which owns the divisor: it is the
    *  reported white times the host's own correction, and only the page knows that factor.
    *
    *  Re-read every call rather than cached on the monitor handle. Measured at 0.286 ms for the
@@ -589,6 +589,10 @@ static bool WgcSupported() {
 }
 
 void CaptureSession::WarmUp() {
+  // The lock costs nothing here — this runs off every hot path — and it is the only mutator of
+  // d3d_/ctx_ that did not take it. Safe without it today only because the early return cannot fire
+  // while a session is live, which is an invariant spread over three functions with no assert.
+  std::lock_guard<std::mutex> pipeline(pipeline_m_);
   if (d3d_) return; // already built, by a warm-up or by a capture that is still running
   try {
     // Same as StartItem's, and needed for the same reason: COM on this thread. Cheap (0.1 ms
@@ -608,6 +612,8 @@ void CaptureSession::WarmUp() {
     d3d_ = device;
     ctx_ = ctx;
     std::string err;
+    // params_ is deliberately absent below: BuildPipeline does not create it, StartItem does. So a
+    // warm-up skips the constant buffer, which costs microseconds.
     if (!BuildPipeline(&err)) {
       vs_ = nullptr;
       ps_ = nullptr;
@@ -726,7 +732,7 @@ bool CaptureSession::StartItem(ItemTarget target, float sdr_white, napi_threadsa
 
     startup_.rtDevice = since(t_mark);
     auto interop = winrt::get_activation_factory<wgc::GraphicsCaptureItem, ::IGraphicsCaptureItemInterop>();
-    // Remembered for the 2 Hz display poll on the JS thread (see CurrentDisplay). For a monitor
+    // Remembered for the display poll on the JS thread (see CurrentDisplay). For a monitor
     // the device name is fixed for the session; for a window it is resolved each time, because the
     // window can be dragged to another screen.
     window_ = target.window;
@@ -1409,9 +1415,10 @@ napi_value StopCapture(napi_env env, napi_callback_info) {
  * cached. Everything expensive about a start that does not depend on the target: measured at ~96 ms
  * for D3D11CreateDevice plus ~5 for the two HLSL compilations, out of a ~148 ms cold start.
  *
- * Called when the picker opens, from an idle callback — the host has signalled intent, the picker
- * stays up while they read it, and the block lands where nothing else is happening instead of on
- * the "share" click. Best effort in every sense: no error is surfaced, because the only consequence
+ * Two callers, both off a click. The PRELOAD calls it when the picker opens, from an idle callback:
+ * the host has signalled intent, the picker stays up while they read the tiles, and the block lands
+ * there rather than on "share". MAIN calls it just after first paint, because its instance is a
+ * separate process and would otherwise pay the same cost on the first tone-mapped thumbnail. Best effort in every sense: no error is surfaced, because the only consequence
  * of failing is that the start pays what it pays today.
  */
 napi_value WarmUpCapture(napi_env, napi_callback_info) {
@@ -1478,9 +1485,9 @@ napi_value GetCaptureStats(napi_env env, napi_callback_info) {
   num("startupPoolMs", up.pool);
   num("startupSessionMs", up.session);
   num("startupTotalMs", up.total);
-  // Live display state, resolved here on the JS thread. The page polls this at 2 Hz and owns the
+  // Live display state, resolved here on the JS thread. The page polls this at 10 Hz and owns the
   // divisor (reported white x the host's correction), so a window dragged to another screen — or
-  // the Windows SDR brightness slider moving under a share — is picked up within half a second.
+  // the Windows SDR brightness slider moving under a share — is picked up within ~100 ms (POLL_MS).
   const auto display = g_capture.CurrentDisplay();
   num("displaySdrWhiteNits", display.sdr_white_nits);
   flag("displaySdrWhiteMeasured", display.sdr_white_measured);

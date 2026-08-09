@@ -80,6 +80,8 @@ export interface PickOptions {
    *  Receives the source because the caller cannot read it from anywhere else yet: `share` runs
    *  BEFORE pickSource resolves, so the host's own `sourceId` still holds the previous pick. */
   share: (source: NativeSource) => Promise<void>;
+  /** The host's reference-white multiplier, so an HDR screen's tile is exposed like its share. */
+  sdrCorrection: number;
 }
 
 export function pickSource(native: StreamShareNative, opts: PickOptions): Promise<string | null> {
@@ -162,7 +164,7 @@ export function pickSource(native: StreamShareNative, opts: PickOptions): Promis
       // In parallel: the shell listing costs a ~300-550 ms IPC round trip, enumerateDevices is
       // local. Cameras resolve to [] on failure rather than rejecting, so they can never be the
       // reason the screen and window grids come back empty.
-      const [shellSources, cameras] = await Promise.all([native.listSources(), listCameras()]);
+      const [shellSources, cameras] = await Promise.all([native.listSources(opts.sdrCorrection), listCameras()]);
       const sources = [...shellSources, ...cameras];
       // `signal`, not `modal.open`: the dialog element is shared, so `modal.open` answers "is *a*
       // picker open". Dismiss during the ~300-550 ms listing and reopen, and this call would

@@ -43,9 +43,33 @@ export interface NativeCapture {
   stop(): void;
 }
 
-/** Repeater period. Note it doubles as the staleness threshold, so the FIRST repeat lands up to
- *  2×IDLE_REPEAT_MS after the last real frame — the floor is 1-2 fps, not a flat 2. */
+/** How stale the last real frame must be before one is repeated. NOT the timer period any more —
+ *  see POLL_MS — but still the threshold, and still the nominal spacing the repeat TIMESTAMPS
+ *  advance by. Substituting POLL_MS at either of those two places would make repeats claim to be
+ *  100 ms apart while arriving 500 ms apart: RTP timestamps in slow motion. */
 const IDLE_REPEAT_MS = 500;
+/**
+ * Timer period. Split from IDLE_REPEAT_MS because this tick does two unrelated jobs, and only one of
+ * them wanted 500 ms: repeating a stale frame (which is wall-clock guarded below, so ticking faster
+ * changes nothing) and re-reading the display's reference white.
+ *
+ * That second one is why this exists. The white is the tone map's divisor, and a captured WINDOW
+ * dragged from an HDR panel to an SDR one changes it by 6x instantly (480 nits to 80 here). At 500
+ * ms the host saw up to half a second of frames divided by the OLD screen's white — six times too
+ * dark going one way, six times too bright coming back. Reported from real use, not theorised.
+ *
+ * The knob: 100 ms is ~7 frames of wrong tint at 60 fps for one `nativeCaptureStats()` call per
+ * tick (~0.3 ms, dominated by the QueryDisplayConfig the addon does to resolve the display). That
+ * call runs on the RENDERER'S MAIN THREAD, which is what decides how far this can go: 0.3 ms every
+ * 100 ms is ~1.7% of a 60 Hz frame budget, once every sixth frame. Lower it if the flash is still
+ * visible, but price it against that rather than against the 0.3%-of-a-thread aggregate.
+ *
+ * ponytail: the real fix is zero mismatched frames — the addon already calls MonitorFromWindow per
+ * frame (microseconds) and could re-read the white only when the HMONITOR actually changes. That
+ * needs the host's CORRECTION FACTOR pushed down to the addon instead of absolute nits, because the
+ * page owns that multiplication today. An API change and a rebuild, for 100 ms.
+ */
+const POLL_MS = 100;
 /**
  * Consecutive repeats before we stop believing the capture is alive — deliberately far beyond any
  * plausible idle. `closed` is the real signal and it fires immediately; this is only the net for an
@@ -61,14 +85,22 @@ const IDLE_REPEAT_MS = 500;
  * thing that can answer that properly. The upgrade is a real health signal from it (its own frame
  * counter against wall time), not a bigger number here.
  */
-const MAX_REPEATS = 240; // 2 minutes at IDLE_REPEAT_MS
+// 2 minutes. Slightly tighter than it used to be in practice: when the tick and the threshold were
+// both 500 ms, timer jitter made the guard miss every so often and a repeat could land 1 s apart, so
+// 240 of them spanned 2-4 minutes. At POLL_MS the spacing is a reliable 500-600 ms, i.e. the 2
+// minutes this line has always claimed. Left at 240 for that reason.
+const MAX_REPEATS = 240;
 /**
  * The same net for a MINIMISED window, which is a different animal: measured, it produces no frames
  * at all and is never reported closed, so the ordinary counter would end a share after two minutes
  * of a window the host merely put away. Far longer, but not absent — a capture can still die while
  * minimised, and "the addon says nothing" must not mean "repeat for ever".
  */
-const MAX_MINIMIZED_REPEATS = 3600; // 30 minutes
+// 30 minutes, and it tightened with POLL_MS exactly as MAX_REPEATS did: repeats used to land 500 ms
+// or 1000 ms apart depending on timer jitter, so 3600 of them spanned 30-60 minutes and now span
+// 30-36. Noted rather than adjusted, because this is the counter whose false positive KILLS A
+// WORKING SHARE — and the value it lands on is the one this comment always advertised.
+const MAX_MINIMIZED_REPEATS = 3600;
 /** Both thresholds are minutes long by design, and no test can wait them out. Overridable from a
  *  test page only; production never sets it, and reading it costs one property lookup per tick. */
 const limitsOverride = (): { max?: number; minimized?: number } | undefined =>
@@ -110,7 +142,8 @@ export async function captureNative(
   fps?: number,
   /** Called when the display the capture sits on reports a DIFFERENT reference white — a captured
    *  window dragged to another screen, or the Windows SDR brightness slider moved. Polled off the
-   *  repeater, which already ticks at 2 Hz, so this costs no new timer and no new IPC. */
+   *  repeater's tick, so it costs no new timer and no new IPC — and that tick runs at POLL_MS
+   *  rather than the repeat interval precisely because of this callback. See POLL_MS. */
   onDisplayWhite?: (nits: number) => void,
 ): Promise<NativeCapture> {
   const native = window.native;
@@ -310,7 +343,7 @@ export async function captureNative(
     } catch {
       /* the source frame was closed under us; the next real frame restarts the cycle */
     }
-  }, IDLE_REPEAT_MS);
+  }, POLL_MS);
 
   port.onmessage = (event: MessageEvent<VideoFrame>): void => {
     const frame = event.data;

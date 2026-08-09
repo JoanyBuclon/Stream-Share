@@ -548,6 +548,37 @@ app.whenReady().then(async () => {
     result.idle = await run(IDLE, 20_000);
     mover.show();
     await new Promise((r) => setTimeout(r, 500)); // frames flowing again before we measure exposure
+
+    // MAIN captures the same monitor while the page's preload is still capturing it — two WGC
+    // sessions, two PROCESSES, one display. That is what the picker's tone-mapped thumbnails rest
+    // on, and no other gate covers it: the audio one measures WGC against Chromium's own
+    // duplication, which is a different thing entirely. Three unknowns in one shot: main gets a
+    // frame at all, the live share keeps producing, and the tone map really is what main receives —
+    // the pixels have to come back UNCLIPPED, which is the whole point of re-shooting the tile.
+    try {
+      const before = await run('JSON.stringify(window.native.nativeCaptureStats().frames)', 5_000);
+      const addon2 = require(path.join(__dirname, '..', 'electron', 'native', 'build', 'Release', 'streamshare_capture.node'));
+      addon2.startCapture(target.deviceName, target.sdrWhiteNits, undefined, 1);
+      await new Promise((r) => setTimeout(r, 400));
+      const shot = addon2.takeFrame();
+      addon2.stopCapture();
+      const after = await run('JSON.stringify(window.native.nativeCaptureStats().frames)', 5_000);
+      let ceiling = 0;
+      const px = shot.data.byteLength / 4;
+      if (px) {
+        const buf = Buffer.from(shot.data);
+        for (let i = 0; i < buf.length; i += 4) if (buf[i] === 255 || buf[i + 1] === 255 || buf[i + 2] === 255) ceiling++;
+      }
+      result.mainShot = {
+        gotFrame: px > 0,
+        size: `${shot.width}x${shot.height}`,
+        pctAtCeiling: px ? +((100 * ceiling) / px).toFixed(2) : 100,
+        pageFramesDuringOverlap: after - before,
+      };
+    } catch (err) {
+      result.mainShot = { error: String(err) };
+    }
+
     result.toneMap = await run(TONE_MAP(target.sdrWhiteNits), 30_000);
     Object.assign(result, await run(FINISH(target.sdrWhiteNits), 20_000));
   } catch (err) {
@@ -688,6 +719,20 @@ function verdict(r, seconds) {
       pass: (r.fpsCap?.deliveredPerSec ?? 99) <= 11 && (r.fpsCap?.skippedDelta ?? 0) > 0,
       value: r.fpsCap?.error ?? `${r.fpsCap?.deliveredPerSec}/s delivered at a cap of 10, ${r.fpsCap?.skippedDelta} skipped`,
     },
+    // The picker re-shoots HDR screen tiles through the addon because Chromium's are clamped
+    // (measured: 30-53% of pixels at the ceiling against 0% for the same content tone-mapped). That
+    // happens in MAIN, possibly while a share is running in the renderer — so this asserts the whole
+    // arrangement, not just that a frame came back.
+    (() => {
+      const m = r.mainShot ?? {};
+      return {
+        gate: 'main can shoot the same screen while the page is sharing it',
+        pass: m.gotFrame === true && m.pctAtCeiling < 5 && (m.pageFramesDuringOverlap ?? 0) >= 5,
+        value:
+          m.error ??
+          `${m.size} at ${m.pctAtCeiling}% ceiling, page kept ${m.pageFramesDuringOverlap} frames over the 400ms overlap`,
+      };
+    })(),
     // Video-only capture must not cost the share its sound.
     {
       gate: 'system audio survives the native path',

@@ -334,11 +334,17 @@ test('a captured window dragged to another screen follows its reference white', 
   await expect(page.locator('#sdrwhite-value')).toHaveText('480 nits');
 
   // The window moves to the SDR panel: the display now reports 80.
+  const movedAt = Date.now();
   await page.evaluate(() => {
     (window as unknown as { __nativeWhite: number }).__nativeWhite = 80;
   });
   await expect(page.locator('#sdrwhite-value')).toHaveText('80 nits');
   await nativeCalls(page).toMatchObject({ sdrWhite: [80] });
+  // HOW FAST, not just eventually. Every frame between the move and this update is tone-mapped with
+  // the other screen's white — 480 against 80, so six times too dark — and "eventually" passes at
+  // any poll rate because the expect retries. Reported from real use as a visible flash. 350 ms is
+  // the discriminator: POLL_MS=100 lands in ~100-200, the old 500 ms tick in ~500-600.
+  expect(Date.now() - movedAt).toBeLessThan(350);
 
   await ctx.close();
 });
@@ -504,9 +510,20 @@ test('a still screen keeps feeding the encoder', async ({ browser }) => {
     return out;
   });
 
-  // ~500 ms apart over 2.6 s, minus the first repeat which can land up to 2×IDLE_REPEAT_MS after
-  // the last real frame.
   expect(stamps.length).toBeGreaterThanOrEqual(3);
+  // THE SPACING, and it is the only thing guarding the two-constant split in native-video.ts. The
+  // timer now ticks at POLL_MS (100) while repeats stay on IDLE_REPEAT_MS (500), so the obvious
+  // "why are there two of these" cleanup would silently make repeats fire 5x too often and their
+  // timestamps advance 5x too slowly. It used to be unassertable — with the tick and the threshold
+  // both at 500, jitter made a repeat land at 500 ms or at 1000 — which is exactly what the faster
+  // tick fixed: the guard is now sampled every 100 ms, so spacing is 500 ms plus at most one tick.
+  // Exact, not a band: the source is stalled, so these are all repeat-to-repeat, and a repeat's
+  // stamp is the previous one plus IDLE_REPEAT_MS by integer arithmetic. Substituting POLL_MS there
+  // makes every gap 100 and this fails on the first sample instead of drifting.
+  const gaps = stamps.slice(1).map((v, i) => (v - stamps[i]) / 1000); // µs → ms
+  // The FIRST gap can straddle the last real frame, which arrived on its own clock. Every one after
+  // it is repeat to repeat.
+  for (const gap of gaps.slice(1)) expect(gap).toBe(500);
   // Strictly increasing: repeats used to be rebased on the source frame's own timestamp, so every
   // one of them carried the SAME value — which an encoder is entitled to drop, quietly undoing the
   // whole point of the repeater.

@@ -205,6 +205,10 @@ export class HostController {
         picked = await pickSource(native, {
           signal: this.ac.signal,
           currentId: this.sourceId,
+          // So an HDR screen's TILE is exposed like the share it previews. The reported white is a
+          // base the host can be several stops away from (that is what the control is for), and a
+          // tile at the raw value would carry the very error the slider was moved to cancel.
+          sdrCorrection: sdrWhiteFactor(this.sdrStops),
           share: (source) => this.capture(source), // the shell already holds the id; the source says which API to use
         });
       } catch (e) {

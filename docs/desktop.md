@@ -340,6 +340,33 @@ possible :
   rafraîchir voudrait dire re-capturer tous les écrans et fenêtres en boucle
   (mesuré : ~540 ms l'appel avec vignettes, 9 sources). Réouvrir le sélecteur
   suffit.
+- **La vignette d'un écran HDR est re-tirée par l'addon**, parce que celle de
+  Chromium est brûlée. Mesuré sur le même écran, même contenu, à quelques secondes
+  d'écart : `desktopCapturer` rend **30 à 53 % de pixels avec un canal collé à 255**
+  (moyenne 122–189), la lecture tone-mappée **0 %** (moyenne 70–84). C'est le même
+  clamp `[0,1]` que `getDisplayMedia` — le détail des hautes lumières est déjà perdu,
+  donc aucun filtre côté renderer ne le récupère : diviser par 6 aplatirait la moitié
+  écrêtée en gris et écraserait le reste en noir. Il faut une seconde capture.
+  Bout en bout, par le vrai `ss:sources` : **0,06 %** au plafond.
+
+  **Écrans seulement.** Une fenêtre posée sur l'écran HDR mesure propre (max 253,
+  rien au plafond) : `desktopCapturer` lit la surface SDR propre de la fenêtre, pas
+  la lecture composée de l'écran. La condition est écrite `hdr && kind === 'screen'`
+  plutôt que par type seul, pour qu'élargir à une vraie app HDR un jour soit une
+  seule clause. Non vérifié : un jeu avec swapchain HDR.
+
+  Trois précautions, toutes nécessaires : `fps: 1` pour ne produire **qu'une** frame
+  au lieu de ~25 (le scénario visé est le picker ouvert *pendant* un partage, où
+  l'alternative est un second tone map plein débit en 1440p contre celui qui tourne) ;
+  un verrou contre deux listings concurrents, puisque le picker peut être fermé et
+  rouvert pendant les 300–550 ms et que `g_capture` est un singleton dans main aussi ;
+  et une préchauffe au `whenReady` de main, dont l'instance de l'addon est un autre
+  processus et paierait sinon ses ~148 ms de device au premier tirage. Tout est en
+  meilleur effort : le moindre échec garde la vignette de Chromium, et rien ne rejette.
+
+  Que main puisse capturer le même écran pendant que le renderer le partage — deux
+  sessions WGC, deux processus, un écran — est tenu par une porte du harness :
+  0 % au plafond, la page conserve 26 images sur les 400 ms de recouvrement.
 - Le choix est appliqué via `setDisplayMediaRequestHandler`, qui **intercepte** la
   demande de capture et lui passe la source retenue — donc **pas de re-consentement
   navigateur**. En web, `surfaceSwitching: 'include'` permettait déjà de changer de
@@ -776,9 +803,19 @@ faisait pas, et c'était le seul sans garde-fou système.
 Le diviseur reste la propriété du **renderer**, parce que la valeur envoyée est « ce que
 rapporte l'écran × la correction de l'hôte » et que l'addon ignore la correction.
 L'addon publie donc le blanc courant dans `captureStats()`, relu à chaque appel — 0,286 ms
-pour l'interrogation complète des écrans, soit 0,06 % d'un cœur au rythme de 2 Hz auquel
-le répéteur sonde déjà. Bénéfice gratuit : bouger le **curseur SDR de Windows** en cours
-de partage est désormais pris en compte, sur les deux chemins, ce que rien ne détectait.
+pour l'interrogation complète des écrans. Bénéfice gratuit : bouger le **curseur SDR de
+Windows** en cours de partage est désormais pris en compte, sur les deux chemins, ce que
+rien ne détectait.
+
+**Le rythme de cette relecture est un réglage, et il a coûté un bug.** Elle voyageait sur
+le tick du répéteur, à 500 ms, et ça suffit largement pour le curseur SDR — que l'hôte
+bouge lentement, à la main. Ça ne suffit pas du tout pour une **fenêtre traînée d'un écran
+à l'autre** : là le blanc de référence saute de 480 à 80 d'un coup, et jusqu'à une
+demi-seconde de frames partait avec l'ancien diviseur — six fois trop sombre dans un sens,
+six fois trop clair dans l'autre. Remonté depuis l'usage réel. Le timer est désormais
+séparé du seuil de répétition (`POLL_MS` = 100 contre `IDLE_REPEAT_MS` = 500) : ~7 frames
+de teinte fausse au lieu de ~30, pour 0,3 % d'un thread. Le chemin de répétition est gardé
+à l'horloge murale, donc battre plus vite ne change ni sa cadence ni son budget.
 
 ##### La porte de consentement du chemin natif
 

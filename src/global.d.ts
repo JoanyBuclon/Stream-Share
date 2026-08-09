@@ -50,7 +50,11 @@ interface StreamShareNative {
   /** Web origin the shell targets — drives the signaling URL and shareable links. */
   readonly appOrigin: string;
   /** Screens and windows the shell can capture (its own window excluded). */
-  listSources(): Promise<NativeSource[]>;
+  /** `sdrCorrection` is the host's reference-white multiplier (the control in host.ts). The shell
+   *  needs it to tone-map an HDR screen's THUMBNAIL the way the share itself will be: that slider
+   *  exists because the reported white can be wrong by up to 6x, so a tile rendered at the raw
+   *  value is wrong in exactly the way the slider is there to fix. */
+  listSources(sdrCorrection?: number): Promise<NativeSource[]>;
   /** Names the source the next getDisplayMedia call must capture. */
   selectSource(id: string): Promise<void>;
   /** Keep the display awake while a session is live — a process-level `powerSaveBlocker`, which

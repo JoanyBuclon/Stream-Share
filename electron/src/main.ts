@@ -10,6 +10,7 @@ import {
   shell,
   ipcMain,
   desktopCapturer,
+  nativeImage,
 } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import { readFile } from 'node:fs/promises';
@@ -32,7 +33,7 @@ import {
   type NativeDisplay,
   type Listing,
 } from './config.ts';
-import { loadCaptureAddon } from './native-addon.ts';
+import { loadCaptureAddon, type CaptureAddon } from './native-addon.ts';
 
 const execFile = promisify(execFileCb);
 
@@ -245,6 +246,13 @@ app.whenReady().then(() => {
 
   createWindow();
   watchDisplayChanges();
+  // Main's addon instance is a different process from the preload's, so it has its own cold start:
+  // ~115 ms (device, IsSupported, two shader compilations) the FIRST time it captures anything, and
+  // that first time is now the picker re-shooting an HDR tile. Paid here instead — but AFTER first
+  // paint, not inline: this is synchronous C++ on main's JS thread, the same thread that answers
+  // the renderer's synchronous `ss:config`, so running it next to createWindow() would stall the
+  // window coming up. Best effort; failing only means the picker pays what it used to.
+  setTimeout(() => captureAddon()?.warmUpCapture?.(), 0);
 
   // Auto-update only makes sense on an installed build (dev has no publish channel).
   if (app.isPackaged) {
@@ -297,8 +305,100 @@ function nativeDisplays(): NativeDisplay[] {
 }
 
 // Everything the picker grid needs, already serialisable (NativeImage doesn't cross IPC). The
+/**
+ * Re-shoot the tiles of HDR screens through the addon, because Chromium's are burnt.
+ *
+ * Measured on the same screen with the same content, seconds apart: the desktopCapturer thumbnail
+ * has 30-53% of its pixels with a channel pinned at 255 and a mean luma of 122-189; the addon's
+ * tone-mapped readback has 0% at the ceiling and a mean of 70-84. That is the same [0,1] clamp
+ * getDisplayMedia applies, so the highlight detail is already gone — no amount of scaling in the
+ * renderer brings it back, which is why this has to be a second capture rather than a filter.
+ *
+ * Screens only: a WINDOW on an HDR screen measured clean (max 253, nothing at the ceiling), because
+ * desktopCapturer grabs the window's own SDR surface rather than the composited HDR readback. The
+ * condition is written as `hdr && kind === 'screen'` rather than by kind alone so that widening it
+ * to a genuinely HDR app one day is a single clause.
+ *
+ * Best effort throughout: the picker must list whatever the native side is doing, so every failure
+ * keeps Chromium's thumbnail and nothing rejects.
+ */
+let shooting = false; // one at a time: g_capture is a singleton in main too
+async function tonemappedThumbnails(listing: Listing, sdrCorrection: number): Promise<void> {
+  const addon = captureAddon();
+  // `shooting` matters because the picker can be dismissed and reopened during the 300-550 ms
+  // listing (source-picker.ts says so): two overlapping runs would have one stopCapture() kill the
+  // other's session, or takeFrame() hand the wrong screen's pixels to a tile.
+  if (!addon || shooting) return;
+  shooting = true;
+  // ONE budget for the whole listing, not one per screen. A still screen legitimately produces
+  // nothing and costs the full wait, so per-screen ceilings multiply: three idle HDR panels would
+  // have added 1.2 s to a listing the docs already call 300-550 ms, with the picker showing nothing
+  // until it resolved. Whatever is left over keeps Chromium's tile, which is the pre-existing
+  // behaviour and never worse than it.
+  const deadline = Date.now() + 500;
+  try {
+    for (const source of listing.sources) {
+      if (!source.hdr || source.kind !== 'screen') continue;
+      const target = listing.devices.get(source.id);
+      if (!target || !('deviceName' in target)) continue;
+      // PER SCREEN, not around the loop: one display that refuses (a driver that dislikes a second
+      // session, an output unplugged between the listing and here) must cost that tile its tone map
+      // and nothing else. Wrapping the loop instead let the first failure skip every screen after
+      // it — invisible with the single HDR panel this was written on.
+      try {
+        // fps 1: one tone-mapped frame instead of ~25. The named scenario is the host opening the
+        // picker DURING a share, where the alternative is a second full-rate 1440p tone map running
+        // against the live one. The cap is applied before the GPU work, so the rest costs nothing.
+        //
+        // Times the host's correction, exactly as the share computes it (host.ts's reference-white
+        // control). Fixing only the clipping and leaving the exposure would have been half a fix:
+        // that slider exists BECAUSE the reported white can be wrong by up to 6x, so a tile at the
+        // raw value carries the very error the host moved it to cancel.
+        const base = source.sdrWhiteMeasured ? source.sdrWhiteNits : 80;
+        addon.startCapture(target.deviceName, Math.round(base * sdrCorrection), undefined, 1);
+        const frame = await firstFrame(addon, deadline);
+        if (!frame) continue; // WGC is change-driven: a perfectly still screen owes us nothing
+        const shot = nativeImage
+          // Safe to hand straight over: takeFrame memcpys into a fresh ArrayBuffer rather than
+          // exposing the reused push buffer that native-addon.ts warns about, and the addon's BGRA8
+          // is the byte order createFromBitmap wants on Windows.
+          .createFromBitmap(Buffer.from(frame.data), { width: frame.width, height: frame.height })
+          // Width only — pinning both axes distorts anything that is not 16:9.
+          .resize({ width: 320 });
+        source.thumbnail = `data:image/jpeg;base64,${shot.toJPEG(70).toString('base64')}`;
+      } catch (err) {
+        console.error(`stream-share: no tone-mapped tile for ${source.name}, keeping the clamped one`, err);
+      } finally {
+        // Runs on the `continue` above as well, which is the point: a screen that produced nothing
+        // must not leave its session open for the next iteration to trip over.
+        addon.stopCapture();
+      }
+    }
+  } finally {
+    // No catch out here any more — each screen owns its own. This exists solely so `shooting` is
+    // released even if something unforeseen escapes the loop, because a stuck flag would silently
+    // disable tone-mapped tiles for the rest of the session.
+    shooting = false;
+  }
+}
+
+/** Poll for the one frame the capture above was started for, until the listing's shared deadline. */
+async function firstFrame(addon: CaptureAddon, deadline: number): Promise<ReturnType<CaptureAddon['takeFrame']> | null> {
+  // Look BEFORE sleeping: this is additive on the picker's critical path and sleeping first charged
+  // every screen 40 ms for a frame that may already be sitting there. On this HDR desktop one lands
+  // in well under 100 ms.
+  while (Date.now() < deadline) {
+    const frame = addon.takeFrame();
+    // BOTH, and not `if (frame)`: TakeFrame moves the pixel vector out but leaves width/height set,
+    // so a second poll after a successful one reports a size with no bytes behind it.
+    if (frame.width && frame.data.byteLength) return frame;
+    await new Promise((r) => setTimeout(r, 40));
+  }
+  return null;
+}
+
 // mapping itself is pure and lives in config.ts — this is the IO around it.
-ipcMain.handle('ss:sources', async (event) => {
+ipcMain.handle('ss:sources', async (event, sdrCorrection: unknown) => {
   // Defence in depth: only our own bundle may enumerate windows. A thumbnail of every open
   // window is exactly the kind of thing that must not become reachable from foreign content.
   if (!isInternalUrl(event.senderFrame?.url ?? '')) return [];
@@ -315,11 +415,21 @@ ipcMain.handle('ss:sources', async (event) => {
   // The addon resolves a window handle to the display it sits on; nothing else can, which is why
   // sharing an app on an HDR screen took the clamped path until now.
   const addon = captureAddon();
-  lastListing = pickerSources(sources, screen.getAllDisplays(), nativeDisplays(), own, (hwnd) => ({
+  const listing = pickerSources(sources, screen.getAllDisplays(), nativeDisplays(), own, (hwnd) => ({
     device: addon?.displayForWindow(hwnd) ?? null,
     pid: addon?.windowPid(hwnd) ?? null,
   }));
-  return lastListing.sources;
+  lastListing = listing;
+  // A LOCAL, not `lastListing`, and that is load-bearing now that there is an await below: the
+  // picker can be dismissed and reopened mid-listing, and a second call would reassign the global
+  // while this one is suspended — so this call would go on to return the OTHER listing's sources.
+  // Harmless today because the consent gate reads the global too, but only by accident.
+  //
+  // After the pure mapping, never inside it: config.ts stays testable without a GPU. The correction
+  // is validated here rather than trusted — it crosses IPC, and it ends up multiplying a divisor.
+  const factor = typeof sdrCorrection === 'number' && sdrCorrection > 0 && sdrCorrection <= 8 ? sdrCorrection : 1;
+  await tonemappedThumbnails(listing, factor);
+  return listing.sources;
 });
 
 // --- per-app audio (WASAPI process loopback) ---

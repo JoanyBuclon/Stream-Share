@@ -63,7 +63,7 @@ function pushFrame(frame: NativeFrame): void {
 // custom source picker needs: list what can be captured, then name the pick.
 contextBridge.exposeInMainWorld('native', {
   appOrigin: config.appOrigin,
-  listSources: () => {
+  listSources: (sdrCorrection?: number) => {
     // The picker is opening, so a native capture is one click away. Build the D3D device and the
     // tone-map pipeline NOW: they do not depend on which source is picked, and they are ~100 ms of
     // the ~185 ms that `startNativeCapture` otherwise spends on this very thread, holding the UI
@@ -74,7 +74,7 @@ contextBridge.exposeInMainWorld('native', {
     // in the gap while the host reads the tiles. Main's copy of the addon is a DIFFERENT instance —
     // the capture runs in this one, so warming main's would buy nothing.
     requestIdleCallback(() => addon?.warmUpCapture?.());
-    return ipcRenderer.invoke('ss:sources');
+    return ipcRenderer.invoke('ss:sources', sdrCorrection);
   },
   // Awaited by the renderer: main must hold the id before getDisplayMedia is called.
   selectSource: (id: string) => ipcRenderer.invoke('ss:select-source', id),
