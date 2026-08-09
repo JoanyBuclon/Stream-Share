@@ -544,10 +544,31 @@ il tourne.
 > exacte que l'en-tête de `native-addon.ts` prétendait empêcher. Corrigé et vérifié :
 > le fichier est présent dans `resources/` de l'app packagée.
 >
-> Note d'environnement : `electron-builder` échoue en `EPERM` quand il écrit dans
-> `release/` sur `H:` (au dépaquetage d'Electron, avant nos ressources). Pour
-> vérifier, sortir ailleurs :
-> `pnpm exec electron-builder --dir --config.directories.output=C:\Temp\ss-pack`.
+> **Le `EPERM` au packaging n'avait rien à voir avec le disque, et cette note disait le
+> contraire.** Symptôme :
+> `EPERM: operation not permitted, rename 'release\win-unpacked.tmp' -> 'release\win-unpacked'`,
+> au dépaquetage d'Electron, avant nos ressources. On l'a mis des jours sur le compte de
+> `H:` (voire de Defender) parce que sortir vers `C:\Temp` réussissait.
+>
+> Cause réelle, mesurée le 2026-08-09 : **le serveur de dev Astro**. Vite surveille tout
+> le projet avec chokidar, qui ouvre un handle de répertoire sur chaque dossier au fur et
+> à mesure qu'il apparaît — y compris `win-unpacked.tmp`, tout juste créé. Sous Windows,
+> renommer un répertoire échoue tant que quelqu'un tient un handle dessus. `C:\Temp`
+> marchait parce qu'il est **hors de l'arbre surveillé**, pas parce que c'est `C:`.
+>
+> A/B, même dossier sur `H:` : dev server allumé → `EPERM` ; dev server arrêté →
+> `exit 0`, `resources/` complet. Correctif permanent dans `astro.config.mjs`
+> (`server.watch.ignored` sur `electron/release` et `electron/out`) ; re-vérifié dev
+> server allumé → `exit 0`. Le renommage à la main échouait aussi, ce qui a écarté
+> electron-builder du banc des accusés en une commande.
+>
+> **Portée : locale seulement.** La CI n'a jamais rencontré ça — le job `desktop` tourne
+> sur un runner `windows-latest` neuf, sans serveur de dev, et les huit releases publiées
+> portent bien leurs trois artefacts (v0.4.2 : installeur 99,9 Mo, `.blockmap`,
+> `latest.yml`). Ce que l'EPERM empêchait, c'est de **vérifier un build packagé ici** — et
+> c'est précisément le seul endroit d'où se voit la panne décrite juste au-dessus : un
+> `extraResources` manquant laisse la CI verte, la release publiable, l'installeur
+> fonctionnel, et la feature absente sans une seule erreur.
 
 Première pièce, l'**interrupteur** : `IDXGIOutput6::GetDesc1` rend l'espace
 colorimétrique *courant* du compositeur (`G2084` = HDR allumé). Le web ne sait pas

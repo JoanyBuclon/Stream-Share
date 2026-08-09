@@ -6,6 +6,15 @@ import tailwindcss from '@tailwindcss/vite';
 export default defineConfig({
   vite: {
     plugins: [tailwindcss()],
+    // Keep the dev server's watcher out of the desktop build outputs. Not tidiness — it is what
+    // makes `pnpm dist` fail. Vite watches the whole project with chokidar, which opens a directory
+    // handle per directory as they appear; electron-builder extracts Electron into
+    // `electron/release/win-unpacked.tmp` and then RENAMES that directory, and on Windows a rename
+    // fails with EPERM while anyone holds a handle to it. Measured: identical pack, dev server up →
+    // `EPERM … rename 'win-unpacked.tmp' -> 'win-unpacked'`; dev server down → exit 0. Nothing to do
+    // with the H: drive or with Defender, which is what this was blamed on for days.
+    // Merged with Vite's own defaults (node_modules, .git), not replacing them.
+    server: { watch: { ignored: ['**/electron/release/**', '**/electron/release', '**/electron/out/**'] } },
   },
 
   // Self-hosted Hanken Grotesk (the mockup's typeface) — downloaded + served from our origin at
