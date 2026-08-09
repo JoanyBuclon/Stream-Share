@@ -120,9 +120,12 @@ contextBridge.exposeInMainWorld('native', {
    *
    * The page must already be listening for `{ streamShare: 'frames' }` when it calls this.
    */
-  startNativeCapture: (sdrWhiteNits?: number, fps?: number) => {
+  startNativeCapture: (sdrWhiteNits?: number, fps?: number, expectId?: string) => {
     if (!addon) throw new Error('native capture unavailable');
-    const approved = ipcRenderer.sendSync('ss:approved-device') as NativeTarget | null;
+    // `expectId` is forwarded, not checked here: the preload does not know what the page committed
+    // to either. It is main that holds the pick, so main is the only side that can tell the two
+    // apart — see the handler for what a mismatch means.
+    const approved = ipcRenderer.sendSync('ss:approved-device', expectId) as NativeTarget | null;
     // Shape-checked, not just truthy: a caller wired to an older main would hand back the bare
     // device name this used to return, and `'hwnd' in <string>` throws something unreadable.
     if (!approved || typeof approved !== 'object') throw new Error('nothing was picked by the user');
@@ -137,6 +140,9 @@ contextBridge.exposeInMainWorld('native', {
     // script that grabbed it first would both see every frame and strand the real consumer.
     window.postMessage({ streamShare: 'frames' }, location.origin, [channel.port2]);
   },
+  /** Whether the source the caller names is on an HDR display right now — see the `ss:picked-hdr`
+   *  handler for the two ways the picker's snapshot goes stale under a live share. */
+  pickedSourceHdr: (expectId: string) => ipcRenderer.invoke('ss:picked-hdr', expectId),
   setCaptureFps: (fps: number) => addon?.setFps(fps),
   setSdrWhite: (nits: number) => addon?.setSdrWhite(nits),
   stopNativeCapture: () => {

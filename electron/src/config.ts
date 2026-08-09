@@ -84,10 +84,22 @@ export interface NativeDisplay {
 }
 
 /** The bits of an Electron `Display` this needs. `bounds` is in DIP; multiplying by `scaleFactor`
- *  gives the physical rectangle the addon speaks in. */
+ *  gives the physical rectangle the addon speaks in — except for the origin, which is why
+ *  `nativeOrigin` is here too. See `nativeDisplayFor`. */
 export interface DipDisplay {
   bounds: { x: number; y: number; width: number; height: number };
   scaleFactor: number;
+  /** The display's origin in PHYSICAL pixels, straight from Chromium's own `MONITORINFO` rather
+   *  than re-derived from DIP.
+   *
+   *  Optional HERE only. Electron 43 types it `nativeOrigin: Point`, non-optional, and its prose
+   *  caveat ("X11-like systems only") is contradicted by measurement — populated and correct on
+   *  Windows (tools/display-match-probe.cjs). So the `?` is ours: this interface is structural so
+   *  it can be exercised without Electron, and the DIP fallback in `nativeDisplayFor` is a test
+   *  path rather than a production one. Note the fallback triggers on the property being ABSENT,
+   *  not on `{x: 0, y: 0}` — which is the primary display's honest origin, and would send it down
+   *  the fallback for nothing. */
+  nativeOrigin?: { x: number; y: number };
 }
 
 /**
@@ -101,14 +113,25 @@ export interface DipDisplay {
  * HDR and the app quietly stays on the clamped path, with a correct-looking picker and no error
  * anywhere. Nobody would find that from a bug report saying "colours are still washed out".
  *
- * Origin first, size second. Two displays cannot share an origin, whereas two identical monitors
- * share a size — matching on size alone would pick whichever came first and be wrong exactly half
- * the time on the most ordinary dual-monitor setup there is.
+ * Origin only. Two displays cannot share one, whereas two identical monitors share a size —
+ * matching on size would pick whichever came first and be wrong exactly half the time on the most
+ * ordinary dual-monitor setup there is.
+ *
+ * **`nativeOrigin` first, and the multiplication only as a fallback.** `bounds.x * scaleFactor` is
+ * not a display's physical left, and the difference is not rounding: Electron lays the desktop out
+ * in DIP SPACE, so a secondary display's DIP origin is the accumulated *scaled* width of everything
+ * to its left. Two monitors, primary 3840×2160 at 150% and secondary 1920×1080 at 100%: Windows
+ * puts the secondary at physical x=3840, Electron reports DIP x=2560, and 2560×1 = 2560. No match,
+ * `hdr: false`, an HDR screen silently on the clamped path — on the setup this whole file exists to
+ * serve. Sizes never drift that way (a display's own width IS scaled by its own factor), but sizes
+ * cannot identify. `nativeOrigin` is Chromium's own `MONITORINFO` rectangle, so it is right by
+ * construction and needs no arithmetic from us.
  */
 export function nativeDisplayFor(displays: readonly NativeDisplay[], display: DipDisplay): NativeDisplay | null {
   const scale = display.scaleFactor || 1;
-  const x = Math.round(display.bounds.x * scale);
-  const y = Math.round(display.bounds.y * scale);
+  const origin = display.nativeOrigin;
+  const x = origin ? origin.x : Math.round(display.bounds.x * scale);
+  const y = origin ? origin.y : Math.round(display.bounds.y * scale);
   // A pixel of slack: DIP→physical rounds, and a 150% scaled 1707-DIP bound comes back as 2560 or
   // 2561 depending on which way the division fell. Demanding equality would drop such a display.
   const near = (a: number, b: number): boolean => Math.abs(a - b) <= 1;
@@ -163,8 +186,10 @@ export type NativeTarget = { deviceName: string } | { hwnd: number; pid: number 
 /** What the picker gets, plus the id→target table the consent gate reads. */
 export interface Listing {
   sources: PickerSource[];
-  /** Sources the native path is offered for, by picker id. Kept in main and NEVER sent to the
-   *  renderer — the page picks a source, it does not name a display or a window handle. */
+  /** Every source that could be RESOLVED to something the addon can capture, by picker id — not
+   *  the set the native path is offered for, which is `hdr` on each source and is decided
+   *  separately. See where this is built for why the two came apart. Kept in main and NEVER sent to
+   *  the renderer: the page picks a source, it does not name a display or a window handle. */
   devices: Map<string, NativeTarget>;
 }
 
@@ -212,11 +237,22 @@ export function pickerSources(
         kind === 'screen'
           ? (display && nativeDisplayFor(native, display)) || null
           : (win.device !== null && native.find((d) => d.deviceName === win.device)) || null;
-      // HDR only, so the table holds exactly the sources for which the native path is on offer —
-      // `hdr` below is what the renderer routes on, and a gate that approves more than that is a
-      // gate that is wider than the feature. A window also needs its pid resolved, or there is
-      // nothing to re-check the handle against later — see NativeTarget.
-      if (output?.hdr) {
+      // Every source that can be NAMED, not only the HDR ones. This is the id→target table; it is
+      // not the decision to offer HDR, which is `hdr` below and is unchanged.
+      //
+      // It was HDR-only, on the grounds that a gate wider than the feature is a gate to close again
+      // later. The feature is now genuinely wider: a window picked while it sat on the SDR monitor
+      // has to become approvable once it is dragged onto the HDR one, without a re-pick, and a
+      // capture restarting after HDR was switched OFF needs the same. And the narrowness never
+      // bought a capability barrier — `setDisplayMediaRequestHandler` already hands the renderer
+      // full video of whatever `selectedSourceId` names, with no HDR condition and no OS prompt
+      // behind it. Same single pick, same surface, a different codec path. What bounds this is the
+      // pick, which is set only by `ss:select-source` and must be echoed back by the caller (see
+      // `approvedTargetFor` and the `expectId` check in main.ts).
+      //
+      // A window still needs its pid resolved, or there is nothing to re-check the handle against
+      // later — see NativeTarget.
+      if (output) {
         if (hwnd === null) devices.set(s.id, { deviceName: output.deviceName });
         else if (win.pid !== null) devices.set(s.id, { hwnd, pid: win.pid });
       }
@@ -263,7 +299,8 @@ export function pickerSources(
 }
 
 /**
- * The one display the renderer may capture natively, or '' for "none".
+ * The one surface the renderer may capture natively — a screen's device name or a window's
+ * handle — or null for "none".
  *
  * Read straight out of the listing the user picked from, so what is approved is by construction the
  * same screen the picker showed. An id that was never listed — a renderer that skipped the picker,

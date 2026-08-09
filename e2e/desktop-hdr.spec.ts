@@ -408,7 +408,14 @@ test('an older shell that cannot set the reference white still captures, without
 // The failure the repeater nearly created. WGC only produces a frame when something CHANGES, so
 // native-video.ts repeats the last one on a still screen — which makes a DEAD capture
 // indistinguishable from an idle one: green stats, a "live" badge, and viewers looking at one
-// frozen image. Win+Alt+B (turn HDR off) gets there in one keystroke.
+// frozen image.
+//
+// The share ENDS here; it is not recaptured. A version of this feature restarted a screen whose
+// item had closed, on the reasoning that the monitor is usually still present — with Win+Alt+B as
+// the named case. tools/hdr-toggle-recovery.cjs measured that case and it does not close the item
+// at all (the capture keeps running and the white moves), so the recovery was answering a question
+// nobody had; the remaining closer for a monitor would be an unplug, where restarting is the wrong
+// reflex. See onSourceEnded.
 test('a capture that dies ends the share instead of freezing on the last frame', async ({ browser }) => {
   const ctx = await browser.newContext();
   const page = await ctx.newPage();
@@ -417,8 +424,6 @@ test('a capture that dies ends the share instead of freezing on the last frame',
   await shareHdrScreen(page);
   await previewHeight(page).toBe(720);
 
-  // The frames stop AND the addon reports the capture item gone — what actually happens when the
-  // display switches out of HDR mode.
   await page.evaluate(() => {
     (window as unknown as { __nativeClosed: boolean }).__nativeClosed = true;
   });
@@ -428,10 +433,11 @@ test('a capture that dies ends the share instead of freezing on the last frame',
   // And the session is released, not just the track: stopSource has to reach the shell.
   await nativeCalls(page).toMatchObject({ stopped: 1 });
   // …and the host is TOLD. A share that ends by itself and leaves them on "choose source" with no
-  // explanation is the worst version of this: the likeliest cause is one keystroke away, so the
-  // message names it.
+  // explanation is the worst version of this. The wording names the display rather than Win+Alt+B,
+  // which it used to: an HDR toggle is measured NOT to cause this, and a message naming a cause
+  // that cannot produce the effect sends the host to fix the wrong thing.
   await expect(page.locator('#host-ended-reason')).toBeVisible();
-  await expect(page.locator('#host-ended-reason')).toContainText('Win+Alt+B');
+  await expect(page.locator('#host-ended-reason')).toContainText('display changed or was disconnected');
 
   // And it does not linger: stopping the next share on purpose needs no explanation.
   await page.click('#btn-choose-source');
@@ -445,11 +451,15 @@ test('a capture that dies ends the share instead of freezing on the last frame',
   await ctx.close();
 });
 
-// The same death, one keystroke earlier: HDR switched off between the pick and the first frame.
-// `last` is null, so the repeater's "nothing to repeat" guard used to swallow the whole check and
-// the host sat on a BLACK preview labelled live, for ever — worse than the frozen frame above, and
-// invisible to every other test here, all of which wait for a frame before doing anything.
-test('a capture that dies before its first frame ends the share too', async ({ browser }) => {
+// The same death one keystroke earlier: the item is closed BEFORE the first frame. `last` is null,
+// so the repeater's "nothing to repeat" guard used to swallow the whole check and the host sat on a
+// BLACK preview labelled live, for ever — worse than the frozen frame above, and invisible to every
+// other test here, all of which wait for a frame before doing anything.
+//
+// On a WINDOW, which is the only closer anyone has measured (`GraphicsCaptureItem::Closed` does
+// fire when the window is destroyed — tools/window-hdr-probe.cjs), and which earns its own message:
+// the app is gone, and its handle may already belong to another process since Windows recycles them.
+test('a capture that dies before its first frame ends the share too, and names the app', async ({ browser }) => {
   const ctx = await browser.newContext();
   const page = await ctx.newPage();
   await fakeDisplayMedia(page, { audio: true });
@@ -458,10 +468,131 @@ test('a capture that dies before its first frame ends the share too', async ({ b
   await page.addInitScript(() => {
     (window as unknown as { __nativeClosed: boolean }).__nativeClosed = true;
   });
-  await shareHdrScreen(page);
+  await openPicker(page);
+  await pick(page, 'window', 'Elden Ring');
 
   await expect(page.locator('#host-empty')).toBeVisible({ timeout: 5000 });
   await expect(page.locator('#host-live-badge')).toBeHidden();
+  await expect(page.locator('#host-ended-reason')).toContainText('That app closed');
+  // Exactly one start, ever. A dead capture is never restarted — and for a window in particular,
+  // restarting could capture whatever process inherited the handle.
+  await nativeCalls(page).toMatchObject({ started: [{ device: 'hwnd:4242' }] });
+
+  await ctx.close();
+});
+
+// Blind spot (b): `hdr` is decided when the picker lists. A window picked while it sat on the SDR
+// monitor kept that verdict for ever, however far the host dragged it — the share stayed washed out
+// with only the "captured without HDR" chip to show for it. (The other direction already worked: a
+// native capture follows the reference white across screens.) Nothing re-lists when a window moves,
+// and no Electron event fires either, so the renderer asks.
+test('a clamped window dragged onto an HDR screen is upgraded to native, keeping its sound', async ({ browser }) => {
+  const ctx = await browser.newContext();
+  const page = await ctx.newPage();
+  await fakeDisplayMedia(page, { audio: true, sizes: [[1920, 1080]] });
+  await fakeNative(page, { nativeCapture: 'ok' });
+  await openPicker(page);
+  await pick(page, 'window', 'Discord'); // SDR in the listing → the clamped getDisplayMedia path
+
+  await previewHeight(page).toBe(1080);
+  await expect(page.locator('#host-hdr-clamped')).toBeHidden(); // an SDR source is not "clamped"
+  const audioTrackId = await page.evaluate(
+    () => ((document.getElementById('host-video') as HTMLVideoElement).srcObject as MediaStream).getAudioTracks()[0]?.id,
+  );
+  expect(audioTrackId).toBeTruthy();
+
+  // The host drags it onto the HDR panel. Only the shell can see this.
+  await page.evaluate(() => {
+    (window as unknown as { __hdrNow: Record<string, unknown> }).__hdrNow = {
+      'window:12:0': { hdr: true, sdrWhiteNits: 480, sdrWhiteMeasured: true },
+    };
+  });
+
+  // The HANDLE, not the display underneath it — and at the white the shell reports NOW, not the 0
+  // the listing carried for an SDR window. A divisor of 0 would be a division by zero in the shader.
+  await nativeCalls(page).toMatchObject({ started: [{ device: 'hwnd:12', sdrWhiteNits: 480 }] });
+  await previewHeight(page).toBe(720); // the native producer's size, so frames really switched over
+  await expect(page.locator('#host-live-badge')).toBeVisible();
+  await expect(page.locator('#host-source-name')).toHaveText('Discord');
+  // The loopback track getDisplayMedia handed over is carried across, alive. The native capture
+  // produces no audio of its own and cannot ask for any — `getDisplayMedia` needs a user gesture
+  // and this runs off a timer — so losing it here would silently mute the share for good.
+  expect(
+    await page.evaluate(() => {
+      const tracks = ((document.getElementById('host-video') as HTMLVideoElement).srcObject as MediaStream).getAudioTracks();
+      return tracks.map((t) => ({ id: t.id, state: t.readyState }));
+    }),
+  ).toEqual([{ id: audioTrackId, state: 'live' }]);
+  // …and its video sibling is stopped: the whole point is to stop paying for the clamped capture.
+  await displayMediaCalls(page).toMatchObject([{ audio: true, videoStopped: true }]);
+
+  await ctx.close();
+});
+
+// An upgrade that keeps failing must give up. The watcher ticks for the whole life of a clamped
+// share, and each attempt is ~171 ms of synchronous C++ on the renderer's main thread — retrying
+// every 2 s for ever is silent jank on a live share with no ceiling. And the share it is upgrading
+// must survive every one of those failures untouched: nothing has been torn down when a start
+// throws, which is the whole reason swapToNative returns false instead of raising.
+test('an upgrade that keeps failing gives up, and never disturbs the share it could not upgrade', async ({ browser }) => {
+  const ctx = await browser.newContext();
+  const page = await ctx.newPage();
+  await fakeDisplayMedia(page, { audio: true, sizes: [[1920, 1080]] });
+  await fakeNative(page, { nativeCapture: 'ok' });
+  await openPicker(page);
+  await pick(page, 'window', 'Discord');
+  await previewHeight(page).toBe(1080);
+
+  await page.evaluate(() => {
+    (window as unknown as { __nativeFail: boolean }).__nativeFail = true;
+    (window as unknown as { __hdrNow: Record<string, unknown> }).__hdrNow = {
+      'window:12:0': { hdr: true, sdrWhiteNits: 480, sdrWhiteMeasured: true },
+    };
+  });
+
+  // Three attempts at a 2 s tick, then silence. The upper bound is what matters, so give the
+  // watcher several more ticks' worth of room than the budget allows before counting.
+  await nativeCalls(page).toMatchObject({ started: [{}, {}, {}] });
+  await page.waitForTimeout(6000);
+  expect(await page.evaluate(() => (window as unknown as { __native: NativeCalls }).__native.started.length)).toBe(3);
+  // The clamped share is exactly as it was: same source, same size, still live, and still only the
+  // one getDisplayMedia call it started with.
+  await expect(page.locator('#host-live-badge')).toBeVisible();
+  await expect(page.locator('#host-source-name')).toHaveText('Discord');
+  await previewHeight(page).toBe(1080);
+  await displayMediaCalls(page).toHaveLength(1);
+
+  await ctx.close();
+});
+
+// The silent source substitution the `expectId` echo exists to stop. The shell's `selectedSourceId`
+// moves the instant the picker confirms, while the capture behind it can still fail — so the shell
+// can be approving a source the page never committed to. Harmless while every native start sat
+// inside the click that made the pick; the HDR watcher above starts one off a TIMER, and without
+// the echo it would have captured whatever the shell was holding and relabelled the stage with it.
+test('a pick the host never committed to is never swapped into the live share', async ({ browser }) => {
+  const ctx = await browser.newContext();
+  const page = await ctx.newPage();
+  await fakeDisplayMedia(page, { audio: true, sizes: [[1920, 1080]] });
+  await fakeNative(page, { nativeCapture: 'ok' });
+  await openPicker(page);
+  await pick(page, 'window', 'Discord');
+  await previewHeight(page).toBe(1080);
+
+  // The shell is left holding a DIFFERENT source — the state after a pick whose capture failed —
+  // and that source is on an HDR display, i.e. everything the watcher is looking for.
+  await page.evaluate(() => {
+    (window as unknown as { __picked: string }).__picked = 'screen:0:0';
+    (window as unknown as { __hdrNow: Record<string, unknown> }).__hdrNow = {
+      'screen:0:0': { hdr: true, sdrWhiteNits: 480, sdrWhiteMeasured: true },
+    };
+  });
+
+  // Three watcher ticks' worth. Nothing starts, and the share stays what the host chose.
+  await page.waitForTimeout(6000);
+  expect(await page.evaluate(() => (window as unknown as { __native: NativeCalls }).__native.started)).toEqual([]);
+  await expect(page.locator('#host-source-name')).toHaveText('Discord');
+  await previewHeight(page).toBe(1080);
 
   await ctx.close();
 });

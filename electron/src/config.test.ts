@@ -170,6 +170,25 @@ test('nativeDisplayFor: convertit les DIP en pixels physiques', () => {
   assert.equal(nativeDisplayFor(DISPLAYS, nowhere), null);
 });
 
+// L'angle mort que la multiplication ne peut pas couvrir, et pourquoi `nativeOrigin` passe devant.
+// En DPI MIXTE, l'origine DIP d'un écran secondaire est la largeur *mise à l'échelle* de tout ce
+// qui est à sa gauche — pas sa position physique. Ici : primaire 2560 physiques à 150 % (donc 1707
+// en DIP), secondaire à 100 % posé juste après. Windows le met à x=2560, Electron annonce x=1707,
+// et 1707 × 1 = 1707. Aucune correspondance : l'écran est en HDR et part quand même sur le chemin
+// clampé, sans une seule erreur nulle part. C'est le mode d'échec que ce fichier existe pour tuer.
+test('nativeDisplayFor: nativeOrigin rattrape ce que le DPI mixte casse', () => {
+  const mixed = { bounds: { x: 1707, y: 0, width: 1920, height: 1080 }, scaleFactor: 1 };
+  assert.equal(nativeDisplayFor(DISPLAYS, mixed), null, 'sans nativeOrigin, l écran est perdu');
+  assert.equal(
+    nativeDisplayFor(DISPLAYS, { ...mixed, nativeOrigin: { x: 2560, y: 0 } })?.deviceName,
+    String.raw`\\.\DISPLAY5`,
+  );
+  // Et il fait autorité, y compris quand les deux répondent : c'est le rectangle que Chromium a
+  // lu dans MONITORINFO, la multiplication n'est qu'un repli.
+  const both = { bounds: { x: 0, y: 0, width: 1920, height: 1080 }, scaleFactor: 1, nativeOrigin: { x: 2560, y: 0 } };
+  assert.equal(nativeDisplayFor(DISPLAYS, both)?.deviceName, String.raw`\\.\DISPLAY5`);
+});
+
 test('nativeDisplayFor: tolère un pixel d écart, et rend null sans correspondance', () => {
   // 1706.67 DIP x 1.5 = 2560.005 → l arrondi peut tomber à 1 près dans un sens ou dans l autre.
   const rounded = { bounds: { x: 1706.67, y: 0, width: 100, height: 100 }, scaleFactor: 1.5 };
@@ -209,11 +228,27 @@ test('pickerSources: le HDR est par source, pas par machine', () => {
   assert.equal(sources.some((s) => JSON.stringify(s).includes('DISPLAY')), false);
 });
 
-test('pickerSources: la table des périphériques se limite aux écrans HDR appariés', () => {
+// La table couvre TOUTE source nommable, HDR ou non — et ce n'est pas un relâchement de la porte.
+// Elle était limitée au HDR au nom de « pas de porte plus large que la fonctionnalité » ; la
+// fonctionnalité est maintenant réellement plus large (une fenêtre choisie sur l'écran SDR puis
+// glissée sur l'écran HDR doit devenir approuvable sans re-choisir, et une capture qui redémarre
+// après une extinction du HDR aussi). Et la restriction n'a jamais constitué une barrière :
+// `setDisplayMediaRequestHandler` donne déjà la vidéo complète de ce que `selectedSourceId` désigne,
+// sans condition HDR ni prompt de l'OS. Ce qui borne l'accès, c'est le pick — un seul id, posé par
+// `ss:select-source`, et que l'appelant doit renvoyer en écho (`expectId`, main.ts).
+test('pickerSources: la table nomme toute source résolue, pas seulement les HDR', () => {
   const { devices } = pickerSources(RAW, PICKER_DISPLAYS, DISPLAYS, undefined);
-  // L'écran SDR est apparié lui aussi, mais le chemin natif ne lui est jamais proposé : une porte
-  // plus large que la fonctionnalité est une porte à refermer plus tard.
-  assert.deepEqual([...devices], [['screen:0:0', { deviceName: String.raw`\\.\DISPLAY1` }]]);
+  assert.deepEqual(
+    [...devices],
+    [
+      ['screen:0:0', { deviceName: String.raw`\\.\DISPLAY1` }],
+      ['screen:1:0', { deviceName: String.raw`\\.\DISPLAY5` }],
+    ],
+  );
+  // Ce que la table ne décide PAS : le chemin natif. L'écran SDR est nommable et reste `hdr: false`,
+  // donc le renderer ne le route pas en natif — c'est bien le drapeau qui commande, pas la table.
+  const { sources } = pickerSources(RAW, PICKER_DISPLAYS, DISPLAYS, undefined);
+  assert.equal(sources.find((s) => s.id === 'screen:1:0')?.hdr, false);
 });
 
 // Le `display_id` d'une fenêtre n'est JAMAIS la source de vérité : il est vide pour toutes les
@@ -269,11 +304,14 @@ test('pickerSources: une fenêtre dont le pid est introuvable n est pas approuva
   assert.equal(devices.has('window:12:0'), false);
 });
 
-test('pickerSources: une fenêtre sur un écran SDR reste sur le chemin clampé', () => {
+// L'angle mort (b) : une fenêtre est classée au moment du listing. Sur l'écran SDR elle part sur le
+// chemin clampé — mais elle doit rester NOMMABLE, sinon rien ne pourra l'approuver quand l'hôte la
+// glissera sur l'écran HDR, et le partage resterait délavé jusqu'à ce qu'il repasse par le picker.
+test('pickerSources: une fenêtre sur un écran SDR reste clampée, mais reste nommable', () => {
   const onSdr = () => ({ device: String.raw`\\.\DISPLAY5`, pid: 900 }); // apparié, mais pas en HDR
   const { sources, devices } = pickerSources(RAW, PICKER_DISPLAYS, DISPLAYS, undefined, onSdr);
-  assert.equal(sources.find((s) => s.id === 'window:12:0')?.hdr, false);
-  assert.equal(devices.has('window:12:0'), false, 'une porte plus large que la fonctionnalité');
+  assert.equal(sources.find((s) => s.id === 'window:12:0')?.hdr, false, 'le renderer ne la route pas en natif');
+  assert.deepEqual(devices.get('window:12:0'), { hwnd: 12, pid: 900 }, 'mais la cible existe pour plus tard');
 });
 
 test('pickerSources: un résolveur qui ne connaît pas la fenêtre ne la casse pas', () => {
@@ -282,7 +320,8 @@ test('pickerSources: un résolveur qui ne connaît pas la fenêtre ne la casse p
   const { sources, devices } = pickerSources(RAW, PICKER_DISPLAYS, DISPLAYS, undefined, () => ({ device: null, pid: null }));
   assert.equal(sources.length, 3);
   assert.equal(sources.find((s) => s.id === 'window:12:0')?.hdr, false);
-  assert.equal(devices.size, 1, 'seul l écran HDR reste approuvable');
+  // Les deux écrans restent nommables ; la fenêtre non résolue, elle, n a aucune cible.
+  assert.deepEqual([...devices.keys()], ['screen:0:0', 'screen:1:0']);
 });
 
 test('pickerSources: meta en pixels physiques, fenêtre propre exclue, icône vide traitée comme absente', () => {
@@ -319,9 +358,12 @@ test('pickerSources: une source sans écran correspondant reste listée, sans ch
 test('approvedTargetFor: seule une source de la DERNIÈRE liste est approuvable', () => {
   const listing = pickerSources(RAW, PICKER_DISPLAYS, DISPLAYS, undefined);
   assert.deepEqual(approvedTargetFor(listing, 'screen:0:0'), { deviceName: String.raw`\\.\DISPLAY1` });
-  // Une fenêtre n a pas de sortie DXGI, et l écran SDR n est pas sur ce chemin.
+  // L écran SDR est approuvable depuis qu une capture doit pouvoir redémarrer après une extinction
+  // du HDR — mais il ne l est que parce qu il était DANS cette liste, et le renderer ne le route
+  // pas en natif de lui-même (`hdr: false`).
+  assert.deepEqual(approvedTargetFor(listing, 'screen:1:0'), { deviceName: String.raw`\\.\DISPLAY5` });
+  // Sans résolveur de handle, une fenêtre n a ni écran ni pid : rien à approuver.
   assert.equal(approvedTargetFor(listing, 'window:12:0'), null);
-  assert.equal(approvedTargetFor(listing, 'screen:1:0'), null);
   // Un id jamais listé — un renderer qui a sauté le picker, ou qui invente un id.
   assert.equal(approvedTargetFor(listing, 'screen:42:0'), null);
   assert.equal(approvedTargetFor(listing, null), null, 'rien de sélectionné n approuve rien');

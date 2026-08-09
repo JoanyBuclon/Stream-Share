@@ -565,6 +565,24 @@ identiques partagent une taille. Extraite et testée parce que son mode de panne
 **silencieux** : rendre `null` pour un écran réellement en HDR laisserait l'app sur
 le chemin clampé, avec un sélecteur d'apparence normale et aucune erreur nulle part.
 
+Et c'est arrivé, sur une disposition ordinaire. `bounds.x * scaleFactor` **n'est pas**
+le bord gauche physique d'un écran : Electron dispose le bureau en espace DIP, donc
+l'origine DIP d'un secondaire est la largeur *mise à l'échelle* de tout ce qui est à sa
+gauche. Primaire 3840×2160 à 150 %, secondaire 1920×1080 à 100 % : Windows le place à
+x=3840, Electron annonce x=2560, et 2560 × 1 = 2560. Aucune correspondance — un écran
+HDR sur le chemin clampé, sans une seule erreur. La taille, elle, ne dérive jamais
+comme ça (la largeur d'un écran est mise à l'échelle par son propre facteur), mais une
+taille n'identifie pas.
+
+La sortie est `Display.nativeOrigin`, le rectangle `MONITORINFO` que Chromium a lu
+lui-même : juste par construction, aucune arithmétique de notre côté. Electron le
+documente « X11-like systems only » — un avertissement de doc que la mesure contredit,
+`tools/display-match-probe.cjs` le trouve peuplé et d'accord avec la géométrie sur les
+deux écrans de la machine de dev. La multiplication reste en repli si le champ manque
+vraiment. Au passage, la même sonde ferme un raccourci tentant : `Display.colorSpace`
+rapporte `transfer:SRGB` sur les **deux** écrans, y compris celui en HDR à 480 nits —
+ce n'est pas un témoin HDR utilisable.
+
 Deuxième pièce, la **capture** : `Direct3D11CaptureFramePool::CreateFreeThreaded`
 en `R16G16B16A16Float` (scRGB — les hautes lumières arrivent **au-dessus de 1.0** au
 lieu d'être clampées), tone-map en HLSL sur le GPU, readback BGRA8. Le pool
@@ -846,6 +864,25 @@ lequel il a le droit de capturer, et main répond depuis la table construite en 
 temps que la liste montrée au sélecteur. `hdr: true` suffit à dire « main tient une
 sortie pour cette source ».
 
+La table couvre **toute source nommable**, plus seulement les HDR. Elle était réduite
+au nom de « pas de porte plus large que la fonctionnalité » ; la fonctionnalité est
+devenue réellement plus large (une fenêtre choisie sur l'écran SDR doit devenir
+approuvable une fois glissée sur l'écran HDR, sans re-choisir, et une capture qui
+redémarre après extinction du HDR aussi). Et la restriction n'a jamais constitué une
+barrière de capacité : `setDisplayMediaRequestHandler` donne déjà la vidéo complète de
+ce que `selectedSourceId` désigne, sans condition HDR ni prompt de l'OS. Même pick,
+même surface, autre chemin de codec.
+
+**Ce qui borne l'accès, c'est l'écho de l'id.** L'appelant nomme la source qu'il croit
+tenir (`startNativeCapture(…, expectId)`), et main refuse si ce n'est pas le pick.
+Sans ça : `selectedSourceId` bouge dès que le sélecteur confirme, alors que la capture
+derrière peut encore échouer (prompt `getDisplayMedia` refusé, fenêtre fermée depuis le
+listing) — main approuve donc une source que la page n'a jamais engagée. Inoffensif
+tant que chaque démarrage natif tenait dans le clic qui faisait le pick ; le veilleur
+HDR en démarre un sur un **timer**, et sans l'écho il aurait capturé ce que main tenait
+plutôt que sa propre source, en réétiquetant la scène au passage. Porte
+`consent-gate.cjs` : « refused when the caller names a source that is not the pick ».
+
 > Ce que ça ne fait **pas** : durcir la porte contre un renderer compromis.
 > `selectSource(id)` reste exposé, donc du code hostile dans notre propre bundle
 > désigne un écran par id au lieu de le désigner par nom — même capacité, autre
@@ -863,13 +900,21 @@ Sur `display-added` / `display-removed`, **le choix est oublié aussi**. N'oubli
 la liste serait un demi-correctif : le sélecteur re-liste dès qu'il s'ouvre, avant le
 moindre clic, et l'ancien id serait alors approuvé contre la nouvelle disposition — un
 index `screen:N:0` ne désigne pas forcément le même moniteur une fois qu'un écran est
-parti. Pas sur `display-metrics-changed`, qui se déclenche aussi pour un changement de
-zone de travail : les ids nomment toujours les mêmes panneaux.
+parti.
+
+**Et plus rien sur `display-metrics-changed`.** Le pick y survivait déjà — les ids
+nomment toujours les mêmes panneaux, l'ensemble des écrans n'ayant pas changé — mais la
+**liste**, elle, était jetée : le pick restait vivant avec plus rien contre quoi
+l'approuver. Or c'est le **seul** évènement que Windows émet sur une bascule HDR
+(mesuré, `tools/hdr-toggle-recovery.cjs`), c'est-à-dire exactement le moment où un écran
+choisi en SDR devient éligible au natif — le veilleur demandait, main répondait `null`,
+et la bascule était impossible sans rouvrir le sélecteur. La péremption des drapeaux
+`hdr` de la liste est désormais traitée délibérément, par ce même veilleur.
 
 > Couverture unitaire : `pickerSources` et `approvedTargetFor`
-> (`electron/src/config.test.ts`) — le HDR par source, la table réduite aux écrans HDR
-> appariés, une fenêtre qui rapporterait un écran, un id jamais listé, une liste
-> invalidée.
+> (`electron/src/config.test.ts`) — le HDR par source, la table qui nomme toute source
+> résolue sans pour autant router en natif, une fenêtre qui rapporterait un écran, un id
+> jamais listé, une liste invalidée.
 
 **Et le câblage, lui, est enfin exercé.** C'était le point aveugle du projet : rien ne
 chargeait `electron/src/main.ts`, ce qui a laissé passer un `screen.on()` au niveau
@@ -918,10 +963,12 @@ pendant que l'hôte lit un document reste sur du noir**. D'où une frame répét
 les 500 ms.
 
 Mais un répéteur sans limite rend une capture **morte** indistinguable d'un écran
-immobile : `Win+Alt+B` coupe le HDR, WGC s'arrête, et le flux continue d'afficher la
-dernière image avec des stats vertes et un badge « live ». Il s'arrête donc dès que
-l'addon signale `closed`, ou après `MAX_REPEATS` répétitions consécutives, et termine
-la track — ce que `host.ts` écoute déjà comme « la source a disparu ».
+immobile : le flux continue d'afficher la dernière image avec des stats vertes et un
+badge « live ». Il s'arrête donc dès que l'addon signale `closed`, ou après
+`MAX_REPEATS` répétitions consécutives, et termine la track — ce que `host.ts` écoute
+déjà comme « la source a disparu ». (Ce paragraphe citait `Win+Alt+B` comme la façon la
+plus probable d'y arriver ; c'est mesuré faux, voir plus bas. Le seul fermeur mesuré est
+une fenêtre détruite, ce qui laisse `MAX_REPEATS` porter le reste.)
 
 `closed` est le vrai signal, immédiat et fiable ; le compteur n'est que le filet pour
 un addon qui cesse de produire en se déclarant sain. Il valait 20 (10 s), et c'était
@@ -984,6 +1031,68 @@ aussi — prompt refusé — l'hôte gardait un badge LIVE, un bouton Stop, l'an
 nommée à l'écran et des viewers sur une image figée, sans que rien nulle part ne dise
 que c'était fini. Ce cas arrête maintenant le partage avec sa raison.
 
+### La bascule à chaud vers le natif
+
+`hdr` est décidé **au moment du listing**, et deux choses ordinaires le périment sans que
+rien ne re-liste : une fenêtre choisie sur l'écran SDR puis glissée sur l'écran HDR (elle
+gardait ce verdict pour toujours, aussi loin que l'hôte la traîne), et le HDR allumé sous
+un écran choisi en SDR. L'autre sens marchait déjà — une capture native suit le blanc de
+référence d'un écran à l'autre.
+
+Un veilleur (2 s) demande à main si la source du pick est sur un écran HDR *maintenant*
+(`ss:picked-hdr`), et `swapToNative()` remplace la vidéo du partage vivant. Sondage et
+non évènement, et côté renderer, parce que rien d'autre ne peut le voir : le sondage du
+blanc à 100 ms vit **dans** une capture native et c'est précisément l'état où il n'y en a
+pas, aucun évènement Electron ne tombe quand une fenêtre change de moniteur, et main ne
+sait pas si le renderer est clampé ni même s'il partage.
+
+**La contrainte qui donne sa forme à tout le reste : ça ne tourne pas dans un clic.**
+Donc pas de `getDisplayMedia`, qui exige une activation utilisateur transitoire — donc
+**on ne peut pas re-demander le son**. La piste loopback déjà dans le flux est reportée
+telle quelle, ce qui a demandé un changement dans `setStream` : son `finally` arrête les
+pistes du flux précédent, et aurait rendu le partage muet en silence. Un `Set` des pistes
+conservées, une garde au point de passage unique plutôt qu'un drapeau par appelant ; pour
+tous les autres appelants les deux ensembles sont disjoints, comportement identique.
+
+Le blanc de référence est relu **avant** le premier frame plutôt que laissé au sondage :
+une fenêtre qui vient d'arriver sur un panneau HDR est composée sur 480 et non 80, et
+`setSdrWhite` ne prend effet qu'à la prochaine frame que l'**écran** produit — sur un
+écran calme, pas de sitôt. Il ne peut pas venir de `captureStats()` : sans session,
+l'addon ne résout aucun écran et ne rapporte rien de mesuré. Il vient donc de
+`ss:picked-hdr`, le même mécanisme que le veilleur.
+
+Trois gardes, chacune pour une panne qui ne se voit pas :
+- **Trois tentatives par pick.** Le veilleur tourne pendant toute la vie d'un partage
+  clampé ; une bascule qui échoue serait retentée à chaque tick, à ~171 ms de C++
+  **synchrone** sur le thread principal du renderer. Remis à zéro par tout choix
+  délibéré, et jamais dépensé par un succès — une bascule qui aboutit pose
+  `nativeCapture`, et le veilleur se retire.
+- **Un drapeau « en vol ».** `nativeCapture` est nul pendant tout l'intervalle entre
+  `stopNative()` et le retour de `captureNative()`, donc sans lui le test « rien ne
+  tourne » du veilleur est vrai en plein échange, et un second démarrage tuerait la
+  session toute neuve du premier.
+- **Un compteur de générations, bougé par `capture()`.** L'autre point de contrôle du
+  swap est `this.stream`, qui ne bouge qu'au commit — il ne peut donc pas voir un pick
+  *en cours de résolution*, et c'est précisément celui qui nous dispute la session unique
+  de l'addon. Il reste un résidu, marqué `ponytail:` dans le code : un `capture()` qui
+  démarre **pendant** le start du swap fait retomber un choix HDR délibéré sur le chemin
+  clampé. Fermer ça proprement demande une section critique couvrant stop→commit sur deux
+  chemins dont l'ordonnancement est portant pour d'autres raisons.
+
+Ce qui n'existe **pas**, et pourquoi : une reprise automatique après fermeture de l'item.
+Elle a été écrite, puis supprimée quand la sonde a montré que son unique scénario nommé
+— `Win+Alt+B` — ne ferme pas l'item du tout (voir plus bas). Une capture morte arrête donc
+le partage avec sa raison, comme avant. `captureHdr` n'est pas non plus reconstruit sur
+`swapToNative` : son ordonnancement est portant (l'audio d'abord, dans la fenêtre
+d'activation, puis l'échelle de repli).
+
+> Couverture : `e2e/desktop-hdr.spec.ts` — une fenêtre clampée glissée sur l'écran HDR
+> passe en natif en gardant sa piste audio *identique* et vivante, et la vidéo clampée est
+> bien arrêtée ; une bascule qui échoue abandonne après trois essais **sans jamais
+> déranger** le partage qu'elle n'a pas su améliorer ; un pick que l'hôte n'a jamais engagé
+> n'est **jamais** injecté dans le partage ; une capture morte arrête le partage, et une
+> fenêtre morte le nomme.
+
 **Ce qui reste vrai et non mesuré**, pour la suite du chantier natif :
 - **WGC ne livre que sur changement.** Un bureau immobile rend ~24 fps, et 0,2 fps
   quand plus rien ne bouge. C'est une qualité (aucun encodage gaspillé) mais le
@@ -1004,25 +1113,41 @@ que c'était fini. Ce cas arrête maintenant le partage avec sa raison.
   `encoderImplementation`) et se **skippe** quand l'encodeur déclare avoir été
   contraint, en gardant le vrai échec : perdre la résolution alors qu'il dit `none`.
   Mesuré avant : 5 rouges sur 12 runs, toutes en 1440p→1080p.
-- **La porte du tone map est bruyante ~1 run sur 3**, et le mécanisme est identifié :
-  son `mean()` ne distingue pas une image fraîche d'une **répétition**. Quand l'écran
-  se calme, le répéteur ressert la dernière image — tone-mappée à l'exposition
-  précédente — et l'échantillon de restauration mesure l'ancienne. Le compteur de
-  frames de l'addon est le témoin qui trancherait. Non fait.
+- **La porte du tone map est bruyante, et l'entrée précédente désignait le mauvais
+  échantillon.** On y lisait que la staleness frappait la **restauration**. Vérifié
+  clause par clause sur deux runs rouges consécutifs (2026-08-09) : c'est **`brighter`**
+  qui fait échouer la porte. Run 1 — base 101, `brighter` (÷4) 87,7 là où il faut > 109.
+  Run 2 — base 78,5, `brighter` 81,4 là où il faut > 84,8. `darker` (×4), lui, descend
+  franchement les deux fois (22,6 et 18,8).
+
+  Deux lectures tiennent devant ces chiffres, et rien au dépôt ne les départage :
+  - **staleness** — `brighter` atterrit *sur* la base au bruit près (+3,7 % puis −13 %),
+    ce qui est exactement la signature d'une frame répétée portant l'exposition
+    précédente. La théorie retirée expliquait un échec de `brighter` aussi bien qu'un
+    échec de `restored` ; c'est la cible qui était fausse, pas forcément le mécanisme.
+  - **écrêtage** — ÷4 quadruple l'exposition, et un tone map a un plafond : la moyenne
+    cesse de monter, un rolloff peut même la faire redescendre. `darker` n'a pas de
+    plafond en face, d'où l'asymétrie.
+
+  Le témoin qui trancherait est le même dans les deux cas : le compteur de frames de
+  l'addon, pour distinguer une image fraîche d'une copie. Un instrument qui mesurerait
+  une surface synthétique fixe plutôt que le bureau vivant réglerait aussi la dérive de
+  contenu (la base bouge de 101 à 78,5 d'un run à l'autre). Délibérément **pas** réparé
+  ici : rendre la porte verte sur une théorie non tranchée, c'est une porte qui ne mesure
+  plus rien.
 - **Le routage est couvert depuis `e2e/desktop-hdr.spec.ts`**, mais seulement
   au-dessus du port. `fakeNative(page, { nativeCapture })` imite le contrat du
   preload — un `MessageChannel`, un `window.postMessage` synchrone, des `VideoFrame`
   transférées depuis un canvas — et le reste est du vrai code : le picker, `host.ts`,
   `native-video.ts`, le `MediaStreamTrackGenerator`. Ce qu'aucun de ces tests ne
   touche : l'addon, Electron, et le câblage IPC.
-- **Un écran réellement HDR que main ne reconnaît pas** reste silencieux. `hdr` vaut
-  `output?.hdr ?? false`, donc un écran dont `nativeDisplayFor` ne retrouve pas
-  l'origine est rapporté `hdr: false`, part sur le chemin clampé et **n'affiche aucune
-  puce** (voir plus bas). Pas hypothétique : `electron/src/config.test.ts` documente
-  déjà le cas (2560 DIP à 150 % = 3840 physiques, aucune origine ne correspond). Idem
-  si le HDR est allumé entre le listing et la confirmation, et idem pour une fenêtre
-  choisie sur l'écran SDR puis glissée sur l'écran HDR. Rien de tout ça n'est
-  réparable depuis le renderer.
+- **Les angles morts de détection HDR sont fermés, sauf un.** Fermés : l'origine en
+  DPI mixte, via `Display.nativeOrigin` (voir § HDR), et la classification figée au
+  moment du listing, via le veilleur de `host.ts` (§ La bascule à chaud). Reste le cas
+  où l'addon lui-même ne rapporte pas la sortie — pas de correspondance d'origine *et*
+  pas de `nativeOrigin` : l'écran part sur le chemin clampé et **n'affiche aucune
+  puce**, puisque `hdr` vaut `output?.hdr ?? false` et que la puce est dérivée de ce
+  même drapeau. Silencieux par construction.
 - **Le coût de `startCapture` est réglé, mais par déplacement, pas par suppression.**
   Le device est réutilisé entre deux captures (~32 ms au lieu de ~148), et le coût à
   froid est **préchauffé** : le preload le paie à l'ouverture du picker depuis un
@@ -1030,11 +1155,29 @@ que c'était fini. Ce cas arrête maintenant le partage avec sa raison.
   démarrage 188,9 → **37,8 ms**. Reste que la préchauffe elle-même est ~115-148 ms de
   C++ **synchrone**, simplement placée là où personne n'attend. `napi_async_work`
   serait la vraie sortie ; non fait tant que ce placement suffit.
-- **Le repli quand l'item se ferme.** `GraphicsCaptureItem::Closed` est abonné et
-  remonte dans `captureStats().closed` (écran débranché, session RDP, HDR coupé au
-  `Win+Alt+B`). `onSourceEnded` le **lit** désormais et arrête le partage avec une
-  raison affichée sur la scène vide. Ce qui reste à faire est la reprise : rebasculer
-  tout seul sur `getDisplayMedia` plutôt que de rendre la main à l'utilisateur.
+- **Couper le HDR ne ferme PAS l'item de capture d'un moniteur — mesuré.**
+  `tools/hdr-toggle-recovery.cjs`, 2026-08-09, `\\.\DISPLAY1` : le drapeau passe bien
+  `hdr: true, 480 nits` → `hdr: false, 80 nits`, et `closedAfterMs` reste `null` avec
+  **662 frames** qui continuent d'arriver. Le sondage du blanc à 100 ms recale le
+  diviseur tout seul : le partage n'est jamais interrompu. Seul évènement Electron émis,
+  `display-metrics-changed` (×2), jamais `display-added`/`display-removed`.
+
+  C'est ce qui a **supprimé** la reprise automatique d'écran : son unique scénario nommé
+  n'existe pas. Ce qui reste comme fermeur plausible pour un moniteur, c'est le
+  débranchement — et là, redémarrer est justement le mauvais réflexe, `\\.\DISPLAY2`
+  pouvant déjà désigner un autre panneau. Le seul fermeur **mesuré**, tous types
+  confondus, reste une fenêtre détruite (`tools/window-hdr-probe.cjs`).
+
+  Restent non sondés : le débranchement et la reconnexion RDP.
+
+  > Piège de méthode, noté parce qu'il a failli passer : la sonde est interactive, et
+  > l'opérateur a raté la première invite. `claim1` a donc rendu `INCONCLUSIVE` pendant
+  > que `claim1Reverse` portait la vraie mesure, et une première version de cette entrée
+  > a écrit « rien n'a été mesuré » au-dessus d'un résultat négatif franc. Deux
+  > correctifs : la sonde écrit maintenant `tools/hdr-toggle-recovery.json` (elle ne
+  > faisait qu'imprimer, donc le résultat mourait dans le terminal de qui la lançait), et
+  > sa garde `claim3` regarde les **deux** phases. `tools/*.json` étant gitignoré, cette
+  > entrée reste le seul enregistrement durable — raison de plus pour qu'elle soit juste.
 - **La maintenance.** `loopback-capture` (audio) est le problème de quelqu'un
   d'autre ; celui-ci est le nôtre : node-gyp en CI, prebuilds, un pin d'ABI à chaque
   majeure d'Electron. Et le `--target` du script de build doit suivre la

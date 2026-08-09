@@ -29,7 +29,10 @@ const evaluate = (win, expr) =>
     `(async () => { try { return { ok: await (${expr}) }; } catch (e) { return { err: String(e && e.message ? e.message : e) }; } })()`,
   );
 
-const START = `(() => { window.native.startNativeCapture(undefined, 30); return 'started'; })()`;
+/** The caller names the source it believes it holds, and main refuses unless that IS the pick —
+ *  so every attempt below has to say which id it is claiming. Passing nothing would now be refused
+ *  by the echo alone, which would turn every refusal gate here green for the wrong reason. */
+const START = (id) => `(() => { window.native.startNativeCapture(undefined, 30, ${JSON.stringify(id)}); return 'started'; })()`;
 
 /**
  * One attempt, and ALWAYS stop afterwards.
@@ -38,8 +41,8 @@ const START = `(() => { window.native.startNativeCapture(undefined, 30); return 
  * already running", which reads exactly like a refusal: caught while mutation-testing this file,
  * where a deliberately broken gate turned two of the refusal gates green.
  */
-async function attempt(win) {
-  const res = await evaluate(win, START);
+async function attempt(win, id) {
+  const res = await evaluate(win, START(id));
   await evaluate(win, 'window.native.stopNativeCapture()');
   return res;
 }
@@ -62,7 +65,7 @@ app.whenReady().then(async () => {
 
     // 1. No pick at all. This is the XSS shape: call the capture API without ever going near the
     //    picker. It must refuse before the addon is touched.
-    result.beforeAnyPick = await attempt(win);
+    result.beforeAnyPick = await attempt(win, 'screen:0:0');
 
     // 2. The listing, straight from the real desktopCapturer + the real addon.
     const listed = await evaluate(
@@ -82,12 +85,18 @@ app.whenReady().then(async () => {
 
     // 3. An id that was never listed.
     await evaluate(win, `window.native.selectSource('screen:99999:0')`);
-    result.afterBogusPick = await attempt(win);
+    result.afterBogusPick = await attempt(win, 'screen:99999:0');
 
-    // 4. A window on an SDR display: no tone map applies there, so the native path must stay shut.
-    if (window0) {
+    // 4. The ECHO: a real, listed pick, but the caller claims a DIFFERENT listed source. This
+    //    replaced "a window on an SDR display is refused", which stopped being the rule — the
+    //    id→target table now covers every resolvable source, because a clamped share has to become
+    //    upgradable without a re-pick. What still bounds the path is that there is exactly one
+    //    pick and the caller has to name it. The failure this catches is a real one: main's pick
+    //    and the page's live capture can diverge after a capture the host refused, and anything
+    //    starting a capture off a timer would then get the shell's source instead of its own.
+    if (window0 && hdrScreen) {
       await evaluate(win, `window.native.selectSource(${JSON.stringify(window0.id)})`);
-      result.afterWindowPick = await attempt(win);
+      result.afterMismatchedEcho = await attempt(win, hdrScreen.id);
     }
 
     // 5. The real thing: pick the HDR screen and capture it. This is the first time in the project
@@ -98,7 +107,7 @@ app.whenReady().then(async () => {
       // Not `attempt`: this one has to stay running long enough to produce frames. Approval is not
       // capture — the gate could hand over a name the addon cannot use — so the counters are read
       // from the session this very call started.
-      result.afterHdrPick = await evaluate(win, START);
+      result.afterHdrPick = await evaluate(win, START(hdrScreen.id));
       await new Promise((r) => setTimeout(r, 1500));
       result.stats = (await evaluate(win, 'window.native.nativeCaptureStats()')).ok;
       await evaluate(win, 'window.native.stopNativeCapture()');
@@ -110,7 +119,7 @@ app.whenReady().then(async () => {
     result.hdrWindow = hdrWindow;
     if (hdrWindow) {
       await evaluate(win, `window.native.selectSource(${JSON.stringify(hdrWindow.id)})`);
-      result.afterHdrWindowPick = await evaluate(win, START);
+      result.afterHdrWindowPick = await evaluate(win, START(hdrWindow.id));
       await new Promise((r) => setTimeout(r, 1200));
       result.windowStats = (await evaluate(win, 'window.native.nativeCaptureStats()')).ok;
       await evaluate(win, 'window.native.stopNativeCapture()');
@@ -120,7 +129,7 @@ app.whenReady().then(async () => {
     win.webContents.reload();
     await new Promise((resolve) => win.webContents.once('did-finish-load', resolve));
     await new Promise((r) => setTimeout(r, 300));
-    result.afterReload = await attempt(win);
+    result.afterReload = await attempt(win, hdrScreen?.id ?? 'screen:0:0');
   } catch (err) {
     result.error = String(err && err.stack ? err.stack : err);
   }
@@ -150,9 +159,12 @@ function verdict(r) {
     { gate: 'refused with no pick', pass: refused('beforeAnyPick'), value: r.beforeAnyPick?.err ?? `started: ${r.beforeAnyPick?.ok}` },
     { gate: 'refused for an unlisted id', pass: refused('afterBogusPick'), value: r.afterBogusPick?.err ?? `started: ${r.afterBogusPick?.ok}` },
     {
-      gate: 'refused for a window',
-      pass: r.afterWindowPick === undefined || refused('afterWindowPick'),
-      value: r.afterWindowPick === undefined ? 'skipped — no window to pick' : (r.afterWindowPick.err ?? `started: ${r.afterWindowPick.ok}`),
+      gate: 'refused when the caller names a source that is not the pick',
+      pass: r.afterMismatchedEcho === undefined || refused('afterMismatchedEcho'),
+      value:
+        r.afterMismatchedEcho === undefined
+          ? 'skipped — needs both an SDR window and an HDR screen to tell apart'
+          : (r.afterMismatchedEcho.err ?? `started: ${r.afterMismatchedEcho.ok}`),
     },
     { gate: 'the consent does not survive a reload', pass: refused('afterReload'), value: r.afterReload?.err ?? `started: ${r.afterReload?.ok}` },
   ];

@@ -240,9 +240,14 @@ struct CaptureStats {
   // because the symptom differs: this one leaves every other counter green and the picture black.
   uint64_t skipped = 0;  // refused by the fps cap, before any GPU work
   uint64_t undelivered = 0;
-  // The capture item went away: monitor unplugged, RDP session, HDR toggled off with Win+Alt+B.
-  // Without this the frames simply stop, `running()` keeps saying true, and a viewer stares at a
-  // frozen picture with no error anywhere.
+  // The capture item went away. Without this the frames simply stop, `running()` keeps saying true,
+  // and a viewer stares at a frozen picture with no error anywhere.
+  //
+  // What actually sets it, measured rather than assumed: a captured WINDOW being destroyed
+  // (tools/window-hdr-probe.cjs). This used to name "HDR toggled off with Win+Alt+B" as well and
+  // that is FALSE — tools/hdr-toggle-recovery.cjs flipped a monitor out of HDR mode and the item
+  // did not close, 662 frames kept arriving, and the reference white simply moved 480 -> 80. A
+  // monitor unplugged and an RDP reconnect are still plausible and still unmeasured.
   bool closed = false;
   int32_t width = 0, height = 0;
   Tally gap, gpu, copy;

@@ -31,6 +31,7 @@ import {
   rendererSecurity,
   type AudioApp,
   type NativeDisplay,
+  type NativeTarget,
   type Listing,
 } from './config.ts';
 import { loadCaptureAddon, type CaptureAddon } from './native-addon.ts';
@@ -684,32 +685,75 @@ ipcMain.handle('ss:select-source', (event, id: unknown) => {
   if (!isInternalUrl(event.senderFrame?.url ?? '')) selectedSourceId = null;
 });
 
-/** Reply to `ss:approved-device`: the ONE display the preload may capture natively. The native path
- *  does not go through setDisplayMediaRequestHandler — it drives the addon directly — so this is
- *  its consent gate. See `approvedTargetFor`. */
-ipcMain.on('ss:approved-device', (event) => {
-  const internal = isInternalUrl(event.senderFrame?.url ?? '');
+/**
+ * What the renderer may capture natively, for the source it says it is capturing. The native path
+ * does not go through setDisplayMediaRequestHandler — it drives the addon directly — so this is its
+ * consent gate. See `approvedTargetFor`.
+ *
+ * **`expectId` is the caller naming the source it believes it holds, and it must equal the pick.**
+ * Not ceremony. `selectedSourceId` moves the instant the picker confirms, while the capture behind
+ * it can still fail — the host dismisses the getDisplayMedia prompt, the window closed since the
+ * listing — leaving main approving a source the renderer never committed to. Harmless only while
+ * every native start sat inside the click that made the pick. It stops being harmless the moment
+ * one is started off a TIMER (the recovery restart, the HDR watcher): main would hand back the
+ * refused source and it would be swapped into a live share with no click anywhere, relabelling the
+ * stage on its way in. Echoing the id ties the two sides to the same source.
+ *
+ * One function for both replies below, so the check cannot drift between them.
+ */
+function approvedFor(frameUrl: string | undefined, expectId: unknown): NativeTarget | null {
+  if (!isInternalUrl(frameUrl ?? '')) return null;
+  if (typeof expectId !== 'string' || expectId !== selectedSourceId) return null;
   // The pid is re-read HERE, not trusted from the listing: that is the whole point of storing it.
-  event.returnValue = internal
-    ? approvedTargetFor(lastListing, selectedSourceId, (hwnd) => captureAddon()?.windowPid(hwnd) ?? null)
-    : null;
+  return approvedTargetFor(lastListing, selectedSourceId, (hwnd) => captureAddon()?.windowPid(hwnd) ?? null);
+}
+
+/** Reply to `ss:approved-device`: the ONE surface the preload may capture natively. */
+ipcMain.on('ss:approved-device', (event, expectId: unknown) => {
+  event.returnValue = approvedFor(event.senderFrame?.url, expectId);
 });
 
-// The listing is what the gate approves from, so it must not outlive the arrangement it described:
-// device names are SLOT names, and after a monitor is unplugged `\\.\DISPLAY2` can be a different
-// panel than the one whose tile the user clicked. Dropping it costs one re-listing (the picker
-// lists every time it opens) and refuses the native path until then, which is the safe direction.
-const forgetListing = (): void => {
-  lastListing = null;
-};
-// …and on those two, the PICK goes as well. Dropping only the listing would be half a fix: the
-// picker re-lists as soon as it opens, before any click, and the old id would then be approved
-// against the new arrangement — a `screen:N:0` index does not necessarily point at the same
-// monitor once one has come or gone. Not on `display-metrics-changed`: that also fires for a work
-// area change (the taskbar), the ids still name the same panels, and clearing the pick there would
-// only break a getDisplayMedia in flight.
+/**
+ * Reply to `ss:picked-hdr`: is the picked source on an HDR display RIGHT NOW, and at what white?
+ *
+ * The listing's `hdr` flag is a SNAPSHOT taken when the picker opened, and two ordinary things
+ * invalidate it without anything being re-listed: a window dragged from the SDR monitor onto the
+ * HDR one (desktopCapturer reports no display for a window at all, so only the addon can see it),
+ * and HDR being switched on under a screen that was SDR when it was picked. Both left the share on
+ * the clamped path for ever. This is what the renderer polls to find out — and it is also where a
+ * capture being restarted reads the white, because with no session running the addon resolves no
+ * display and `captureStats()` reports nothing measured.
+ */
+ipcMain.handle('ss:picked-hdr', (event, expectId: unknown) => {
+  const target = approvedFor(event.senderFrame?.url, expectId);
+  if (!target) return null;
+  const addon = captureAddon();
+  // A window is resolved through its HANDLE, live: which display it is on is the whole question.
+  const device = 'hwnd' in target ? (addon?.displayForWindow(target.hwnd) ?? null) : target.deviceName;
+  const display = device === null ? undefined : nativeDisplays().find((d) => d.deviceName === device);
+  if (!display) return null; // minimised, gone, or an output that vanished — no verdict, not a false one
+  return { hdr: display.hdr, sdrWhiteNits: display.sdrWhiteNits, sdrWhiteMeasured: display.sdrWhiteMeasured };
+});
+
+/**
+ * A monitor came or went, so both the listing and the PICK are retired.
+ *
+ * The listing must not outlive the arrangement it described: device names are SLOT names, and after
+ * an unplug `\\.\DISPLAY2` can be a different panel than the one whose tile the user clicked.
+ * Dropping the pick with it is the other half — the picker re-lists as soon as it opens, before any
+ * click, and the old id would then be approved against the new arrangement.
+ *
+ * **Not on `display-metrics-changed`, and that is now load-bearing rather than a nicety.** The set
+ * of displays is unchanged there, so every id in the table still names the same panel — which is
+ * exactly the reason the pick already survived it. Dropping the LISTING on the same event was the
+ * inconsistent half: it left the pick alive with nothing to approve it against, so a native capture
+ * could not be restarted after a mode change without the host reopening the picker. And a mode
+ * change is precisely what the recovery in host.ts exists to survive. Measured
+ * (tools/hdr-toggle-recovery.cjs): the only event this fires is `display-metrics-changed`.
+ * Staleness in the listing's `hdr` flags is handled deliberately now, by the watcher in host.ts.
+ */
 const forgetPick = (): void => {
-  forgetListing();
+  lastListing = null;
   selectedSourceId = null;
 };
 
@@ -720,7 +764,6 @@ const forgetPick = (): void => {
 function watchDisplayChanges(): void {
   screen.on('display-added', forgetPick);
   screen.on('display-removed', forgetPick);
-  screen.on('display-metrics-changed', forgetListing);
 }
 
 // Decision: close = quit. No tray, no background — including on macOS, against its usual

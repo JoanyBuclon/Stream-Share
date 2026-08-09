@@ -106,8 +106,25 @@ interface StreamShareNative {
    * handler, so the shell answers with the one its own listing associated with the last confirmed
    * pick, rather than checking a name we hand it. Throws when nothing is approved — no pick, a
    * window rather than a screen, or the displays changed since.
+   *
+   * `expectId` is the reverse direction, and it is not optional in spirit: the CALLER names the
+   * source it believes it is capturing, and the shell refuses if that is not the pick. The shell's
+   * `selectedSourceId` moves the instant the picker confirms, while the capture behind it can still
+   * fail — so the two can disagree, and anything that starts a capture off a timer rather than a
+   * click would otherwise capture whatever the shell happens to be approving. Optional only for
+   * version skew: an older shell ignores it, which is exactly the behaviour that shipped before.
    */
-  startNativeCapture?(sdrWhiteNits?: number, fps?: number): void;
+  startNativeCapture?(sdrWhiteNits?: number, fps?: number, expectId?: string): void;
+  /**
+   * Is the source `expectId` names on an HDR display **right now**, and at what reference white?
+   *
+   * `NativeSource.hdr` is decided when the picker lists, and two ordinary things invalidate it
+   * mid-share: a window dragged from an SDR monitor onto an HDR one, and HDR switched on under a
+   * screen that was SDR when it was picked. Neither re-lists anything, so a clamped share would
+   * stay clamped for ever. Null when the shell has no verdict — the source is not the current pick,
+   * the window is minimised, or the display went away — never a guess.
+   */
+  pickedSourceHdr?(expectId: string): Promise<{ hdr: boolean; sdrWhiteNits: number; sdrWhiteMeasured: boolean } | null>;
   /** Cap the capture rate, 0 for uncapped. The generated track refuses applyConstraints
    *  (OverconstrainedError, measured), so this is the only way to honour the fps setting — and it
    *  is the better one anyway: a frame refused here never costs a tone map or a readback. */
@@ -138,8 +155,9 @@ interface NativeCaptureStats {
   readonly skipped: number;
   /** Frames produced while no page was listening. */
   readonly orphanedFrames: number;
-  /** The capture item went away: monitor unplugged, RDP session, HDR switched off, or — for a
-   *  window — the window closed (measured: `GraphicsCaptureItem::Closed` does fire for one). */
+  /** The capture item went away. Measured to fire when a captured WINDOW is destroyed; a monitor
+   *  unplugged and an RDP reconnect are plausible and unmeasured. It does NOT fire when HDR is
+   *  switched off — measured: the capture keeps running and only the reference white moves. */
   readonly closed: boolean;
   /** Reference white of the display the capture is on RIGHT NOW, re-read on every call. It moves
    *  when a captured WINDOW is dragged to another screen, and when the user moves the Windows SDR

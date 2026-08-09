@@ -50,6 +50,17 @@ const SYSTEM_AUDIO_CONSTRAINTS: MediaTrackConstraints = {
 /** Screen capture only exists on desktop browsers — mobile has no getDisplayMedia at all. */
 export const supportsDisplayMedia = (): boolean => typeof navigator.mediaDevices?.getDisplayMedia === 'function';
 
+/** Native starts allowed per pick from the HDR watcher. An upgrade that keeps failing would
+ *  otherwise be retried every tick for the life of the share, and each attempt is ~171 ms of
+ *  synchronous C++ on the renderer's main thread. Reset by any deliberate new pick — and never
+ *  spent by a success, because a swap that lands sets `nativeCapture` and the watcher stands down. */
+const MAX_SWAP_ATTEMPTS = 3;
+/** How often a CLAMPED share asks whether its source has moved onto an HDR display — a window
+ *  dragged between screens, or HDR switched on under a screen that was SDR when it was picked.
+ *  Seconds, not the 100 ms of the reference-white poll: this is "the host rearranged their
+ *  desktop", and every tick costs main a DXGI enumeration. */
+const HDR_WATCH_MS = 2000;
+
 export interface HostInit {
   code: string;
   display: string;
@@ -110,31 +121,45 @@ export class HostController {
    *  screen to explain it. */
   private pickedResolution: ResolutionTarget = this.quality.resolution;
   /** Tone-map exposure in stops, and the white the current source reports. Kept apart from
-   *  `quality` on purpose — see SDR_WHITE_KEY. `sourceSdrNits` is set by captureHdr and deliberately
-   *  NOT cleared when the capture stops: nothing reads it without a live native capture (the row is
-   *  hidden), and the next HDR share overwrites it before anything can. */
+   *  `quality` on purpose — see SDR_WHITE_KEY. `sourceSdrNits` is deliberately NOT cleared when the
+   *  capture stops: the panel row is hidden without one, and the next HDR share overwrites it. It
+   *  is written by captureHdr, by the reference-white poll, and by `swapToNative` — which also
+   *  READS it with no capture running, to tell "never measured" from a real 80. */
   private sdrStops = loadSdrStops();
   private sourceSdrNits = 0;
   /** Why the last share ended, when it ended by itself. Shown on the empty stage and cleared as it
    *  is read — see onSourceEnded. */
   private endedReason = '';
-  /** Whether the live native capture is a WINDOW. Only used to say something true when it dies:
-   *  a window's capture item closes because the user closed the window, which has nothing to do
-   *  with a display changing. */
-  private sourceIsWindow = false;
-  /** What the user actually picked, for the stage and the settings panel to name.
+  /**
+   * The pick the LIVE share is of — committed by setStream, never by capture(). Null on the browser
+   * path, which has no picker and no source object.
    *
-   *  Needed because `track.label` cannot: a MediaStreamTrackGenerator is labelled with a GUID, so
-   *  the native path was putting `4aead88e-fc84-…` on screen where the source name belongs — and
-   *  the settings panel, which falls back on the same label, claimed "no source selected" while a
-   *  share was live. Empty on the browser path, where getDisplayMedia's own label IS the name. */
-  private sourceName = '';
-  /** Whether the COMMITTED pick was an HDR screen — not whether the capture ended up native. The
-   *  rest of the reasoning lives where it is read, in setStream. */
-  private sourceHdr = false;
-  /** The pick `capture()` is working on, committed into the two fields above by setStream. Null on
-   *  the browser path, which has no picker and no source object. */
+   * One object rather than the name, the HDR flag and the is-it-a-window flag it used to be split
+   * into. Those drifted: `sourceIsWindow` was written by captureHdr and never cleared, so picking
+   * an HDR window and then a plain screen left the death message blaming an app that closed.
+   * Derived state cannot drift.
+   *
+   * It exists at all because `track.label` cannot answer: a MediaStreamTrackGenerator is labelled
+   * with a GUID, so the native path put `4aead88e-fc84-…` on screen where the source name belongs,
+   * and the settings panel — which falls back on that label — claimed "no source selected" over a
+   * live share.
+   */
+  private source: NativeSource | null = null;
+  /** The pick `capture()` is working on. Held, not committed: see capture(). */
   private pendingSource: NativeSource | null = null;
+  /** A native capture is being started right now. `nativeCapture` is null across the whole gap
+   *  between stopNative() and captureNative() resolving, so without this the HDR watcher's "nothing
+   *  is running" test reads true mid-swap and a second start kills the first one's brand-new
+   *  session — the `stream` re-check inside swapToNative only prevents the commit, not the overlap. */
+  private swapping = false;
+  /** Native (re)starts attempted since the last deliberate pick. See MAX_SWAP_ATTEMPTS. */
+  private swapAttempts = 0;
+  /** Bumped by every `capture()`. A swap started off a timer checks it and stands down: the addon
+   *  holds ONE session, and `this.stream` — which is what the swap's other checkpoints watch —
+   *  does not move until the new capture commits, so it cannot see a pick that is still resolving. */
+  private captureGen = 0;
+  /** Polls whether a clamped share's source has moved onto an HDR display. See HDR_WATCH_MS. */
+  private hdrWatch: ReturnType<typeof setInterval> | null = null;
   private readonly mixer = new AudioMixer();
   private readonly audioQueue = serial(); // serializes outgoing rebuilds — no interleaving
   private readonly wakeLock = createWakeLock(); // keep the screen awake while hosting
@@ -190,6 +215,16 @@ export class HostController {
     this.offMessage = sig.onMessage(this.onMessage);
     this.offStatus = sig.onStatus(this.onStatus);
     void this.wakeLock.request();
+    // One timer for the controller's life rather than a lifecycle tied to each source: a start/stop
+    // per capture is more code and one more thing to leak. Never in a browser, where it could only
+    // ever answer nothing.
+    //
+    // Price it honestly, because the cheap path is not the one that runs. With no clamped share the
+    // tick is a handful of field reads. With one — the whole life of a share on a machine with no
+    // HDR panel at all, i.e. most of them — it is an IPC round trip plus a `listDisplays()` DXGI
+    // enumeration on main's JS thread, every 2 s, to answer "no" until the share ends. That is what
+    // HDR_WATCH_MS is set against, and it is why this is seconds rather than the white poll's 100 ms.
+    if (canCaptureNative()) this.hdrWatch = setInterval(() => void this.watchHdr(), HDR_WATCH_MS);
   }
 
   // --- source capture ---
@@ -260,6 +295,10 @@ export class HostController {
     this.pendingSource = source ?? null;
     // A new pick is exactly what the message asks the host to do, so it is also what retires it.
     this.audioStartFailed = false;
+    // A deliberate pick earns a fresh allowance: the budget exists to stop a display that keeps
+    // closing its capture item from being retried for ever, not to punish the host for choosing.
+    this.swapAttempts = 0;
+    this.captureGen++; // stand down any swap a timer started — see the field
     const deviceId = source ? cameraDeviceId(source.id) : null;
     if (deviceId) return this.captureCamera(deviceId);
     // `hdr` alone: it is only ever true when the shell holds a DXGI output for this source, and
@@ -322,7 +361,6 @@ export class HostController {
     // fallback is wrong by up to 6x on a real HDR desktop — which is precisely why it is now a
     // BASE the host can correct rather than a number to hide behind `undefined`.
     this.sourceSdrNits = source.sdrWhiteMeasured ? source.sdrWhiteNits : 80;
-    this.sourceIsWindow = source.kind === 'window';
     // AS LATE AS POSSIBLE, and not a line earlier. Two WGC sessions cannot coexist (the addon
     // throws "capture already running"), so switching from one native source to another has to kill
     // the old one first — and between that and the new one's first frame, the preview is a dead
@@ -335,19 +373,12 @@ export class HostController {
     let capture: NativeCapture;
     try {
       capture = await captureNative(
+        source.id,
         // Corrected from the start, not applied a render later: a capture that begins at the
         // measured value and jumps when the panel repaints is a flash the host did not ask for.
         this.sdrWhiteNits(),
         this.quality.fps,
-        // The reported white is not fixed for the session. A captured WINDOW can be dragged to a
-        // display with a different reference white — 480 here, 80 on the SDR panel next to it, so
-        // six times off — and the Windows brightness slider can move under either kind of capture.
-        // The host's correction rides on top and stays where they put it.
-        (nits) => {
-          if (nits === this.sourceSdrNits) return;
-          this.sourceSdrNits = nits;
-          this.setSdrStops(this.sdrStops, false, true); // re-send and repaint: the label is in nits
-        },
+        this.onDisplayWhite,
       );
     } catch (e) {
       audio?.stop();
@@ -380,6 +411,132 @@ export class HostController {
     // found null, stopped nothing, and the WGC session outlived the app's own teardown.
     await this.setStream(new MediaStream(audio ? [capture.track, audio] : [capture.track]), capture);
   }
+
+  /** The display under the capture reports a DIFFERENT reference white — a captured window dragged
+   *  to another screen, or the Windows SDR brightness slider moved. The divisor is this times the
+   *  host's own correction, which stays where they put it. */
+  private onDisplayWhite = (nits: number): void => {
+    if (nits === this.sourceSdrNits) return;
+    this.sourceSdrNits = nits;
+    this.setSdrStops(this.sdrStops, false, true); // re-send and repaint: the label is in nits
+  };
+
+  /**
+   * Replace the video the LIVE share is carrying with a fresh native capture, keeping its audio.
+   *
+   * Driven by `watchHdr` and nothing else. The constraint that shapes it is that it does not run
+   * inside a click, so it cannot call `getDisplayMedia` — that needs transient user activation.
+   * Re-grabbing a loopback track is therefore not on offer either, which is why the audio already
+   * in the stream is carried straight over (see the `kept` set in setStream).
+   *
+   * Returns false rather than throwing: nothing has been touched when it does, so the caller simply
+   * keeps the clamped share it had. `captureHdr` is NOT built on this — its ordering is load-bearing
+   * (audio first, inside the activation window, then the fallback ladder) and merging would risk it.
+   */
+  private async swapToNative(): Promise<boolean> {
+    const stream = this.stream;
+    const id = this.source?.id;
+    if (!stream || !id || this.swapping) return false;
+    this.swapping = true;
+    this.swapAttempts++;
+    // Two checkpoints, because they see different things: `stream` catches a source that has
+    // already committed, `gen` catches one the host is still choosing. Only the second can see a
+    // `capture()` in flight, and that is the one racing us for the addon's single session.
+    const gen = this.captureGen;
+    const stale = (): boolean => this.ac.signal.aborted || this.stream !== stream || this.captureGen !== gen;
+    try {
+      // The white the display reports RIGHT NOW, and read here rather than left to the 100 ms poll:
+      // a window that just arrived on an HDR panel is anchored on 480 rather than 80, and
+      // `setSdrWhite` only lands on the next frame the DISPLAY produces — which on a still screen is
+      // not soon. It cannot come from `nativeCaptureStats()` either: with no session running the
+      // addon resolves no display and reports nothing measured.
+      const now = await window.native?.pickedSourceHdr?.(id);
+      // Null is not "no white", it is "no verdict": not the current pick, minimised, or the display
+      // went away. Main gates this reply and the capture start through the SAME `approvedFor`, so a
+      // null here means the start below is guaranteed to be refused — bailing spends no attempt from
+      // the budget and reports nothing misleading.
+      if (!now) return false;
+      if (now.sdrWhiteMeasured && now.sdrWhiteNits > 0) this.sourceSdrNits = now.sdrWhiteNits;
+      else if (this.sourceSdrNits <= 0) this.sourceSdrNits = 80; // scRGB's own definition, as captureHdr
+      // The LAST checkpoint before the addon is touched, and nothing may await between it and the
+      // start: `startNativeCapture` runs synchronously inside captureNative's promise executor, so
+      // checking here leaves no window for a `capture()` to slip in and collide over the session.
+      //
+      // ponytail: the residual is a `capture()` that begins DURING the start below. captureHdr then
+      // finds no `nativeCapture` to stop, throws "capture already running", and falls back to the
+      // clamped path — a deliberate HDR pick quietly losing HDR to a background timer. Its catch
+      // does call stopNativeCapture(), so nothing leaks. Closing it properly means one critical
+      // section spanning stop→commit across two paths whose ordering is load-bearing for other
+      // reasons; not worth it for a window of ~171 ms that only opens on a clamped share.
+      if (stale()) return false;
+      // Two WGC sessions cannot coexist. Always a no-op here — the watcher only runs when there is
+      // no native capture — and kept because that is a precondition, not an invariant we enforce.
+      this.stopNative();
+      const capture = await captureNative(id, this.sdrWhiteNits(), this.quality.fps, this.onDisplayWhite);
+      if (stale()) {
+        capture.stop();
+        return false;
+      }
+      // `this.source` explicitly: this is the SAME pick re-captured, and letting setStream default
+      // to `pendingSource` would relabel the stage with whatever was last attempted.
+      await this.setStream(
+        new MediaStream([capture.track, ...stream.getAudioTracks().filter(isLiveTrack)]),
+        capture,
+        this.source,
+      );
+      return true;
+    } catch (e) {
+      // The addon may already be CAPTURING: the preload starts it before it builds the port, so a
+      // throw between the two leaves a session with no handle left to reach it — and every later
+      // start then fails with "capture already running", which burns the rest of the budget on a
+      // state nothing can clear and makes the source un-nativable for the session. captureHdr does
+      // the same thing for the same reason.
+      window.native?.stopNativeCapture?.();
+      console.error('stream-share: native capture could not be swapped in', e);
+      if (this.swapAttempts >= MAX_SWAP_ATTEMPTS) {
+        console.warn('stream-share: giving up on the native path for this source — pick it again to retry');
+      }
+      return false;
+    } finally {
+      this.swapping = false;
+    }
+  }
+
+  /**
+   * A clamped share whose source has since moved onto an HDR display.
+   *
+   * The blind spot this closes: `hdr` is decided when the picker lists, and a WINDOW picked while
+   * it sat on the SDR monitor keeps that verdict for ever, however far the host drags it. (The
+   * other direction already worked — a native capture follows the reference white across screens.)
+   * Turning HDR on under a screen that was SDR when it was picked lands here too, for free.
+   *
+   * Polled rather than pushed, and from the renderer, because nothing else can see it: the 100 ms
+   * white poll lives inside a native capture and this is by definition the state where there is
+   * none, no Electron event fires when a window is dragged between monitors, and main does not know
+   * whether the renderer is clamped or even sharing.
+   */
+  private watchHdr = async (): Promise<void> => {
+    if (
+      this.swapping ||
+      this.nativeCapture || // already native: the reference-white poll takes it from here
+      this.paused || // an upgrade would run WGC and the tone map at full rate for nobody
+      !this.stream ||
+      this.source === null || // the browser path, which has no shell to ask
+      this.source.kind === 'camera' || // not a display surface; there is no native path at all
+      // Sources the LISTING already called HDR are not this watcher's population. One that is
+      // clamped anyway got there through captureHdr's fallback ladder — the addon refused, the
+      // consent gate answered nothing — and re-driving that same ladder off a timer is a retry
+      // nobody asked for, on a state that was at least stable.
+      this.source.hdr ||
+      this.swapAttempts >= MAX_SWAP_ATTEMPTS
+      // No `canCaptureNative()` check: the interval only exists when it was true, and it cannot
+      // become false — `window.native` is injected once by the preload.
+    ) {
+      return;
+    }
+    const now = await window.native?.pickedSourceHdr?.(this.source.id);
+    if (now?.hdr) await this.swapToNative();
+  };
 
   /** The system-audio track alone: ask for the usual A/V capture, keep the audio, drop the video.
    *  Used by the native path, which produces no audio of its own, and by the toggle when it is
@@ -434,14 +591,21 @@ export class HostController {
    *  the caller, so that "the new source is committed" and "the old source dies" stay one event: a
    *  capture that fails on the way in must leave the previous share running, not frozen — and a
    *  session assigned before an await is a session `destroy()` cannot find. */
-  private setStream = async (capture: MediaStream, native: NativeCapture | null = null): Promise<void> => {
+  private setStream = async (
+    capture: MediaStream,
+    native: NativeCapture | null = null,
+    /** Which pick this stream is of. Defaults to the one `capture()` is working on, which is what
+     *  every ordinary path wants. `swapToNative` passes the ALREADY-committed source instead: it
+     *  re-captures the same thing, so re-reading `pendingSource` there would relabel the stage with
+     *  whatever pick was last attempted — including one whose capture the host refused. */
+    source: NativeSource | null = this.pendingSource,
+  ): Promise<void> => {
     const previous = this.stream;
     const previousNative = this.nativeCapture;
     this.nativeCapture = native;
     this.stream = capture;
-    // The source's identity becomes true HERE, with the stream it describes — see pendingSource.
-    this.sourceName = this.pendingSource?.name ?? '';
-    this.sourceHdr = this.pendingSource?.hdr ?? false;
+    // The source's identity becomes true HERE, with the stream it describes — see `source`.
+    this.source = source;
     const video = capture.getVideoTracks()[0];
     if (video) {
       video.contentHint = contentHintFor(this.quality);
@@ -461,14 +625,14 @@ export class HostController {
     show(el('btn-stop'));
     show(el('btn-pause'));
     show(el('host-quality-bar'));
-    setText('host-source-name', this.sourceName || video?.label || 'screen');
+    setText('host-source-name', this.source?.name || video?.label || 'screen');
     // An HDR screen that did NOT end up on the native path. Two routes lead here and neither has to
     // signal it: capture() falling through when canCaptureNative() is false, and captureHdr's catch
     // (the consent gate answering null, no DXGI output for that source, the addon refusing). Both
     // land in setStream, and `native` is the only thing that can make the claim untrue — so the
     // state is derived at the commit point instead of being a flag two failure paths must set and
     // every success path must remember to clear. Hidden with the whole meta row by resetStage.
-    el('host-hdr-clamped').hidden = !this.sourceHdr || !!native;
+    el('host-hdr-clamped').hidden = !this.source?.hdr || !!native;
 
     try {
       await this.pushOutgoing(); // build outgoing + hot-swap existing viewers (serialized)
@@ -481,7 +645,14 @@ export class HostController {
       // The old session first: stopping only its track would leave WGC running and the frame port
       // open, feeding a track nothing reads.
       previousNative?.stop();
-      previous?.getTracks().forEach((t) => t.stop()); // stop the old source even if the rebuild failed
+      // Stop the old source even if the rebuild failed — EXCEPT anything the new stream is still
+      // using. `swapToNative` replaces the video and carries the live audio tracks straight over,
+      // and stopping one here would silence a share whose sound nothing had touched. Disjoint for
+      // every other caller, so this is one guard at the choke point rather than a flag per path.
+      const kept = new Set(capture.getTracks());
+      previous?.getTracks().forEach((t) => {
+        if (!kept.has(t)) t.stop();
+      });
       this.renderSettings();
       this.renderPause(); // a source change during a pause must keep the paused stage/badges
     }
@@ -1058,9 +1229,9 @@ export class HostController {
     setText('chip-fps', `${this.quality.fps} fps`);
     setText('chip-bitrate', `${this.quality.bitrate} mbps`);
     this.renderSdrWhite();
-    // `sourceName` first: on the native path the track's label is a GUID, so this line used to read
-    // "no source selected" — under a live share, next to a "Change source" button.
-    const label = this.sourceName || this.stream?.getVideoTracks()[0]?.label;
+    // The pick's own name first: on the native path the track's label is a GUID, so this line used
+    // to read "no source selected" — under a live share, next to a "Change source" button.
+    const label = this.source?.name || this.stream?.getVideoTracks()[0]?.label;
     setText('settings-source-hint', label || (this.stream ? 'sharing' : 'no source selected'));
     setText('btn-modal-source', this.stream ? 'Change source' : 'Choose source');
   }
@@ -1252,12 +1423,22 @@ export class HostController {
    *
    * Only ONE case earns a message, and it is narrow on purpose. On the native path a deliberate
    * stop is silent (see endTrack in native-video.ts), so `ended` plus a capture item the addon
-   * reports as closed means the capture died — the host is looking at a "choose source" screen they
-   * did not ask for, and `Win+Alt+B` is one keystroke away, so the message names it.
+   * reports as closed means the capture died, and the host is looking at a "choose source" screen
+   * they did not ask for.
    *
    * Everywhere else, saying anything would be a lie: on getDisplayMedia this same event is mostly
    * the host clicking "Stop sharing" in the browser chrome, which is as deliberate as our own
    * button. Silence is the honest answer for a stop we cannot tell apart from an intentional one.
+   *
+   * **And it does NOT try to restart the capture.** A version of this recaptured a screen whose
+   * item had closed, on the reasoning that the monitor is usually still there — HDR toggled off
+   * with Win+Alt+B being the named case. Measured (tools/hdr-toggle-recovery.cjs, recorded in
+   * docs/desktop.md): toggling HDR does not close a monitor's capture item at all. WGC keeps
+   * running, 662 frames arrived across the flip, and the 100 ms reference-white poll follows
+   * 480 → 80 on its own — the case already worked, gracefully, and the recovery was answering a
+   * question nobody had asked. What is left that could close a monitor's item is an unplug, and
+   * restarting THERE is the wrong reflex: device names are slot names, so `\\.\DISPLAY2` may
+   * already be a different panel. Deleted rather than kept on a maybe.
    *
    * Both reads happen BEFORE stopSource: `stopNative` clears `nativeCapture`, and the addon resets
    * its counters in Stop() — so a line later, `closed` is false and this says nothing.
@@ -1267,9 +1448,12 @@ export class HostController {
     // the NEXT teardown — which is a deliberate one, wearing an explanation that is not true.
     if (!this.stream) return;
     if (this.nativeCapture && window.native?.nativeCaptureStats?.()?.closed === true) {
-      this.endedReason = this.sourceIsWindow
-        ? 'That app closed, so the share stopped. Pick another source to carry on.'
-        : 'HDR capture stopped — the display changed, or HDR was switched off (Win+Alt+B).';
+      this.endedReason =
+        this.source?.kind === 'window'
+          ? 'That app closed, so the share stopped. Pick another source to carry on.'
+          : // NOT "or HDR was switched off (Win+Alt+B)", which this said until it was measured: a
+            // cause that cannot produce this effect sends the host to fix the wrong thing.
+            'The display changed or was disconnected, so the share stopped. Pick a source to start again.';
     }
     this.stopSource();
   };
@@ -1331,6 +1515,7 @@ export class HostController {
     if (modal.open) modal.close();
     this.ac.abort(); // remove all DOM listeners
     if (this.copyTimer !== null) clearTimeout(this.copyTimer);
+    if (this.hdrWatch !== null) clearInterval(this.hdrWatch);
     this.wakeLock.release();
     this.offMessage();
     this.offStatus();

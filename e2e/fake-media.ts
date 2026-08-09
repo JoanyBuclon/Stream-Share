@@ -156,14 +156,17 @@ export async function fakeNative(
       // Deliberately NOT modelled: the addon's own "capture already running", and the IPC wiring
       // (which listing main keeps, and when it drops it — covered in electron/src/config.test.ts).
       // The device names the SHELL holds. Deliberately not in the source payload: main keeps this
-      // table and the page never sees one. HDR screens only, like the real table — the native path
-      // is never offered for anything else, and a gate wider than the feature is a gate to close
-      // again later.
+      // table and the page never sees one. EVERY resolvable source, like the real table since a
+      // clamped share has to be upgradable without a re-pick — `hdr` below is still what decides
+      // whether the renderer asks for the native path at all.
       const DEVICE_BY_ID: Record<string, string> = {
         'screen:0:0': String.raw`\\.\DISPLAY1`,
+        'screen:1:0': String.raw`\\.\DISPLAY5`,
         // A window resolves to a HANDLE, not a display name — WGC has a separate factory call for
         // each, and the shell is the only side that knows which the pick was.
         'window:4242:0': 'hwnd:4242',
+        'window:11:0': 'hwnd:11',
+        'window:12:0': 'hwnd:12',
       };
       const cap = window as unknown as {
         __native: {
@@ -181,6 +184,10 @@ export async function fakeNative(
         __nativeWhite?: number;
         /** A captured window that is minimised: no frames, and NOT dead. */
         __nativeMinimized?: boolean;
+        /** What the shell reports about the PICKED source's display right now, overriding what the
+         *  listing said. A test sets it to drag a window onto an HDR screen, or to switch HDR off
+         *  under one — neither of which re-lists anything in the real app either. */
+        __hdrNow?: Record<string, { hdr: boolean; sdrWhiteNits: number; sdrWhiteMeasured: boolean }>;
       };
       cap.__native = { started: [], stopped: 0, fps: [], sdrWhite: [] };
       let framePort: MessagePort | null = null;
@@ -205,11 +212,18 @@ export async function fakeNative(
           // Explicit, not omitted: the suite exercises the getDisplayMedia path, and a fake that
           // returned true here would silently route every spec through the native branch.
           canCaptureNative: () => nativeCapture !== null,
-          startNativeCapture: (sdrWhiteNits?: number, fps?: number) => {
+          startNativeCapture: (sdrWhiteNits?: number, fps?: number, expectId?: string) => {
             // The consent gate, resolved the way the shell resolves it: the caller says nothing
             // about WHICH display, the shell answers with the one the last confirmed pick approved.
             // A caller that never went through the picker gets nothing.
-            const device = DEVICE_BY_ID[(window as unknown as { __picked?: string }).__picked ?? ''] ?? '';
+            //
+            // …and `expectId` is the other direction — the caller naming the source it believes it
+            // holds. The two can disagree (a pick confirmed, then a capture the host refused), and
+            // anything starting a capture off a timer would otherwise get the shell's answer rather
+            // than its own source. Modelled here because it is the ONLY thing standing between the
+            // HDR watcher and swapping in a screen nobody committed to.
+            const picked = (window as unknown as { __picked?: string }).__picked ?? '';
+            const device = expectId === picked ? (DEVICE_BY_ID[picked] ?? '') : '';
             cap.__native.started.push({ device, sdrWhiteNits, fps });
             if (!device) throw new Error('e2e: no display was picked by the user');
             // Throw BEFORE the handover, like the real preload: everything that can refuse runs
@@ -285,6 +299,23 @@ export async function fakeNative(
           }),
           selectSource: async (id: string) => {
             (window as unknown as { __picked?: string }).__picked = id;
+          },
+          // What main answers about the display the picked source is on RIGHT NOW — the listing's
+          // `hdr` is a snapshot and a window can be dragged out from under it. Same `expectId` echo
+          // and same "no verdict rather than a false one" as the real handler.
+          pickedSourceHdr: async (expectId: string) => {
+            const picked = (window as unknown as { __picked?: string }).__picked ?? '';
+            if (!expectId || expectId !== picked || !DEVICE_BY_ID[picked]) return null;
+            const override = cap.__hdrNow?.[picked];
+            if (override) return override;
+            const listed = (sources as Array<Record<string, unknown>>).find((s) => s.id === picked);
+            return listed
+              ? {
+                  hdr: !!listed.hdr,
+                  sdrWhiteNits: Number(listed.sdrWhiteNits),
+                  sdrWhiteMeasured: !!listed.sdrWhiteMeasured,
+                }
+              : null;
           },
           // Every toggle is recorded, not just the last one: the bug that matters is a lock left
           // held after the session ends, which only shows up as a missing trailing `false`.

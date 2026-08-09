@@ -138,6 +138,11 @@ export function canCaptureNative(): boolean {
  * and the difference between 0% and 70% of the highlights clipping.
  */
 export async function captureNative(
+  /** Picker id of the source the CALLER believes it is capturing. The shell refuses if that is not
+   *  the pick it is holding — see `startNativeCapture` in global.d.ts. First and required, rather
+   *  than appended and optional, because a caller that forgets it gets the old silent behaviour
+   *  back and nothing anywhere says so. */
+  expectId: string,
   sdrWhiteNits?: number,
   fps?: number,
   /** Called when the display the capture sits on reports a DIFFERENT reference white — a captured
@@ -180,7 +185,7 @@ export async function captureNative(
     };
     window.addEventListener('message', onMessage);
     try {
-      native.startNativeCapture?.(sdrWhiteNits, fps);
+      native.startNativeCapture?.(sdrWhiteNits, fps, expectId);
     } catch (err) {
       window.removeEventListener('message', onMessage);
       clearTimeout(handover);
@@ -286,10 +291,14 @@ export async function captureNative(
    *
    * **And it must not outlive the capture.** WGC stopping is indistinguishable, from here, from a
    * screen that is merely still — so a repeater with no limit would keep a dead capture looking
-   * perfectly alive: green stats, a "live" badge, and viewers staring at one frozen image. The
-   * likeliest way to get there is the user pressing Win+Alt+B, which on an HDR feature is not an
-   * exotic scenario. So: give up after MAX_REPEATS, or as soon as the addon reports the capture
-   * item closed, and end the track — `ended` is what host.ts listens to for "the source is gone".
+   * perfectly alive: green stats, a "live" badge, and viewers staring at one frozen image. So:
+   * give up after MAX_REPEATS, or as soon as the addon reports the capture item closed, and end
+   * the track — `ended` is what host.ts listens to for "the source is gone".
+   *
+   * This used to name Win+Alt+B as the likeliest way to get there. It is not: measured
+   * (tools/hdr-toggle-recovery.cjs), toggling HDR neither closes the item nor stops the frames —
+   * the reference white moves and the poll above follows it. The measured closer is a captured
+   * window being destroyed, which makes MAX_REPEATS the branch that carries the rest.
    *
    * MAX_REPEATS is the net for when the addon does NOT report it — see the constant for why it is
    * as long as it is, and why that branch is not the one doing the work. A minimised window gets
