@@ -997,9 +997,18 @@ que c'était fini. Ce cas arrête maintenant le partage avec sa raison.
   La porte est donc **skippée** quand l'écran n'est jamais devenu immobile, comme celle
   du H.265 : sinon elle mesure la pièce. La logique du répéteur, elle, est couverte de
   façon déterministe en e2e (frames comptées sur la track elle-même).
-- **Deux portes du harness varient avec la charge** (cadence encodée, résolution
-  pleine) : sur une machine occupée l'encodeur descend à 1080p ou sous 20 fps. Elles
-  alternent d'un run à l'autre sur du code identique.
+- **La cadence encodée varie avec la charge** : sur une machine occupée l'encodeur
+  descend sous 20 fps et la porte alterne d'un run à l'autre sur du code identique.
+  Sa jumelle « résolution pleine » ne le fait plus — elle lit
+  `qualityLimitationReason` (exposé par Electron 43, contrairement à
+  `encoderImplementation`) et se **skippe** quand l'encodeur déclare avoir été
+  contraint, en gardant le vrai échec : perdre la résolution alors qu'il dit `none`.
+  Mesuré avant : 5 rouges sur 12 runs, toutes en 1440p→1080p.
+- **La porte du tone map est bruyante ~1 run sur 3**, et le mécanisme est identifié :
+  son `mean()` ne distingue pas une image fraîche d'une **répétition**. Quand l'écran
+  se calme, le répéteur ressert la dernière image — tone-mappée à l'exposition
+  précédente — et l'échantillon de restauration mesure l'ancienne. Le compteur de
+  frames de l'addon est le témoin qui trancherait. Non fait.
 - **Le routage est couvert depuis `e2e/desktop-hdr.spec.ts`**, mais seulement
   au-dessus du port. `fakeNative(page, { nativeCapture })` imite le contrat du
   preload — un `MessageChannel`, un `window.postMessage` synchrone, des `VideoFrame`
@@ -1014,12 +1023,13 @@ que c'était fini. Ce cas arrête maintenant le partage avec sa raison.
   si le HDR est allumé entre le listing et la confirmation, et idem pour une fenêtre
   choisie sur l'écran SDR puis glissée sur l'écran HDR. Rien de tout ça n'est
   réparable depuis le renderer.
-- **Le coût à froid du premier `startCapture`.** Le device est maintenant réutilisé
-  entre deux captures, donc tout démarrage suivant coûte ~32 ms — mais le tout premier
-  du process en coûte encore ~185, sur le thread du renderer. `napi_async_work`
-  reste la sortie, ou une préchauffe à l'ouverture du picker (l'hôte a déjà signalé
-  son intention et le picker reste ouvert ~1 s). Non fait tant que personne ne s'en
-  plaint : voir le `ponytail:` sur `StartupTiming`.
+- **Le coût de `startCapture` est réglé, mais par déplacement, pas par suppression.**
+  Le device est réutilisé entre deux captures (~32 ms au lieu de ~148), et le coût à
+  froid est **préchauffé** : le preload le paie à l'ouverture du picker depuis un
+  `requestIdleCallback`, main le paie juste après le premier rendu. Mesuré : premier
+  démarrage 188,9 → **37,8 ms**. Reste que la préchauffe elle-même est ~115-148 ms de
+  C++ **synchrone**, simplement placée là où personne n'attend. `napi_async_work`
+  serait la vraie sortie ; non fait tant que ce placement suffit.
 - **Le repli quand l'item se ferme.** `GraphicsCaptureItem::Closed` est abonné et
   remonte dans `captureStats().closed` (écran débranché, session RDP, HDR coupé au
   `Win+Alt+B`). `onSourceEnded` le **lit** désormais et arrête le partage avec une
