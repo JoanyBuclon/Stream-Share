@@ -56,6 +56,10 @@ export async function listCameras(): Promise<NativeSource[]> {
         // produced it (OBS, in the pilot). Only a screen can be captured natively, so none of the
         // native-capture fields apply.
         hdr: false,
+        // KNOWN false, not unknown. These come from `enumerateDevices` in the page, so there is no
+        // shell lookup that could have failed — and a camera has no output to resolve. Saying
+        // "unknown" here would put the "captured without HDR" chip on every webcam share.
+        hdrKnown: true,
         sdrWhiteNits: 0,
         sdrWhiteMeasured: false,
         thumbnail: NO_THUMBNAIL,

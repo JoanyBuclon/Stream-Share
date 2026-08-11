@@ -164,6 +164,15 @@ export interface PickerSource {
   kind: 'screen' | 'window';
   meta: string;
   hdr: boolean;
+  /** Whether `hdr` is a READING or a default. False means the shell never resolved which output
+   *  this source is on — the addon did not load, DXGI enumerated nothing, or the source matched no
+   *  display — so `hdr: false` is what we fell back to, not what we measured.
+   *
+   *  The two were indistinguishable, and that was the last HDR blind spot: an installation whose
+   *  capture addon is missing reports every source as SDR, takes the clamped path, and shows no
+   *  chip, because the chip is derived from `hdr` too. Exactly the failure that shipped once with a
+   *  missing `extraResources` entry — HDR silently absent, every counter green. */
+  hdrKnown: boolean;
   sdrWhiteNits: number;
   sdrWhiteMeasured: boolean;
   thumbnail: string;
@@ -281,6 +290,8 @@ export function pickerSources(
         // as "main holds a device name for this source", which is what lets the renderer ask for
         // the native path without ever naming a display.
         hdr: output?.hdr ?? false,
+        // …and whether that `false` is a reading or a shrug. See the field.
+        hdrKnown: output !== null,
         // The tone map's divisor, carried alongside so the renderer never has to guess it. Only
         // meaningful when `sdrWhiteMeasured`; the 80 fallback is a plausible-looking number that
         // would be wrong by up to 6x.

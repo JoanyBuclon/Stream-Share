@@ -571,11 +571,22 @@ il tourne.
 > fonctionnel, et la feature absente sans une seule erreur.
 
 Première pièce, l'**interrupteur** : `IDXGIOutput6::GetDesc1` rend l'espace
-colorimétrique *courant* du compositeur (`G2084` = HDR allumé). Le web ne sait pas
-répondre à ça — `matchMedia('(dynamic-range: high)')` donne la **capacité** de
-l'écran, jamais son état. Le drapeau remonte **par source** dans `ss:sources`, parce
-que partager l'écran SDR d'une machine qui en a aussi un HDR ne doit pas emprunter
-le chemin natif.
+colorimétrique *courant* du compositeur (`G2084` = HDR allumé). Le drapeau remonte
+**par source** dans `ss:sources`, parce que partager l'écran SDR d'une machine qui en
+a aussi un HDR ne doit pas emprunter le chemin natif.
+
+> Cette section affirmait que « le web ne sait pas répondre à ça,
+> `matchMedia('(dynamic-range: high)')` donne la **capacité** de l'écran, jamais son
+> état ». Jamais mesuré, et au moins la première moitié est fausse : la requête est
+> évaluée **par écran** et s'accorde avec DXGI sur les deux sorties de la machine de dev
+> — `true` sur le panneau HDR, `false` sur le SDR, avec `color-gamut: p3` et
+> `colorDepth: 30` contre `24` qui vont dans le même sens (`tools/dynamic-range-probe.cjs`).
+> Ce qui reste non tranché est capacité **ou** état courant : le second écran n'est pas
+> HDR-capable, donc il ne distingue pas les deux hypothèses.
+>
+> Ça ne remet pas DXGI en cause — la requête répond pour l'écran de la **fenêtre**, pas
+> pour la source partagée, et ne donne ni le blanc de référence ni la luminance max. Mais
+> elle suffit comme **filtre**, et c'est à ce titre qu'elle sert : voir `hdrKnown`.
 
 L'association écran Electron ↔ sortie DXGI vit dans `nativeDisplayFor`
 (`config.ts`, testée) : Electron n'expose jamais le nom de périphérique Windows d'un
@@ -1162,13 +1173,25 @@ d'activation, puis l'échelle de repli).
   transférées depuis un canvas — et le reste est du vrai code : le picker, `host.ts`,
   `native-video.ts`, le `MediaStreamTrackGenerator`. Ce qu'aucun de ces tests ne
   touche : l'addon, Electron, et le câblage IPC.
-- **Les angles morts de détection HDR sont fermés, sauf un.** Fermés : l'origine en
-  DPI mixte, via `Display.nativeOrigin` (voir § HDR), et la classification figée au
-  moment du listing, via le veilleur de `host.ts` (§ La bascule à chaud). Reste le cas
-  où l'addon lui-même ne rapporte pas la sortie — pas de correspondance d'origine *et*
-  pas de `nativeOrigin` : l'écran part sur le chemin clampé et **n'affiche aucune
-  puce**, puisque `hdr` vaut `output?.hdr ?? false` et que la puce est dérivée de ce
-  même drapeau. Silencieux par construction.
+- **Les angles morts de détection HDR sont fermés.** L'origine en DPI mixte, via
+  `Display.nativeOrigin` ; la classification figée au listing, via le veilleur de
+  `host.ts` ; et le dernier, `hdr: output?.hdr ?? false`, qui confondait « résolu, c'est
+  du SDR » avec « jamais résolu ». La puce étant dérivée du même drapeau, une
+  installation dont l'addon de capture ne charge pas rapportait tout en SDR, clampait
+  tous ses partages, et **ne disait rien** — la panne exacte livrée une fois avec un
+  `extraResources` manquant, HDR absent de toute l'app, tous les compteurs au vert.
+
+  `hdrKnown` sépare les deux (`output !== null`), et `matchMedia('(dynamic-range: high)')`
+  sert de **filtre anti-bruit** : sans lui, cette même installation porterait la puce sur
+  chaque partage à vie, y compris sur un parc sans un seul panneau HDR, où les mots sont
+  vrais et sans intérêt. La requête n'est consultée **que** quand le shell a déjà échoué
+  à répondre — un partage dont la sortie est résolue ne la touche jamais, ce qui l'empêche
+  de déborder sur le chemin normal (test dédié).
+
+  Limite assumée, parce qu'elle est réelle : la requête répond pour l'écran de la
+  **fenêtre**, pas pour la source partagée. Sur un bureau mixte HDR/SDR avec un addon
+  cassé, elle peut donc se tromper dans les deux sens. C'est strictement mieux que le
+  silence qu'elle remplace, et ça ne tourne que sur une machine déjà dégradée.
 - **Le coût de `startCapture` est réglé, mais par déplacement, pas par suppression.**
   Le device est réutilisé entre deux captures (~32 ms au lieu de ~148), et le coût à
   froid est **préchauffé** : le preload le paie à l'ouverture du picker depuis un

@@ -565,6 +565,66 @@ test('an upgrade that keeps failing gives up, and never disturbs the share it co
   await ctx.close();
 });
 
+// The last HDR blind spot. `hdr` was `output?.hdr ?? false`, so "the shell resolved this output and
+// it is SDR" and "the shell resolved nothing" arrived as the same false — and the chip, derived
+// from that flag, stayed hidden for both. An installation whose capture addon never loaded reports
+// every source SDR, clamps every share, and says NOTHING. That shipped once, with a missing
+// `extraResources` entry: HDR absent from the whole app, every counter green.
+//
+// `hdrKnown` separates them, and the media query is the filter that keeps it from becoming noise —
+// measured per-display and in agreement with DXGI (tools/dynamic-range-probe.cjs).
+test('a share the shell could not classify says so, but only on a display that could be HDR', async ({ browser }) => {
+  const ctx = await browser.newContext();
+  const page = await ctx.newPage();
+  await fakeDisplayMedia(page, { audio: true, sizes: [[1920, 1080]] });
+  // The broken installation: no native capture, and nothing resolved, so every source reads SDR.
+  await fakeNative(page, { hdrUnknown: true, dynamicRangeHigh: true });
+  await openPicker(page);
+  await pick(page, 'screen', 'Screen 1');
+
+  await previewHeight(page).toBe(1080);
+  // Nothing claimed the source was HDR — this is the chip earned by NOT KNOWING.
+  expect(await page.evaluate(() => (window as unknown as { __listed?: number[] }).__listed?.length)).toBe(1);
+  await expect(page.locator('#host-hdr-clamped')).toBeVisible();
+  await expect(page.locator('#host-hdr-clamped')).toHaveText('captured without HDR');
+
+  await ctx.close();
+});
+
+// …and the other half, which is what stops it being permanent noise: the same broken shell on a
+// machine whose panel cannot do HDR at all. The words would still be true and would say nothing
+// worth reading, on every share, for ever.
+test('a shell that cannot classify stays quiet on a display that could not be HDR anyway', async ({ browser }) => {
+  const ctx = await browser.newContext();
+  const page = await ctx.newPage();
+  await fakeDisplayMedia(page, { audio: true, sizes: [[1920, 1080]] });
+  await fakeNative(page, { hdrUnknown: true, dynamicRangeHigh: false });
+  await openPicker(page);
+  await pick(page, 'screen', 'Screen 1');
+
+  await previewHeight(page).toBe(1080);
+  await expect(page.locator('#host-hdr-clamped')).toBeHidden();
+
+  await ctx.close();
+});
+
+// And a WORKING shell that resolved the output and read SDR must stay quiet too, whatever the panel
+// in front of the host can do. This is the assertion that keeps the media query from leaking onto
+// the normal path: it is only consulted when the shell has already failed to answer.
+test('a resolved SDR source stays quiet even on an HDR-capable display', async ({ browser }) => {
+  const ctx = await browser.newContext();
+  const page = await ctx.newPage();
+  await fakeDisplayMedia(page, { audio: true, sizes: [[1920, 1080]] });
+  await fakeNative(page, { dynamicRangeHigh: true }); // resolved: hdrKnown true, Screen 2 is SDR
+  await openPicker(page);
+  await pick(page, 'screen', 'Screen 2');
+
+  await previewHeight(page).toBe(1080);
+  await expect(page.locator('#host-hdr-clamped')).toBeHidden();
+
+  await ctx.close();
+});
+
 // The silent source substitution the `expectId` echo exists to stop. The shell's `selectedSourceId`
 // moves the instant the picker confirms, while the capture behind it can still fail — so the shell
 // can be approving a source the page never committed to. Harmless while every native start sat

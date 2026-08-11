@@ -22,6 +22,11 @@ interface NativeSource {
    *  path reachable: the page is never told any device name, it only picks a source and then asks
    *  the shell to capture whatever that pick approved. */
   readonly hdr: boolean;
+  /** Whether `hdr` above is a READING or a default. False means the shell never resolved which
+   *  output this source is on — its capture addon did not load, or the source matched no display —
+   *  so `hdr: false` is a fallback, not a measurement. A clamped share is only worth a word to the
+   *  host when the answer was `true` or when it was never known; see the chip in host.ts. */
+  readonly hdrKnown: boolean;
   /** Reference white for SDR content, in nits — the tone map's divisor. Only trustworthy when
    *  `sdrWhiteMeasured`; 0 means the shell has nothing to report. */
   readonly sdrWhiteNits: number;

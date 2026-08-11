@@ -93,6 +93,9 @@ export async function fakeNotifications(page: Page, opts: { focused?: boolean } 
 }
 
 /** Sources the fake desktop shell reports; `thumbnail`/`icon` stay tiny so the grid renders. */
+// `hdrKnown` rides along on every one of them: the shell resolved which output each source is on,
+// so their `hdr` is a reading. `fakeNative({ hdrUnknown: true })` flips it to model the shell that
+// could not resolve anything — the installation whose capture addon never loaded.
 const FAKE_SOURCES = [
   // Screen 1 is flagged HDR: the shell reports this per source, and a suite where nothing is ever
   // HDR could not tell "the flag is plumbed" from "the flag is always false". The SDR white level
@@ -125,10 +128,33 @@ const FAKE_SOURCES = [
  */
 export async function fakeNative(
   page: Page,
-  opts: { delaysMs?: number[]; fail?: boolean; nativeCapture?: 'ok' | 'throw' | 'noport'; noSdrWhite?: boolean } = {},
+  opts: {
+    delaysMs?: number[];
+    fail?: boolean;
+    nativeCapture?: 'ok' | 'throw' | 'noport';
+    noSdrWhite?: boolean;
+    /** The shell resolved no output for any source, so every `hdr: false` is a fallback rather than
+     *  a reading — what an installation whose capture addon failed to load actually reports. */
+    hdrUnknown?: boolean;
+    /** What `matchMedia('(dynamic-range: high)')` answers. Measured to be per-display and to agree
+     *  with DXGI (tools/dynamic-range-probe.cjs), and it is the noise filter that decides whether an
+     *  unresolved source is worth a word. Stubbed because a headless run has no HDR panel. */
+    dynamicRangeHigh?: boolean;
+  } = {},
 ): Promise<void> {
   await page.addInitScript(
-    ([sources, { delaysMs = [0], fail = false, nativeCapture = null, noSdrWhite = false }]) => {
+    ([
+      sources,
+      { delaysMs = [0], fail = false, nativeCapture = null, noSdrWhite = false, hdrUnknown = false, dynamicRangeHigh = false },
+    ]) => {
+      // Narrowly, and delegating everything else: host.ts is not the only thing on the page that
+      // asks (Tailwind and the pause UI use prefers-* queries), so replacing matchMedia wholesale
+      // would quietly change what the rest of the app sees.
+      const realMatchMedia = window.matchMedia.bind(window);
+      window.matchMedia = (query: string) =>
+        query.includes('dynamic-range')
+          ? ({ matches: dynamicRangeHigh, media: query, addEventListener() {}, removeEventListener() {} } as unknown as MediaQueryList)
+          : realMatchMedia(query);
       const px =
         'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
       let call = 0;
@@ -207,7 +233,15 @@ export async function fakeNative(
             (w.__listed ??= []).push(n);
             if (fail) throw new Error('e2e: listSources refused');
             // `unknown`, not `string`: the source list is no longer all strings since `hdr` landed.
-            return (sources as Array<Record<string, unknown>>).map((s) => ({ ...s, thumbnail: px, icon: null }));
+            // `hdrUnknown` also forces `hdr` back to false, because that is what main does: with no
+            // output resolved there is nothing to read it from, and the flag is the fallback.
+            return (sources as Array<Record<string, unknown>>).map((s) => ({
+              ...s,
+              hdr: hdrUnknown ? false : s.hdr,
+              hdrKnown: !hdrUnknown,
+              thumbnail: px,
+              icon: null,
+            }));
           },
           // Explicit, not omitted: the suite exercises the getDisplayMedia path, and a fake that
           // returned true here would silently route every spec through the native branch.

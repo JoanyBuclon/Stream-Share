@@ -626,13 +626,15 @@ export class HostController {
     show(el('btn-pause'));
     show(el('host-quality-bar'));
     setText('host-source-name', this.source?.name || video?.label || 'screen');
-    // An HDR screen that did NOT end up on the native path. Two routes lead here and neither has to
-    // signal it: capture() falling through when canCaptureNative() is false, and captureHdr's catch
-    // (the consent gate answering null, no DXGI output for that source, the addon refusing). Both
-    // land in setStream, and `native` is the only thing that can make the claim untrue — so the
-    // state is derived at the commit point instead of being a flag two failure paths must set and
-    // every success path must remember to clear. Hidden with the whole meta row by resetStage.
-    el('host-hdr-clamped').hidden = !this.source?.hdr || !!native;
+    // A share that did NOT end up on the native path, and is worth saying so about — see
+    // worthSayingClamped. Several routes land here and none of them has to signal it: capture()
+    // falling through when canCaptureNative() is false, captureHdr's catch (the consent gate
+    // answering null, no DXGI output, the addon refusing), and a shell whose addon never loaded.
+    // All of them go through setStream, and `native` is the only thing that can make the claim
+    // untrue — so the state is derived at the commit point rather than carried by a flag that two
+    // failure paths must set and every success path must remember to clear. Hidden with the whole
+    // meta row by resetStage.
+    el('host-hdr-clamped').hidden = !!native || !worthSayingClamped(this.source);
 
     try {
       await this.pushOutgoing(); // build outgoing + hot-swap existing viewers (serialized)
@@ -1604,6 +1606,40 @@ export function isAudible(spec: LiveSpec | null, name: string): boolean {
 /** A track that can still carry sound. `readyState` is the only honest test: a loopback track ends
  *  on its own when the default output device changes, and an ended one stays in the stream. */
 const isLiveTrack = (t: MediaStreamTrack): boolean => t.readyState === 'live';
+
+/**
+ * Does a clamped share deserve the "captured without HDR" chip?
+ *
+ * Two ways to earn it, and the second one is the blind spot this closes.
+ *
+ * 1. **The shell said the source is HDR** and we captured it anyway through getDisplayMedia. Plain,
+ *    and what the chip has always covered.
+ * 2. **The shell could not say.** `hdr` is `output?.hdr ?? false`, so "resolved, and it is SDR" and
+ *    "never resolved at all" arrived here as the same `false` — and the chip, derived from that
+ *    flag, stayed hidden for both. The dominant way to land in the second is an installation whose
+ *    capture addon did not load: HDR is then absent from the whole app, every share is clamped, and
+ *    NOTHING says so. That exact failure shipped once, with a missing `extraResources` entry.
+ *
+ * The media query is the noise filter case 2 needs, and it is measured rather than assumed
+ * (tools/dynamic-range-probe.cjs): `dynamic-range: high` is evaluated PER DISPLAY and agreed with
+ * DXGI on both outputs here — true on the HDR panel, false on the SDR one. docs/desktop.md claimed
+ * the web could not answer this at all; it can. Without it, a machine whose addon is missing would
+ * wear the chip on every share for ever, including a fleet with no HDR panel anywhere, where the
+ * words are true and useless.
+ *
+ * Its limit, stated because it is real: it answers for the display the APP WINDOW is on, not the
+ * shared source. On a mixed HDR/SDR desktop with a broken addon it can therefore be wrong in either
+ * direction. That is a strictly better guess than the silence it replaces, and it only ever runs
+ * when the shell has already failed to answer properly.
+ */
+function worthSayingClamped(source: NativeSource | null): boolean {
+  if (!source) return false; // the browser path: no shell, no picker, and no native path to miss
+  if (source.hdr) return true;
+  // `=== false` and not `!source.hdrKnown`: an older shell does not send the field at all, and
+  // treating "absent" as "unknown" would light the chip on every share it produces.
+  if (source.hdrKnown !== false) return false;
+  return window.matchMedia('(dynamic-range: high)').matches;
+}
 
 /** Which rows to draw: the listing, plus any app the live capture names that has dropped out of
  *  it. Minimising Discord to tray removes it from `Get-Process | Where MainWindowHandle` while its

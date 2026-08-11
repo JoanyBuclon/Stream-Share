@@ -341,6 +341,28 @@ test('pickerSources: meta en pixels physiques, fenêtre propre exclue, icône vi
   assert.equal(pickerSources([RAW[0]], scaled, [], undefined).sources[0].meta, '2561×1440');
 });
 
+// Le dernier angle mort HDR : `hdr: false` disait à la fois « résolu, c est du SDR » et « jamais
+// résolu ». La puce « captured without HDR » étant dérivée du même drapeau, une installation dont
+// l addon de capture ne charge pas rapportait tout en SDR, partait clampée, et n affichait RIEN —
+// la panne exacte livrée une fois avec un `extraResources` manquant. `hdrKnown` sépare les deux.
+test('pickerSources: hdrKnown distingue une lecture d un repli', () => {
+  const { sources } = pickerSources(RAW, PICKER_DISPLAYS, DISPLAYS, undefined);
+  // Les deux écrans sont résolus : leur `hdr` est une mesure, y compris quand elle vaut false.
+  assert.deepEqual(
+    sources.map((s) => [s.id, s.hdr, s.hdrKnown]),
+    [
+      ['screen:0:0', true, true],
+      ['screen:1:0', false, true],
+      // La fenêtre, sans résolveur de handle, n est rattachée à aucune sortie : on ne SAIT pas.
+      ['window:12:0', false, false],
+    ],
+  );
+  // Et sans addon du tout — le cas qui compte — plus rien n est une lecture.
+  const blind = pickerSources(RAW, PICKER_DISPLAYS, [], undefined);
+  assert.deepEqual(blind.sources.map((s) => s.hdrKnown), [false, false, false]);
+  assert.deepEqual(blind.sources.map((s) => s.hdr), [false, false, false], 'le repli reste false, il ne ment pas');
+});
+
 test('pickerSources: une source sans écran correspondant reste listée, sans chemin natif', () => {
   // display_id vide ou inconnu arrive vraiment (Electron le documente), et perdre la tuile serait
   // pire que perdre l étiquette de résolution.
@@ -348,6 +370,7 @@ test('pickerSources: une source sans écran correspondant reste listée, sans ch
   const { sources, devices } = pickerSources(orphan, PICKER_DISPLAYS, DISPLAYS, undefined);
   assert.equal(sources.length, 1);
   assert.equal(sources[0].hdr, false);
+  assert.equal(sources[0].hdrKnown, false, 'aucune sortie appariée : le false est un repli');
   assert.equal(sources[0].sdrWhiteMeasured, false);
   // 0, jamais 80 : la valeur par défaut de scRGB est un nombre parfaitement plausible qui rendrait
   // le tone map faux d'un facteur 6, et `sdrWhiteMeasured: false` est le seul garde-fou.
