@@ -276,7 +276,7 @@ app.whenReady().then(() => {
     // checkForUpdatesAndNotify already toasts once the download is READY to install. This is the
     // earlier moment — "there is a new version, it is coming down" — which is the one that
     // explains why a restart will be worth it. Not focus-gated, unlike the viewer toasts: the
-    // check runs once per launch, so this is at most one toast per start of the app.
+    // updater only fires this once per version found, so it stays at most one toast per update.
     autoUpdater.on('update-available', (info) => {
       if (!Notification.isSupported()) return;
       new Notification({
@@ -284,7 +284,14 @@ app.whenReady().then(() => {
         body: `Version ${info.version} is downloading. It installs the next time you quit.`,
       }).show();
     });
-    void autoUpdater.checkForUpdatesAndNotify();
+    // Re-check hourly, not just at launch. A launch-only check misses two real cases, both seen on
+    // v0.4.4: GitHub caches releases.atom (which is what the github provider reads) for a few
+    // minutes, so an app started right after a release is told there is nothing new — and it never
+    // asks again; and a share session left running for days never sees any release at all.
+    // ponytail: setInterval, no backoff. A failed check just logs and the next hour retries.
+    const check = () => void autoUpdater.checkForUpdatesAndNotify();
+    setInterval(check, 60 * 60 * 1000).unref();
+    check();
   }
 
   app.on('activate', () => {

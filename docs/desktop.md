@@ -1608,6 +1608,12 @@ laisser de trace. La procédure, dans cet ordre, tient en trois vérifications :
    **caractère pour caractère** au nom de l'asset publié. C'est le piège n°6.
 3. **Le `sha512`** — si un asset a dû être renommé à la main, comparer son
    empreinte à celle de `latest.yml` avant de supprimer l'ancien.
+4. **L'heure du lancement vs celle de la publication** — le provider GitHub lit
+   `releases.atom`, que GitHub sert en cache quelques minutes. Une app démarrée
+   dans la foulée d'une release s'entend répondre « rien de neuf ». C'est ce qui
+   est arrivé en v0.4.4 (lancement 5 min après publication, cache updater intact).
+   D'où la re-vérification horaire dans `main.ts` : le check au démarrage seul ne
+   suffit pas, et il ne se rejoue jamais.
 
 ## Décisions
 
