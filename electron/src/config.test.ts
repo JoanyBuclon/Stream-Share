@@ -113,7 +113,7 @@ test('parseAudioApps rejects rows that could not name a real process', () => {
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { resolveAppOrigin, wsOrigin, contentSecurityPolicy, isInternalUrl, isSafeExternalUrl, PROD_ORIGIN } from './config.ts';
+import { resolveAppOrigin, wsOrigin, contentSecurityPolicy, isInternalUrl, safeExternalUrl, PROD_ORIGIN } from './config.ts';
 
 test('wsOrigin: https→wss, http→ws, keeps host, no path', () => {
   assert.equal(wsOrigin('https://stream.joanybuclon.com'), 'wss://stream.joanybuclon.com');
@@ -177,18 +177,28 @@ test('contentSecurityPolicy: mirrors nginx-security-headers.conf outside connect
 
 // "Not internal" was being read as "safe to open externally". They are different sets, and the gap
 // between them was `file:` → shell.openExternal → an executable running with no prompt.
-test('isSafeExternalUrl: allow-list of schemes, not the negation of isInternalUrl', () => {
-  assert.equal(isSafeExternalUrl('https://github.com/JoanyBuclon/Stream-Share'), true);
-  assert.equal(isSafeExternalUrl('http://localhost:4321'), true, 'a dev/staging origin is http');
-  assert.equal(isSafeExternalUrl('mailto:someone@example.com'), true);
+test('safeExternalUrl: allow-list of schemes, not the negation of isInternalUrl', () => {
+  assert.equal(safeExternalUrl('https://github.com/JoanyBuclon/Stream-Share'), 'https://github.com/JoanyBuclon/Stream-Share');
+  assert.equal(safeExternalUrl('http://localhost:4321'), 'http://localhost:4321/', 'a dev/staging origin is http');
+  assert.equal(safeExternalUrl('mailto:someone@example.com'), 'mailto:someone@example.com');
   // The whole point of the change:
-  assert.equal(isSafeExternalUrl('file:///C:/Users/x/Downloads/payload.exe'), false);
-  assert.equal(isSafeExternalUrl('smb://attacker/share'), false);
-  assert.equal(isSafeExternalUrl('ms-msdt:/id PCWDiagnostic'), false);
-  assert.equal(isSafeExternalUrl('javascript:alert(1)'), false);
-  assert.equal(isSafeExternalUrl('app://bundle/'), false, 'internal is handled before this, never opened out');
-  assert.equal(isSafeExternalUrl('not a url'), false);
-  assert.equal(isSafeExternalUrl(''), false);
+  assert.equal(safeExternalUrl('file:///C:/Users/x/Downloads/payload.exe'), null);
+  assert.equal(safeExternalUrl('smb://attacker/share'), null);
+  assert.equal(safeExternalUrl('ms-msdt:/id PCWDiagnostic'), null);
+  assert.equal(safeExternalUrl('javascript:alert(1)'), null);
+  assert.equal(safeExternalUrl('vbscript:msgbox(1)'), null);
+  assert.equal(safeExternalUrl('shell:startup'), null);
+  assert.equal(safeExternalUrl('app://bundle/'), null, 'internal is handled before this, never opened out');
+  assert.equal(safeExternalUrl('not a url'), null);
+  assert.equal(safeExternalUrl(''), null);
+  // Scheme-relative and path-only are not URLs on their own: they must not resolve against anything.
+  assert.equal(safeExternalUrl('//evil.example/x'), null);
+  assert.equal(safeExternalUrl('/download'), null);
+  // Case is normalised by the parser, so an upper-case scheme is neither a bypass nor a rejection.
+  assert.equal(safeExternalUrl('HTTPS://example.com/'), 'https://example.com/');
+  // The reason this returns an href instead of a boolean: what gets opened must be what got
+  // checked. The parser drops the tab; a raw string handed to ShellExecute would still carry it.
+  assert.equal(safeExternalUrl('https://example.com\t/x'), 'https://example.com/x');
 });
 
 test('isInternalUrl: only app:// is internal, everything else opens externally', () => {

@@ -166,16 +166,20 @@ function alreadyInRoom(client, errorType) {
 
 function onCreate(client) {
   if (alreadyInRoom(client, 'error')) return;
+  const now = Date.now();
+  // Rate limit BEFORE the global cap, for the reason onJoin states about scanners: a refusal must
+  // still cost the caller its budget. The other order let a saturated server hand out free
+  // `server-full` replies at MSG_MAX_PER_SEC, so the very moment the service is under pressure is
+  // the moment its cheapest endpoint stops being rate-limited.
+  if (!allow('create', client.ip, now)) {
+    rejected.createRateLimited++;
+    return send(client.ws, 'error', { reason: 'rate-limited' });
+  }
   // Global ceiling. Every other limit here is per-IP, so a distributed flood — or the room leak
   // this file used to have — walks past all of them.
   if (rooms.size >= MAX_ROOMS) {
     rejected.roomCap++;
     return send(client.ws, 'error', { reason: 'server-full' });
-  }
-  const now = Date.now();
-  if (!allow('create', client.ip, now)) {
-    rejected.createRateLimited++;
-    return send(client.ws, 'error', { reason: 'rate-limited' });
   }
   const code = newCode(rooms);
   const hostToken = randomUUID(); // secret to take back control (reclaim) after a disconnect
@@ -448,6 +452,23 @@ export function createSignalingServer(opts = {}) {
       // string. The try/catch above covers ONLY the parse — `msg.type` on `null` threw
       // out of the handler, hence uncaughtException, hence the process dies along with all the rooms.
       if (!msg || typeof msg !== 'object') return;
+      // A DEREGISTERED client may not act, and this is the real invariant behind the room guards
+      // below — `alreadyInRoom` only asks "is it already somewhere", which a deregistered client
+      // answers `no` to, honestly and uselessly.
+      //
+      // `cleanup()` removes the client from `clients` and nulls its roomCode, but the socket stays
+      // live: `ws.close()` starts a CLOSING handshake and keeps delivering frames that were already
+      // in flight. So `leave` immediately followed by `join` — one TCP write, no round trip — ran
+      // both handlers, and the join re-parked a `room.viewers` entry under an id that `clients` no
+      // longer knows. At the real close, `cleanup` bails at this very check and never removes it.
+      // Measured on the revision that only closed the socket: 3 sockets → `viewers: 3` with
+      // `connections: 1`, and `leave`+`create` left 3 rooms with no host and no graceTimer, which
+      // nothing destroys — with MAX_ROOMS now in place that is a permanent `server-full`, not a
+      // slow leak.
+      //
+      // Here rather than in each handler: this is the one place every message passes through, and
+      // the condition is the same one `cleanup` uses to decide the client is gone.
+      if (clients.get(client.id) !== client) return;
       // Safety net for the handlers: the payload content stays untrusted even once the object
       // is validated (numeric code, object pseudo…). An unexpected value must never get past
       // the connection that sent it. Counted, not logged — the signaling writes nothing to

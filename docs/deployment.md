@@ -79,27 +79,36 @@ networks:
 
 ## Intégration continue (`.github/workflows/docker-publish.yml`)
 
-Repris du Portfolio, adapté à nos deux packages. Déclencheurs : `push` **et**
-`pull_request` sur `master` (une PR passe `quality` sans jamais publier). Actions
-**épinglées par SHA**. Deux jobs :
+Repris du Portfolio, adapté à nos trois packages. Déclencheurs : `push` sur `master`,
+`push` d'un tag `v*.*.*`, et `pull_request`. Actions **épinglées par SHA**. Trois jobs :
 
-1. **`quality`** — filet avant toute publication :
+1. **`quality`** — filet avant toute publication, sur **chaque** push et chaque PR :
    - `pnpm install --frozen-lockfile` (web **et** `signaling`).
-   - `pnpm audit --audit-level=high` sur les deux (bloque sur CVE haute/critique).
+   - `pnpm audit --audit-level=high` sur les **trois** packages. Celui de `electron/` tourne
+     sans installation préalable (`pnpm audit` lit le lockfile, pas `node_modules`) et **sans**
+     `--ignore-workspace` : `electron/pnpm-workspace.yaml` fait de ce dossier sa propre racine
+     pnpm et porte ses `overrides`, que le flag masquerait — voir `electron/README.md`.
    - `typecheck` (`astro check` sur les modules TS du front).
    - `lint` (`eslint .` — couvre aussi le JS du signaling depuis la config racine).
-   - **Tests unitaires** : `pnpm test` (lib client, `node --test "src/lib/*.test.ts"`)
-     **et** `pnpm --ignore-workspace --dir signaling test` (six suites : `rooms`,
-     `smoke`, `grace`, `ban`, `guards`, `authz`). `--ignore-workspace` est requis,
-     sinon le workspace racine capte le dossier et la commande no-op silencieusement.
+   - **Tests unitaires** : `pnpm test` (lib client, `node --test "src/lib/*.test.ts"`),
+     `pnpm --ignore-workspace --dir signaling test` (**huit** suites : `rooms`, `smoke`,
+     `grace`, `ban`, `guards`, `authz`, `room-hop`) et `node --test electron/src/config.test.ts`
+     (logique pure du shell, dont le test de parité CSP nginx ↔ `config.ts`).
+     `--ignore-workspace` reste requis pour `signaling`, qui n'a **pas** de
+     `pnpm-workspace.yaml` : sans le flag, le workspace racine capte le dossier et la commande
+     no-op silencieusement.
    - **E2E** : `pnpm e2e` (Playwright, projets `chromium` + `mobile`) — le vrai chemin
      WebRTC host↔viewer en headless.
-2. **`publish`** (dépend de `quality`, **uniquement sur `push`** — gaté par
-   `if: github.event_name == 'push'`) — **matrice deux images** (`web`, `signaling`) :
-   login GHCR, `metadata-action` (tags `latest` + `sha-<court>`), build & push Buildx
-   avec cache `gha` **scoped par image**.
+2. **`publish`** (dépend de `quality`, **uniquement sur un tag** — gaté par
+   `if: startsWith(github.ref, 'refs/tags/')`) — **matrice deux images** (`web`, `signaling`) :
+   login GHCR, `metadata-action` (tags `x.y.z` + `x.y` + `latest` + `sha-<court>`), build & push
+   Buildx avec cache `gha` **scoped par image**. Les tags semver sont ce qui rend un rollback
+   possible : épingler l'image à `:0.4.2` dans le compose et redéployer.
+3. **`desktop`** (même garde de tag) — build de l'installeur Windows, publication sur la Release
+   GitHub avec `latest.yml`, le `.blockmap` et un `SHA256SUMS.txt`. Voir `docs/desktop.md`.
 
-Rien ne se publie si un test, le lint ou le typecheck échoue.
+Rien ne se publie si un test, le lint, l'audit ou le typecheck échoue — et un push sur `master`
+ne publie rien du tout, il valide seulement.
 
 > L'infra est **agnostique au front** : l'image `web` embarque le `dist/` d'Astro
 > quel qu'en soit le contenu — faire évoluer l'UI ne demande aucun changement d'infra.
@@ -118,7 +127,7 @@ Content-Security-Policy:
   default-src 'self';
   connect-src 'self';                 # wss same-origin /ws — sinon lister l'origine ws
   media-src 'self' blob:;             # flux MediaStream dans <video>
-  script-src 'self' 'unsafe-inline';
+  script-src 'self';
   style-src 'self' 'unsafe-inline';
   img-src 'self' data:;
   font-src 'self';                    # police Hanken Grotesk auto-hébergée
@@ -130,6 +139,13 @@ Content-Security-Policy:
 
 - `connect-src 'self'` : autorise la socket signaling (`wss` same-origin).
 - `media-src blob:` : nécessaire pour attacher un `MediaStream` à `<video>`.
+- `script-src 'self'` **sans `'unsafe-inline'`** : le build Astro n'émet aucun script inline
+  (mesuré sur `dist/index.html` et `dist/download/index.html` : zéro `<script>` avec corps, zéro
+  handler `on*`). L'asymétrie avec `style-src` est délibérée — Astro émet bien un `<style>` inline
+  (le bloc `@font-face`), donc celui-là garde la permission.
+- Cette CSP est **miroir** de `contentSecurityPolicy()` dans `electron/src/config.ts` (le shell
+  desktop sert `dist/` sur `app://` et pose la sienne). Un test compare les deux directive par
+  directive, `connect-src` excepté — sous `app://` la socket est cross-origin et doit être nommée.
 - `Permissions-Policy: camera=(), microphone=(self), geolocation=(), payment=()` —
   **`microphone=(self)`** garde le micro host optionnel possible ; on **ne liste
   pas** `display-capture` (défaut `self`), sinon on couperait le partage d'écran.
@@ -151,6 +167,8 @@ le réseau `web` (port 8080). Le client se connecte en `wss://` — pas de certi
 | `ALLOWED_ORIGINS` | _(vide)_                       | Allow-list d'`Origin` (anti-CSWSH). Vide = pas de contrôle (dev).     |
 | `MAX_VIEWERS`     | `10`                           | Plafond de viewers par salon (au-delà → `join-error: full`).          |
 | `MAX_ROOMS_PER_MIN` | `10`                         | Créations de salon par minute et par IP (anti-abus). Relevé par la suite e2e, qui en ouvre une douzaine depuis une seule IP. |
+| `MAX_SOCKETS_PER_IP` | `50`                        | Sockets **simultanées** par IP (au-delà → fermeture `1013`). Volontairement large : même unité que les rate limits, donc même faiblesse CGNAT (un opérateur mobile met beaucoup d'utilisateurs derrière une adresse). |
+| `MAX_ROOMS`         | `500`                         | Plafond **global** de salons, toutes IP confondues (au-delà → `error: server-full`). Les autres limites sont par IP et ne voient pas un flood distribué. |
 
 ```
 // ponytail: pas de secret, pas de base, pas de volume. Deux conteneurs

@@ -7,8 +7,13 @@
 # desktop tree the whole time, and nothing said so because `pnpm audit` was never run on it:
 # 6 high (brace-expansion ×3, fast-uri, js-yaml), all reachable through electron-builder.
 #
-# Keep in step with the root pnpm-workspace.yaml. There is no way to share one list across a
-# separate-lockfile boundary; the duplication is the cost of the split.
+# This list is INDEPENDENT of the root pnpm-workspace.yaml, not a copy of it — the two trees pull
+# different packages at different majors, so they legitimately diverge (the root pins
+# brace-expansion@<=5.0.7 and 4.x; here it is 1.x, 2.x and 4.x, because glob, minimatch and
+# electron-builder each bring their own). An earlier version of this comment said "keep in step with
+# the root", which was already untrue when it was written and is the kind of instruction nothing
+# enforces. What actually keeps this honest is `pnpm audit --dir electron` in CI, which fails the
+# build on a high advisory — so add a pin here when it complains, not when the root changes.
 overrides:
   # Three ranges, not one: brace-expansion ships 1.x, 2.x and 4.x/5.x concurrently in this tree
   # (glob, minimatch and electron-builder each pull a different major), and a single override would

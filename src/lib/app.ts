@@ -82,6 +82,26 @@ function goHome(): void {
 
 // --- host flow ---
 
+// Reasons the signaling can refuse a `create`, mirroring JOIN_ERRORS on the viewer side. Without
+// this the host path handled ONLY `created`: any refusal left #btn-start disabled with no message,
+// so the button simply stopped working with nothing on screen to say why. `server-full` is what
+// made that worth fixing — it is a GLOBAL cap (MAX_ROOMS), so it hits everyone at once rather than
+// only whoever was hammering the server. The markup's own text is the fallback (see the element).
+const START_ERRORS: Record<string, string> = {
+  'server-full': 'the server is at capacity — try again in a few minutes',
+  'rate-limited': 'too many rooms opened — wait a minute',
+  'already-in-room': 'this tab is already hosting a room',
+};
+
+/** Show #start-error with an explicit message. Every caller passes one, deliberately: the element
+ *  ships with the connectivity wording as its markup default, and the moment one path overwrites
+ *  `textContent` the next path to call plain `show()` inherits whatever the previous failure said. */
+function startError(message: string): void {
+  const fail = el('start-error');
+  fail.textContent = message;
+  show(fail);
+}
+
 async function startShare(): Promise<void> {
   teardown();
   hide(el('start-error')); // a new attempt starts from a clean screen
@@ -102,6 +122,14 @@ async function startShare(): Promise<void> {
       history.replaceState(null, '', `#${m.code}`);
       showScreen('host');
       host = new HostController(current, m, { onEnd: goHome });
+    } else if (m.type === 'error') {
+      // The server refused. Same three exits as the viewer's join: stop listening, release the
+      // socket, re-arm the button, say something. goHome() does the first three (we never left the
+      // home screen, so it changes nothing visible) and the message goes after it, or goHome would
+      // hide the very element we are about to fill.
+      off();
+      goHome();
+      startError(START_ERRORS[m.reason] ?? 'the server refused to open a room — try again');
     }
   });
   try {
@@ -112,7 +140,7 @@ async function startShare(): Promise<void> {
     // so goHome doesn't change screen: it releases the socket. The message comes after, otherwise
     // goHome would hide it right away. The viewer path already handled this case; the host didn't.
     goHome(); // also re-arms #btn-start
-    show(el('start-error'));
+    startError('Could not reach the server — check your connection and try again.');
   }
 }
 

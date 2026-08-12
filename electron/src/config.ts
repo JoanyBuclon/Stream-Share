@@ -55,13 +55,19 @@ export interface RendererSecurity {
  *
  * What that costs, stated plainly: the renderer loses its OS sandbox. The page is not the vector —
  * it only ever loads our own bundle over app://, navigation is locked by isInternalUrl, and every
- * external link opens in the system browser. The vector is what the renderer *parses*: SDP, ICE
- * candidates and `control` messages arriving from arbitrary viewers over WebRTC.
+ * external link opens in the system browser over an allow-listed scheme (safeExternalUrl). The
+ * vector is what the renderer *parses*: SDP, ICE candidates and `control` messages arriving from
+ * arbitrary viewers over WebRTC.
  *
  * Which is exactly why the other two flags stop being defaults and become the last line: with the
  * sandbox off, `contextIsolation: false` or `nodeIntegration: true` would hand that same parser's
- * process full Node to the page's main world — and our CSP still carries `unsafe-inline`. Flipping
- * either is what this function exists to make loud instead of silent.
+ * process full Node to the page's main world. Flipping either is what this function exists to make
+ * loud instead of silent.
+ *
+ * `script-src` no longer carries `unsafe-inline` — that was removed once the build was measured to
+ * emit no inline script, and it is now locked by a test. `style-src` still does, and cannot stop
+ * (Astro emits an inline <style>), so the page can still be made to apply attacker-chosen CSS; it
+ * can no longer be made to run attacker-chosen script.
  */
 export function rendererSecurity(preload: string): RendererSecurity {
   return { preload, contextIsolation: true, nodeIntegration: false, sandbox: false };
@@ -434,33 +440,32 @@ export function isInternalUrl(url: string): boolean {
   }
 }
 
-/** Schemes the shell will hand to `shell.openExternal`. Everything else is dropped in silence.
- *
- *  `http:` as well as `https:` because a dev/staging shell runs against an http origin
- *  (`SS_APP_ORIGIN=http://localhost:4321`), and `mailto:` because that is the one non-web scheme
- *  the product has any reason to open. */
-const EXTERNAL_SCHEMES = new Set(['https:', 'http:', 'mailto:']);
-
 /**
- * Whether a URL may be handed to `shell.openExternal`.
+ * The URL to hand `shell.openExternal`, or null to drop it.
  *
  * **"Not internal" was being treated as "safe to open", and those are not the same set.**
  * `isInternalUrl` answers only "is this app://", so `file:`, `smb:`, `ms-msdt:` and every
  * third-party protocol handler installed on the machine fell through to `openExternal` — where
  * `file:///C:/…/payload.exe` is not a navigation, it is an execution, performed by us with no
- * prompt.
+ * prompt. An allow-list closes that; a deny-list of known-bad schemes would not, since the
+ * interesting ones are whatever happens to be registered on the victim's machine. See
+ * `rendererSecurity` for why this renderer in particular cannot afford the exit.
  *
- * It matters here more than in a typical Electron app, and the reason is written two functions up:
- * `rendererSecurity` turns the OS sandbox OFF so the HDR addon can live in the preload, and names
- * the vector — what the renderer *parses*: SDP, ICE candidates and `control` messages from
- * arbitrary viewers. This is the exit that vector would reach for. An allow-list is what closes it;
- * a deny-list of known-bad schemes would not, since the interesting ones are whatever happens to be
- * registered on the victim's machine.
+ * `http:` as well as `https:` because a dev/staging shell runs against an http origin
+ * (`SS_APP_ORIGIN=http://localhost:4321`); `mailto:` because it is the one non-web scheme the
+ * product has reason to open.
+ *
+ * **It returns the parsed href rather than a yes/no, so the string that was checked is the string
+ * that gets opened.** The two are not always equal: the WHATWG parser strips tabs and newlines,
+ * so `http://example.com\t/x` validates as a plain http URL while the raw text handed to
+ * ShellExecute still carries the tab. Returning `href` removes that gap by construction instead of
+ * asking every caller to remember to re-normalise.
  */
-export function isSafeExternalUrl(url: string): boolean {
+export function safeExternalUrl(url: string): string | null {
   try {
-    return EXTERNAL_SCHEMES.has(new URL(url).protocol);
+    const parsed = new URL(url);
+    return ['https:', 'http:', 'mailto:'].includes(parsed.protocol) ? parsed.href : null;
   } catch {
-    return false; // unparseable is not openable
+    return null; // unparseable is not openable
   }
 }

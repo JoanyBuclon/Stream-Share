@@ -35,7 +35,7 @@ connexion (envoyé dans `hello`) et ne route que par salon.
 | `signal`  | `{ to, data }`            | Relaie `data` (SDP offer/answer ou ICE candidate) au pair `to`. Sert aussi à l'ICE restart.                               |
 | `kick`    | `{ peerId }`              | **(host)** éjecte un viewer → `kicked` au viewer + fermeture de sa connexion.                                             |
 | `ban`     | `{ peerId }`              | **(host)** éjecte **et** bannit (IP + token, cf. [`rooms-and-codes.md`](./rooms-and-codes.md)) pour la durée du salon.    |
-| `leave`   | —                         | **Départ volontaire** (host : retour à l'accueil via le logo ; viewer : « quitter ») : fin **immédiate**. Host → salon détruit + viewers notifiés (`peer-left`) sur-le-champ ; viewer → retiré, host notifié. **Pas de grâce** (contrairement à une coupure de socket, qui elle laisse la fenêtre de reclaim). Note : le bouton **Stop** de l'host ne quitte **pas** — il coupe la source et garde le salon (cf. [`webrtc-media.md`](./webrtc-media.md#contrôles)). |
+| `leave`   | —                         | **Départ volontaire** (host : retour à l'accueil via le logo ; viewer : « quitter ») : fin **immédiate**. Host → salon détruit + viewers notifiés (`peer-left`) sur-le-champ ; viewer → retiré, host notifié. **Pas de grâce** (contrairement à une coupure de socket, qui elle laisse la fenêtre de reclaim). Note : le bouton **Stop** de l'host ne quitte **pas** — il coupe la source et garde le salon (cf. [`webrtc-media.md`](./webrtc-media.md#contrôles)). **Le serveur ferme la connexion** derrière ce message : `leave` termine la session, socket comprise. Sans cela le client restait déréférencé de `clients` mais toujours capable d'émettre, et un `join` envoyé dans la même salve reparquait un viewer fantôme que plus rien ne collectait. |
 
 ### Serveur → client
 
@@ -43,12 +43,12 @@ connexion (envoyé dans `hello`) et ne route que par salon.
 | --------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
 | `hello`         | `{ peerId }`                               | Id de connexion attribué à ce client.                                                                        |
 | `created`       | `{ code, display, hostToken, iceServers }` | Salon créé. `display` = code formaté `XXX-XXX`, `hostToken` = secret de reclaim, `iceServers` = config STUN. |
-| `error`         | `{ reason }`                               | Échec d'un `create` : `rate-limited` (plafond atteint) ou `already-in-room` (2ᵉ `create` sur une socket déjà en salon). |
+| `error`         | `{ reason }`                               | Échec d'un `create` : `rate-limited` (plafond par IP), `server-full` (plafond **global** `MAX_ROOMS`) ou `already-in-room` (la socket tient déjà un salon). |
 | `joined`        | `{ hostId, iceServers }`                   | Le viewer est entré ; id de l'host à contacter + config STUN.                                                |
-| `join-error`    | `{ reason }`                               | Code inconnu / salon fermé / banni (message opaque).                                                         |
+| `join-error`    | `{ reason }`                               | Code inconnu / salon fermé / banni (message opaque) / `full` / `rate-limited` / `already-in-room`.           |
 | `peer-joined`   | `{ peerId, pseudo }`                       | Notifie l'host qu'un viewer est arrivé → l'host initie l'offre.                                              |
 | `reclaimed`     | `{ viewers, iceServers }`                  | Reclaim réussi. `viewers` = `[{ peerId, pseudo }]` du salon repris.                                          |
-| `reclaim-error` | `{ reason }`                               | Reclaim refusé (salon absent, hors grâce, ou mauvais token).                                                 |
+| `reclaim-error` | `{ reason }`                               | Reclaim refusé : `invalid` (salon absent, hors grâce, mauvais token) ou `already-in-room`.                   |
 | `signal`        | `{ from, data }`                           | Transporte le SDP/ICE d'un pair vers l'autre.                                                                |
 | `kicked`        | `{ banned }`                               | Le viewer est éjecté (`banned:true` s'il est aussi banni) → écran de fin.                                    |
 | `peer-left`     | `{ peerId, reason? }`                      | Un pair a quitté → fermer la `RTCPeerConnection` associée.                                                   |
@@ -81,6 +81,19 @@ cycle de vie des salons — viewer retiré (host notifié `peer-left`), ou, si c
 l'host, **délai de grâce de 30 s** avant destruction (fenêtre de reclaim, cf.
 [`rooms-and-codes.md`](./rooms-and-codes.md)). Un **`leave` explicite** (retour à
 l'accueil) court-circuite la grâce : fin immédiate.
+
+**Invariant central** : un client retiré de la table `clients` ne peut plus rien faire. Le
+dispatcher le vérifie avant tout handler, et c'est la garde qui compte — `close()` ouvre une
+poignée de main de fermeture mais **continue de livrer les frames déjà en vol**, donc fermer la
+socket ne suffit pas à faire taire un client déréférencé. Corollaire : une socket tient **un seul**
+salon pour toute sa vie (`create`, `join` et `reclaim` refusent tous `already-in-room`).
+
+### Codes de fermeture
+
+| Code   | Quand                                                                                     |
+| ------ | ----------------------------------------------------------------------------------------- |
+| `1008` | Flood : plus de `MSG_MAX_PER_SEC` messages sur une seconde. Violation de politique.        |
+| `1013` | Plus de `MAX_SOCKETS_PER_IP` sockets simultanées pour cette IP. « Try again later » — c'est de la capacité, pas de la malveillance : un client derrière un CGNAT peut y arriver sans rien avoir fait. |
 
 ## Reconnexion (blip réseau)
 
