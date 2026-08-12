@@ -9,9 +9,9 @@ export default [
   ...tseslint.configs.recommended,
   ...astro.configs.recommended,
   {
-    // The measurement harnesses under tools/ are CommonJS on purpose: they are loaded by Electron's
-    // main process, which cannot import ESM. `require` there is the module system, not a style.
-    files: ['tools/*.cjs'],
+    // .cjs is CommonJS by definition — the tools/ harnesses loaded by Electron's main process, the
+    // electron-builder hooks. `require` there is the module system, not a style.
+    files: ['**/*.cjs'],
     rules: { '@typescript-eslint/no-require-imports': 'off' },
   },
   {
