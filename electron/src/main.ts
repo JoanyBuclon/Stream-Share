@@ -24,6 +24,7 @@ import {
   wsOrigin,
   parseAudioApps,
   hwndFromSourceId,
+  isSafeExternalUrl,
   createWakeLockToggle,
   kindOf,
   pickerSources,
@@ -124,15 +125,22 @@ function createWindow(): void {
 
   // In-app navigation stays within our bundled content; every external link opens in the
   // system browser (it must never load with the privileged preload attached).
+  //
+  // Three outcomes, not two, and the third is the one that was missing: internal → allowed here,
+  // external over an allow-listed scheme → system browser, ANYTHING ELSE → dropped. `isInternalUrl`
+  // only answers "is this app://", so treating its negation as "safe to open" handed `file:`,
+  // `smb:` and every registered protocol handler straight to `openExternal`. See `isSafeExternalUrl`.
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (!isInternalUrl(url)) void shell.openExternal(url);
+    if (!isInternalUrl(url) && isSafeExternalUrl(url)) void shell.openExternal(url);
     return { action: 'deny' };
   });
   win.webContents.on('will-navigate', (event, url) => {
-    if (!isInternalUrl(url)) {
-      event.preventDefault();
-      void shell.openExternal(url);
-    }
+    if (isInternalUrl(url)) return;
+    // preventDefault FIRST and unconditionally: a navigation we refuse to open externally is still
+    // a navigation we must refuse to perform. Returning early before this line would have let the
+    // window itself travel to the very URL we just judged unsafe.
+    event.preventDefault();
+    if (isSafeExternalUrl(url)) void shell.openExternal(url);
   });
 
   // The native AUDIO capture and the wake lock must not outlive the page that asked for them.

@@ -110,7 +110,10 @@ test('parseAudioApps rejects rows that could not name a real process', () => {
   ]);
   assert.deepEqual(parseAudioApps(json, 999), [{ pid: 12, name: 'Good', title: '' }]);
 });
-import { resolveAppOrigin, wsOrigin, contentSecurityPolicy, isInternalUrl, PROD_ORIGIN } from './config.ts';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { resolveAppOrigin, wsOrigin, contentSecurityPolicy, isInternalUrl, isSafeExternalUrl, PROD_ORIGIN } from './config.ts';
 
 test('wsOrigin: https→wss, http→ws, keeps host, no path', () => {
   assert.equal(wsOrigin('https://stream.joanybuclon.com'), 'wss://stream.joanybuclon.com');
@@ -131,6 +134,61 @@ test('contentSecurityPolicy: names the (cross-origin) signaling socket in connec
   assert.match(csp, /media-src 'self' blob:/);
   // dev origin keeps its port and downgrades to ws:
   assert.match(contentSecurityPolicy('http://localhost:4321'), /connect-src 'self' ws:\/\/localhost:4321/);
+});
+
+// The permission was dead weight — the build emits no inline script — and it sat on the one
+// renderer that runs without an OS sandbox. Asserted rather than merely removed, because the two
+// directives look interchangeable and only one of them can go.
+test("contentSecurityPolicy: script-src has no 'unsafe-inline', style-src still needs it", () => {
+  const csp = contentSecurityPolicy(PROD_ORIGIN);
+  // Scoped to the directive with `[^;]*` — a naive negative lookahead spans the whole header and
+  // trips over style-src's legitimate 'unsafe-inline' further along.
+  assert.ok(!/script-src[^;]*'unsafe-inline'/.test(csp), "script-src must not carry 'unsafe-inline'");
+  assert.match(csp, /script-src 'self'[;]?/, 'script-src is still declared');
+  assert.match(csp, /style-src 'self' 'unsafe-inline'/, 'Astro emits a real inline <style> (@font-face)');
+});
+
+// `config.ts:contentSecurityPolicy` claims to mirror nginx-security-headers.conf. Nothing checked
+// it, and the two are edited in different contexts (a TS module and an nginx conf) — so they would
+// drift, silently, in the direction of whichever one someone remembered. connect-src is the ONE
+// directive that legitimately differs: under app:// the signaling socket is cross-origin and must
+// be named, whereas on the web it is same-origin and 'self' covers it.
+test('contentSecurityPolicy: mirrors nginx-security-headers.conf outside connect-src', () => {
+  const confPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'nginx-security-headers.conf');
+  const conf = readFileSync(confPath, 'utf8');
+  const header = /add_header Content-Security-Policy "([^"]+)"/.exec(conf);
+  assert.ok(header, 'the CSP header is still declared in nginx-security-headers.conf');
+  const directives = (csp: string): Map<string, string> =>
+    new Map(
+      csp
+        .split(';')
+        .map((d) => d.trim())
+        .filter(Boolean)
+        .map((d) => [d.split(/\s+/)[0], d]),
+    );
+  const web = directives(header[1]);
+  const shell = directives(contentSecurityPolicy(PROD_ORIGIN));
+  assert.deepEqual([...shell.keys()].sort(), [...web.keys()].sort(), 'same set of directives on both sides');
+  for (const [name, value] of web) {
+    if (name === 'connect-src') continue; // app:// needs the wss origin spelled out; the web does not
+    assert.equal(shell.get(name), value, `${name} must match between nginx and the shell`);
+  }
+});
+
+// "Not internal" was being read as "safe to open externally". They are different sets, and the gap
+// between them was `file:` → shell.openExternal → an executable running with no prompt.
+test('isSafeExternalUrl: allow-list of schemes, not the negation of isInternalUrl', () => {
+  assert.equal(isSafeExternalUrl('https://github.com/JoanyBuclon/Stream-Share'), true);
+  assert.equal(isSafeExternalUrl('http://localhost:4321'), true, 'a dev/staging origin is http');
+  assert.equal(isSafeExternalUrl('mailto:someone@example.com'), true);
+  // The whole point of the change:
+  assert.equal(isSafeExternalUrl('file:///C:/Users/x/Downloads/payload.exe'), false);
+  assert.equal(isSafeExternalUrl('smb://attacker/share'), false);
+  assert.equal(isSafeExternalUrl('ms-msdt:/id PCWDiagnostic'), false);
+  assert.equal(isSafeExternalUrl('javascript:alert(1)'), false);
+  assert.equal(isSafeExternalUrl('app://bundle/'), false, 'internal is handled before this, never opened out');
+  assert.equal(isSafeExternalUrl('not a url'), false);
+  assert.equal(isSafeExternalUrl(''), false);
 });
 
 test('isInternalUrl: only app:// is internal, everything else opens externally', () => {

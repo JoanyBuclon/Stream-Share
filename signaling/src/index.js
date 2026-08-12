@@ -26,6 +26,20 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
   .map((o) => o.trim())
   .filter(Boolean);
 const MAX_VIEWERS = Number(process.env.MAX_VIEWERS) || 10;
+// Live sockets per IP. The rate limits above bound how fast an IP can act; nothing bounded how
+// much it could HOLD — an IP could keep opening sockets, each carrying a 64 KB receive buffer and
+// a `clients` entry, until the process died. Deliberately generous rather than tight: this is the
+// same per-IP unit as the rate limits, so it inherits their CGNAT weakness (a mobile carrier puts
+// many real users behind one address), and starving them would be a worse failure than the flood.
+const MAX_SOCKETS_PER_IP = Number(process.env.MAX_SOCKETS_PER_IP) || 50;
+// Global ceiling, all IPs together — the per-IP limits above are per-IP by construction, so a
+// distributed flood walks straight past them. At MAX_VIEWERS each that is ~5000 clients, well past
+// what a mesh topology can serve anyway.
+const MAX_ROOMS = Number(process.env.MAX_ROOMS) || 500;
+// A viewer's ban token (localStorage UUID, 36 chars). Bounded because it is COPIED into
+// `room.bannedTokens` on a ban and lives there for the room's lifetime: unbounded, a single join
+// could park ~63 KB (the MAX_PAYLOAD ceiling) per ban, and nothing else capped it.
+const MAX_TOKEN_LEN = 100;
 const MAX_PAYLOAD = 64 * 1024; // SDP/ICE fit in a few KB
 const MSG_MAX_PER_SEC = 60; // beyond this, the connection is closed
 const HEARTBEAT_MS = 30_000; // ping every 30 s; a socket with no pong by the next round is dead
@@ -53,7 +67,12 @@ const RATE = {
 // Cumulative counters since startup, exposed by /health. The rejections are what tell whether
 // we're under attack — `rooms`/`viewers` only tell whether the service is serving. Deliberately
 // flat integers: no time series here, that's the job of whatever scrapes it.
-const rejected = { createRateLimited: 0, joinRateLimited: 0, originRejected: 0, floodClosed: 0, banned: 0, handlerError: 0 };
+const rejected = { createRateLimited: 0, joinRateLimited: 0, originRejected: 0, floodClosed: 0, banned: 0, handlerError: 0, socketsPerIp: 0, roomCap: 0, alreadyInRoom: 0 };
+
+// Live socket count per IP, for MAX_SOCKETS_PER_IP. Incremented on connection, decremented on
+// close — so unlike the rate-limit logs this is a gauge, not a window, and needs no sweeping: an
+// IP with no live socket is deleted outright.
+const sockets = new Map();
 
 function allow(kind, ip, now) {
   const { log, max, window } = RATE[kind];
@@ -70,6 +89,7 @@ function allow(kind, ip, now) {
 export function _resetState() {
   rooms.clear();
   clients.clear();
+  sockets.clear();
   RATE.create.log.clear();
   RATE.join.log.clear();
   for (const k of Object.keys(rejected)) rejected[k] = 0;
@@ -111,12 +131,47 @@ function send(ws, type, payload = {}) {
   if (ws.readyState === OPEN) ws.send(JSON.stringify({ type, ...payload }));
 }
 
+/**
+ * A socket holds exactly ONE room, for its whole life. True of `create` from the start; `join` and
+ * `reclaim` were missing it, and that was a remotely exploitable DoS rather than untidiness.
+ *
+ * Both overwrite `client.roomCode` (and `reclaim` overwrites `client.id` as well) without leaving
+ * the previous room. `cleanup` only ever collects `rooms.get(client.roomCode)` — the LAST room — so
+ * the earlier membership becomes uncollectable, and the two halves fail differently:
+ *
+ * - **As a viewer**, the stale id stays in `room.viewers` while disappearing from `clients`. It
+ *   holds a slot against MAX_VIEWERS for the life of the room, and the host cannot expel it:
+ *   `onKickBan` looks the peer up in `clients` and returns silently when it is gone. Measured: ten
+ *   sockets doing `join <victim>` → `join <other>` → disconnect leave `viewers: 10, connections: 2`
+ *   and every later viewer gets `join-error: full`. Permanent, from nothing but a share link. The
+ *   `reclaim` variant is cheaper still — three sockets, because the attacker parks a viewer entry
+ *   and then walks away by reclaiming a room of their own.
+ * - **As a host**, the room itself survives with no socket and no `graceTimer`, so `destroyRoom` is
+ *   never reached by any path. Measured: `rooms` grows by one per create+join+disconnect and never
+ *   comes back down. Unbounded memory, and the code leaves the pool for good.
+ *
+ * Refusing (rather than silently moving the client) mirrors what `create` has always done, and
+ * costs nothing today: the front opens a fresh socket for every attempt — `app.ts:teardown` closes
+ * the previous one, and `Signaling.open()` constructs a new WebSocket even on a reconnect, so a
+ * `reclaim` always lands on a connection whose `roomCode` is null. Switching rooms on a live socket
+ * is not a flow that exists. If it ever becomes one, this turns into a `detachFromRoom(client)`
+ * that leaves properly — not into three separate relaxations.
+ */
+function alreadyInRoom(client, errorType) {
+  if (!client.roomCode) return false;
+  rejected.alreadyInRoom++;
+  send(client.ws, errorType, { reason: 'already-in-room' });
+  return true;
+}
+
 function onCreate(client) {
-  // A socket holds only one room. Without this guard, a second `create` overwrites `client.roomCode`
-  // and the previous room becomes orphaned: `cleanup` only collects the last one, the others
-  // live on without a host until OOM and their code leaves the pool. The front never opens two
-  // rooms on the same socket (app.ts).
-  if (client.roomCode) return send(client.ws, 'error', { reason: 'already-in-room' });
+  if (alreadyInRoom(client, 'error')) return;
+  // Global ceiling. Every other limit here is per-IP, so a distributed flood — or the room leak
+  // this file used to have — walks past all of them.
+  if (rooms.size >= MAX_ROOMS) {
+    rejected.roomCap++;
+    return send(client.ws, 'error', { reason: 'server-full' });
+  }
   const now = Date.now();
   if (!allow('create', client.ip, now)) {
     rejected.createRateLimited++;
@@ -132,6 +187,9 @@ function onCreate(client) {
 
 // The host takes back its room after a disconnect, within the grace window, via its hostToken.
 function onReclaim(client, { code, hostToken }) {
+  // See `alreadyInRoom`. Cheapest of the three to exploit, and the only one that also moves
+  // `client.id` — which is what strands the previous entry beyond any reach of `cleanup`.
+  if (alreadyInRoom(client, 'reclaim-error')) return;
   const room = rooms.get(normalize(code));
   // Reclaimable only if the room exists, is in grace (host absent) and the token matches.
   if (!room || !room.graceTimer || room.hostToken !== hostToken) {
@@ -159,6 +217,9 @@ function destroyRoom(room) {
 }
 
 function onJoin(client, { code, pseudo, token }) {
+  // Before the rate limit, not after: this costs no lookup and consumes no budget, and a client
+  // that is already somewhere has nothing to gain from a join either way. See `alreadyInRoom`.
+  if (alreadyInRoom(client, 'join-error')) return;
   // Counted before any check: a scanner must not get free attempts
   // on non-existent codes — those are precisely the ones it sends en masse.
   if (!allow('join', client.ip, Date.now())) {
@@ -178,7 +239,12 @@ function onJoin(client, { code, pseudo, token }) {
   if (room.viewers.size >= MAX_VIEWERS) return send(client.ws, 'join-error', { reason: 'full' });
   client.roomCode = room.code;
   client.role = 'viewer';
-  client.token = token || '';
+  // Typed AND bounded, like `pseudo` below and `code` in normalize(). It was the one protocol field
+  // taking whatever JSON.parse produced: a non-string sailed through `token || ''` into
+  // `room.bannedTokens`, where `isBanned`'s `!!token` accepts it but no equality ever matches — so
+  // the ban path that exists FOR the CGNAT case (rooms.js) silently stopped catching anyone. See
+  // MAX_TOKEN_LEN for the size half.
+  client.token = typeof token === 'string' ? token.slice(0, MAX_TOKEN_LEN) : '';
   // `String()`: `pseudo` comes from JSON.parse, so from any type — a number threw
   // on `.slice`. The cap at 20 is the only bound on the server side, the front sets none.
   const name = String(pseudo ?? 'viewer').slice(0, 20);
@@ -245,6 +311,21 @@ function onLeave(client, grace) {
     destroyRoom(room); // notifies the viewers (peer-left host-left) + frees the code, no grace
   }
   cleanup(client, grace); // removes the client; for a viewer, also notifies the host
+  // `leave` ENDS the session, so end the connection with it. Not tidiness — `cleanup` deletes the
+  // client from `clients` while the socket stays open and usable, which produced an orphan: an
+  // object with `roomCode: null` (so the alreadyInRoom guard waves it through) that is no longer
+  // reachable through `clients`. A `leave` followed by a second `join` then re-created exactly the
+  // ghost that guard exists to prevent — measured `viewers: 1` still standing after the socket was
+  // gone, because the close handler's `cleanup` bails at `clients.get(client.id) !== client` and
+  // never removes the viewer entry. Closing is the smallest fix that removes the orphan STATE
+  // rather than adding a second guard against reaching it, and it is what onKickBan already does.
+  // The front closes the socket right after `leave` anyway (app.ts teardown), so nothing changes
+  // for it; a client wanting another room opens a connection, like every other entry point.
+  try {
+    client.ws.close();
+  } catch {
+    // already closing — cleanup has run, which is all that mattered
+  }
 }
 
 export function createSignalingServer(opts = {}) {
@@ -311,6 +392,24 @@ export function createSignalingServer(opts = {}) {
     ws.isAlive = true;
     ws.on('pong', () => (ws.isAlive = true)); // the client answers our ping automatically
     const ip = clientIp(req);
+
+    // Accounting registered BEFORE the cap check below, so a refused socket still decrements on the
+    // close we are about to trigger — otherwise a flooder's own rejections would inflate the gauge
+    // until the IP could never connect again, turning an anti-abuse limit into a self-inflicted ban.
+    sockets.set(ip, (sockets.get(ip) ?? 0) + 1);
+    ws.on('close', () => {
+      const left = (sockets.get(ip) ?? 1) - 1;
+      if (left > 0) sockets.set(ip, left);
+      else sockets.delete(ip); // an IP with nothing open leaves no key behind
+    });
+
+    if ((sockets.get(ip) ?? 0) > MAX_SOCKETS_PER_IP) {
+      rejected.socketsPerIp++;
+      // 1013 "try again later", not 1008: this is capacity, not misbehaviour, and a legitimate
+      // client sharing a carrier NAT can land here through no fault of its own.
+      return ws.close(1013, 'too-many-connections');
+    }
+
     const client = { id: genId(), ws, ip, token: '', roomCode: null, role: null };
     clients.set(client.id, client);
     send(ws, 'hello', { peerId: client.id });

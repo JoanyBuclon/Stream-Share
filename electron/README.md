@@ -76,10 +76,9 @@ does **not** work: pnpm still raises `ERR_PNPM_IGNORED_BUILDS`; only the CLI fla
 ## Why `esbuild-wasm` and not `esbuild`
 
 `esbuild` ships a native binary installed by a lifecycle script. pnpm 11 blocks those unless the
-package is listed under `allowBuilds`, which it reads **only** from `pnpm-workspace.yaml` — and
-this project is installed with `--ignore-workspace`, so neither the root file nor a local one is
-read (`package.json` settings aren't honoured either). CI would then fail with
-`ERR_PNPM_IGNORED_BUILDS`. `esbuild-wasm` is pure JS/WASM with no lifecycle script, same CLI:
+package is listed under `allowBuilds`, and every install here passes `--ignore-scripts` anyway (see
+above), so CI would fail with `ERR_PNPM_IGNORED_BUILDS`. `esbuild-wasm` is pure JS/WASM with no
+lifecycle script, same CLI:
 building these two files takes ~150 ms instead of ~10 ms, which is irrelevant here.
 
 ```
@@ -89,21 +88,29 @@ building these two files takes ~150 ms instead of ~10 ms, which is irrelevant he
 ## Standalone sub-project
 
 Like `signaling/`, this has its own lockfile and is **not** part of the root pnpm workspace.
-Always pass `--ignore-workspace`:
+
+**Do NOT pass `--ignore-workspace` here** — it used to be required, and is now actively wrong.
+`electron/pnpm-workspace.yaml` makes this directory its own pnpm root, which is what the flag was
+emulating, and that file is the only place pnpm 11 reads `overrides` from (the `pnpm` field in
+`package.json` is ignored with a warning). Those overrides are the security pins for the desktop
+tree: without them `pnpm audit` reports 6 high advisories reachable through electron-builder, and
+`--frozen-lockfile` fails outright with `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH` because the lockfile
+records the overrides the flag just hid. `--dir` alone does the right thing.
 
 ```sh
-pnpm install --ignore-workspace --ignore-scripts --dir electron   # install
+pnpm install --ignore-scripts --dir electron        # install
 pnpm --dir electron test                            # pure config tests (no electron needed)
 pnpm --dir electron typecheck                       # tsc --noEmit
+pnpm audit --audit-level=high --dir electron        # what CI gates on
 
 # Run it (build the web first, from the repo root — the shell serves that dist/):
 pnpm build                                          # → dist/
-pnpm --ignore-workspace --dir electron start        # esbuild → out/, then launch
+pnpm --dir electron start                           # esbuild → out/, then launch
 
 # Point at a dev/staging origin instead of production:
-SS_APP_ORIGIN=http://localhost:4321 pnpm --ignore-workspace --dir electron exec electron .
+SS_APP_ORIGIN=http://localhost:4321 pnpm --dir electron exec electron .
 
-pnpm --ignore-workspace --dir electron dist         # local installer, no publish
+pnpm --dir electron dist                            # local installer, no publish
 ```
 
 Releases are built + published to GitHub Releases by CI on a `v*` tag (see

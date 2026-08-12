@@ -1,18 +1,24 @@
 name: CI & Publish
 
-# Release-only pipeline: rien ne tourne sur un push de branche ni sur une PR — tout part d'un
-# tag de version. Un tag exécute `quality`, puis `publish` (images web + signaling) et `desktop`
-# (installeur Windows) en parallèle.
+# Deux modes, un seul workflow.
+#
+# - **Validation** (push sur master, PR) : le job `quality` seul. Il ne publie rien.
+# - **Release** (tag `v*.*.*`) : `quality`, puis `publish` (images web + signaling) et `desktop`
+#   (installeur Windows) en parallèle.
 #
 # La forme `*.*.*` est délibérée : `v*` déclencherait aussi sur `v1` ou `vnext`, dont
 # electron-builder ne peut pas faire une version valide.
 #
-# Contrepartie assumée : plus aucune validation avant le tag. Le lint, les tests et l'e2e ne
-# tournent plus sur master ni sur les PR, donc une régression ne se découvre qu'au moment de
-# publier. À exécuter en local avant de tagger : `pnpm lint && pnpm typecheck && pnpm test && pnpm e2e`.
+# La validation avant tag avait été retirée. Elle revient parce que le coût était mal placé : sans
+# elle, une régression ne se découvre qu'au `git push --tags`, c'est-à-dire quand les trois
+# artefacts d'une version sont déjà en train de partir et qu'il faut supprimer puis recréer un tag
+# à chaud. Les jobs de publication restent gardés par `startsWith(github.ref, 'refs/tags/')`, donc
+# un push sur master ne publie toujours rien.
 on:
   push:
+    branches: [master]
     tags: ["v*.*.*"]
+  pull_request:
 
 env:
   REGISTRY: ghcr.io
@@ -46,6 +52,21 @@ jobs:
       - name: Security audit (signaling)
         run: pnpm audit --audit-level=high --ignore-workspace --dir signaling
 
+      # Le paquet le plus coûteux à laisser dériver, et le seul qui n'était pas inspecté :
+      # `loopback-capture` est un addon natif tiers chargé dans un processus dont le sandbox est
+      # volontairement désactivé (cf. rendererSecurity dans electron/src/config.ts).
+      #
+      # Pas d'étape d'installation avant : `pnpm audit` lit le lockfile, pas node_modules (vérifié
+      # sur un dossier ne contenant que package.json + pnpm-lock.yaml). Installer electron ici
+      # coûterait plusieurs minutes de runner pour zéro information supplémentaire.
+      #
+      # Pas de `--ignore-workspace` non plus, et c'est la conséquence directe de
+      # electron/pnpm-workspace.yaml : ce fichier fait de electron/ sa propre racine pnpm — donc le
+      # flag n'a plus rien à contourner — et il porte les `overrides`. Le passer masquerait ces
+      # overrides et l'audit repartirait sur les versions vulnérables.
+      - name: Security audit (desktop)
+        run: pnpm audit --audit-level=high --dir electron
+
       - name: Type check
         run: pnpm run typecheck
 
@@ -72,9 +93,10 @@ jobs:
 
   publish:
     needs: quality
-    # Plus de garde de ref : le workflow ne se déclenche que sur un tag de version, donc les
-    # images web/signaling se publient avec la release desktop — les trois artefacts d'une
-    # version sortent ensemble.
+    # La garde de ref revient avec le déclencheur master/PR : `quality` doit tourner sur chaque
+    # push, la publication non. Sur un tag, les images web/signaling partent avec la release
+    # desktop — les trois artefacts d'une version sortent ensemble.
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -105,7 +127,13 @@ jobs:
         uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
         with:
           images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}
+          # `type=semver` est ce qui rend un rollback possible : sans lui, revenir à la version
+          # précédente demandait de retrouver le SHA du commit correspondant dans le log, au pire
+          # moment pour le faire. On publie les deux formes — `0.4.3` et `0.4` — plus `latest`
+          # (ce que consomme docker-compose.yml) et `sha-` (traçabilité vers le commit exact).
           tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest
             type=sha,prefix=sha-
 
@@ -128,8 +156,9 @@ jobs:
   # the auto-updater) to the matching GitHub Release.
   desktop:
     needs: quality
-    # Pas de garde : seul un tag déclenche le workflow. L'étape ci-dessous vérifie en revanche
-    # que ce tag correspond bien à la version de electron/package.json.
+    # Même garde que `publish` : un push sur master valide, il ne publie pas. L'étape ci-dessous
+    # vérifie en plus que le tag correspond bien à la version de electron/package.json.
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: windows-latest
     permissions:
       contents: write
@@ -161,13 +190,17 @@ jobs:
       - name: Build web
         run: pnpm run build
 
-      # Standalone sub-project with its own lockfile (like signaling) — --ignore-workspace.
-      # --ignore-scripts: electron-builder pulls electron-winstaller, whose install script pnpm
-      # refuses to run (allowBuilds only lives in pnpm-workspace.yaml, which --ignore-workspace
-      # ignores) — it would fail the job. Nothing here needs a lifecycle script: Electron fetches
-      # its binary on first run and electron-builder downloads its own toolchain.
+      # Standalone sub-project with its own lockfile (like signaling). `--ignore-workspace` is gone:
+      # electron/pnpm-workspace.yaml now makes this directory its own pnpm root, which is what the
+      # flag was emulating — and unlike the flag it can carry `overrides`, which is where the
+      # security pins for the desktop tree live. Keeping the flag would drop them and break
+      # --frozen-lockfile outright (ERR_PNPM_LOCKFILE_CONFIG_MISMATCH: the lockfile records them).
+      #
+      # --ignore-scripts stays: electron-builder pulls electron-winstaller, whose install script
+      # pnpm refuses to run — it would fail the job. Nothing here needs a lifecycle script: Electron
+      # fetches its binary on first run and electron-builder downloads its own toolchain.
       - name: Install dependencies (desktop)
-        run: pnpm install --frozen-lockfile --ignore-workspace --ignore-scripts --dir electron
+        run: pnpm install --frozen-lockfile --ignore-scripts --dir electron
 
       # Build and upload are split on purpose. electron-builder's own GitHub publisher reported
       # success while only the .blockmap landed on the release — no installer, no latest.yml —
@@ -175,7 +208,7 @@ jobs:
       # in the log and fails the job when an artefact is missing, instead of shipping a release
       # that looks fine and cannot be installed or updated.
       - name: Build desktop installer
-        run: pnpm --ignore-workspace --dir electron dist
+        run: pnpm --dir electron dist
 
       - name: Show built artefacts
         run: Get-ChildItem electron/release | Select-Object Name, Length | Format-Table -AutoSize
@@ -210,5 +243,14 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "gh release create failed ($LASTEXITCODE)" }
           }
 
-          gh release upload $tag $exe.FullName $map.FullName $yml.FullName --clobber
+          # Checksum publié à côté de l'installeur. À dire honnêtement : l'exécutable n'est PAS
+          # signé, et un checksum hébergé sur la même release que le binaire ne protège pas d'une
+          # release compromise — les deux tomberaient ensemble. Ce qu'il donne : de quoi vérifier
+          # un téléchargement tronqué ou servi par un miroir, et une valeur de référence citable.
+          # Il ne remplace pas un certificat de signature de code, il comble le vide en attendant.
+          $sum = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower()
+          "$sum  $($exe.Name)" | Out-File -FilePath electron/release/SHA256SUMS.txt -Encoding ascii
+          Write-Host "SHA256 $sum"
+
+          gh release upload $tag $exe.FullName $map.FullName $yml.FullName electron/release/SHA256SUMS.txt --clobber
           if ($LASTEXITCODE -ne 0) { throw "gh release upload failed ($LASTEXITCODE)" }

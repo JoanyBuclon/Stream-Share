@@ -1,0 +1,20 @@
+# Makes electron/ its own pnpm root, which is the only place pnpm 11 reads `overrides` from — the
+# `pnpm.overrides` field in package.json is no longer read (it warns and ignores it).
+#
+# Why this file has to exist at all: this package is installed on its own, with its own lockfile
+# (like signaling/), so the ROOT pnpm-workspace.yaml — and every override in it — never applies
+# here. The transitive advisories the root had already pinned were therefore unpinned in the
+# desktop tree the whole time, and nothing said so because `pnpm audit` was never run on it:
+# 6 high (brace-expansion ×3, fast-uri, js-yaml), all reachable through electron-builder.
+#
+# Keep in step with the root pnpm-workspace.yaml. There is no way to share one list across a
+# separate-lockfile boundary; the duplication is the cost of the split.
+overrides:
+  # Three ranges, not one: brace-expansion ships 1.x, 2.x and 4.x/5.x concurrently in this tree
+  # (glob, minimatch and electron-builder each pull a different major), and a single override would
+  # drag every one of them onto the same major.
+  brace-expansion@<1.1.18: ^1.1.18
+  brace-expansion@>=2.0.0 <2.1.4: ^2.1.4
+  brace-expansion@>=4.0.0 <5.0.9: ^5.0.9
+  fast-uri@>=3.0.0 <3.1.5: ^3.1.5
+  js-yaml@>=4.0.0 <4.3.1: ^4.3.1

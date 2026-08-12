@@ -405,7 +405,15 @@ export function contentSecurityPolicy(appOrigin: string): string {
     "default-src 'self'",
     `connect-src 'self' ${wsOrigin(appOrigin)}`,
     "media-src 'self' blob:",
-    "script-src 'self' 'unsafe-inline'",
+    // No 'unsafe-inline' here, and it is not an aspiration — the build emits none. Measured on
+    // dist/index.html and dist/download/index.html: zero <script> with a body, zero on* handlers.
+    // Astro's only script is external and content-hashed. Carrying the permission bought nothing
+    // and cost the difference between an XSS that is contained and one that executes — in the one
+    // renderer that deliberately runs without an OS sandbox (see rendererSecurity).
+    "script-src 'self'",
+    // 'unsafe-inline' STAYS here, and removing it would break the page: Astro emits a real inline
+    // <style> block (2511 bytes, the @font-face declarations) and viewer.ts writes element .style
+    // directly. Verified before touching the line above — the two directives are not interchangeable.
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data:",
     "font-src 'self'",
@@ -423,5 +431,36 @@ export function isInternalUrl(url: string): boolean {
     return new URL(url).protocol === 'app:';
   } catch {
     return false;
+  }
+}
+
+/** Schemes the shell will hand to `shell.openExternal`. Everything else is dropped in silence.
+ *
+ *  `http:` as well as `https:` because a dev/staging shell runs against an http origin
+ *  (`SS_APP_ORIGIN=http://localhost:4321`), and `mailto:` because that is the one non-web scheme
+ *  the product has any reason to open. */
+const EXTERNAL_SCHEMES = new Set(['https:', 'http:', 'mailto:']);
+
+/**
+ * Whether a URL may be handed to `shell.openExternal`.
+ *
+ * **"Not internal" was being treated as "safe to open", and those are not the same set.**
+ * `isInternalUrl` answers only "is this app://", so `file:`, `smb:`, `ms-msdt:` and every
+ * third-party protocol handler installed on the machine fell through to `openExternal` — where
+ * `file:///C:/…/payload.exe` is not a navigation, it is an execution, performed by us with no
+ * prompt.
+ *
+ * It matters here more than in a typical Electron app, and the reason is written two functions up:
+ * `rendererSecurity` turns the OS sandbox OFF so the HDR addon can live in the preload, and names
+ * the vector — what the renderer *parses*: SDP, ICE candidates and `control` messages from
+ * arbitrary viewers. This is the exit that vector would reach for. An allow-list is what closes it;
+ * a deny-list of known-bad schemes would not, since the interesting ones are whatever happens to be
+ * registered on the victim's machine.
+ */
+export function isSafeExternalUrl(url: string): boolean {
+  try {
+    return EXTERNAL_SCHEMES.has(new URL(url).protocol);
+  } catch {
+    return false; // unparseable is not openable
   }
 }

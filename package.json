@@ -9,7 +9,7 @@
     "dev": "astro dev",
     "back": "node --watch signaling/src/index.js",
     "//desktop": "Rebuilds the Astro front FIRST: the shell serves dist/, and the electron start script only bundles electron/src. Without this the app silently runs a stale renderer.",
-    "desktop": "pnpm build && pnpm --ignore-workspace --dir electron start",
+    "desktop": "pnpm build && pnpm --dir electron start",
     "build": "astro build",
     "preview": "astro preview",
     "astro": "astro",

@@ -1,7 +1,13 @@
+# Rollback: the pipeline now publishes a semver tag alongside `latest` (docker-publish.yml), so
+# pinning either image to e.g. `:0.4.2` and re-running `docker compose up -d` reverts that service.
+# Previously only `latest` and `sha-<commit>` existed, which made a rollback a hunt through the
+# commit log at the exact moment nobody has time for one.
 services:
   web:
     image: ghcr.io/joanybuclon/stream-share-web:latest
     container_name: stream-share-web
+    # The front is static files served by nginx; anything above this is a leak, not load.
+    mem_limit: 128m
     networks:
       - web
     labels:
@@ -23,6 +29,13 @@ services:
   signaling:
     image: ghcr.io/joanybuclon/stream-share-signaling:latest
     container_name: stream-share-signaling
+    # The in-process caps (MAX_SOCKETS_PER_IP, MAX_ROOMS) bound what one client and what the whole
+    # registry can hold; this is the backstop under them. All state is in memory, so an OOM kills
+    # every live share at once — a hard ceiling that restarts the container is preferable to one
+    # that takes the host down with it. 256 MB is a generous guess, not a measurement: the registry
+    # holds only ids and codes, and no media transits. Revisit against real RSS at MAX_ROOMS if the
+    # container ever restarts on its own.
+    mem_limit: 256m
     networks:
       - web
     environment:
