@@ -5,6 +5,25 @@ copyright: © Joany Buclon
 directories:
   output: release
 
+# Chromium ships 55 locale .pak files, 47 MB, for a shell whose only UI strings are ours. Pruning
+# them is electron-builder's own job on Windows too (ElectronFramework.removeUnusedLanguagesIfNeeded)
+# — no afterPack needed. Matching is exact-or-prefix, so "en-US" keeps en-US.pak and drops en-GB.
+# Chromium falls back to en-US for anything it can't find, so the worst case is an English context
+# menu, never a crash. Add a language here the day the app speaks one.
+electronLanguages:
+  - en-US
+  - fr
+
+# LZMA at its highest setting. Costs a few minutes of Windows runner per release, saves ~8 MB on
+# every single download — and the installer is the one artefact a stranger judges us on.
+compression: maximum
+
+# Moves LICENSES.chromium.html (19.4 MB of third-party notices) out of the installed app and into
+# release/, where the release job uploads it next to the installer and /download links it. The
+# notices still travel with the distribution — the BSD/MIT terms require exactly that — they just
+# stop costing 19 MB on every user's disk forever.
+afterPack: ./build/after-pack.cjs
+
 # esbuild output + the manifest, and nothing else. The negation matters: electron-builder walks
 # up to the repo root and pulls in ITS production dependencies (astro, tailwindcss and their
 # whole tree — 7300 files, 118 MB) which have no business in a desktop app. Everything we need

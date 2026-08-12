@@ -231,8 +231,13 @@ jobs:
           $exe = Get-ChildItem electron/release/*.exe -ErrorAction SilentlyContinue
           $map = Get-ChildItem electron/release/*.blockmap -ErrorAction SilentlyContinue
           $yml = Get-ChildItem electron/release/latest.yml -ErrorAction SilentlyContinue
+          # Put there by electron/build/after-pack.cjs, which pulls it OUT of the installed app to
+          # save 19 MB on every disk. The notices then only exist here, so a missing file means the
+          # release would ship Chromium without its BSD/MIT attributions. Fail, don't publish.
+          $lic = Get-ChildItem electron/release/LICENSES.chromium.html -ErrorAction SilentlyContinue
           if (-not $exe) { throw "no installer in electron/release - nothing to publish" }
           if (-not $yml) { throw "no latest.yml - the auto-updater would be blind" }
+          if (-not $lic) { throw "no LICENSES.chromium.html - see electron/build/after-pack.cjs" }
 
           gh release view $tag 1>$null 2>$null
           if ($LASTEXITCODE -ne 0) {
@@ -252,5 +257,5 @@ jobs:
           "$sum  $($exe.Name)" | Out-File -FilePath electron/release/SHA256SUMS.txt -Encoding ascii
           Write-Host "SHA256 $sum"
 
-          gh release upload $tag $exe.FullName $map.FullName $yml.FullName electron/release/SHA256SUMS.txt --clobber
+          gh release upload $tag $exe.FullName $map.FullName $yml.FullName $lic.FullName electron/release/SHA256SUMS.txt --clobber
           if ($LASTEXITCODE -ne 0) { throw "gh release upload failed ($LASTEXITCODE)" }

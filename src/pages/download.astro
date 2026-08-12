@@ -18,6 +18,11 @@ const WINDOWS_INSTALLER_URL = `${REPO_URL}/releases/download/v${version}/StreamS
 // Published next to the installer by the release job. Same caveat as the URL above: this 404s in
 // the window between bumping the version and the Release going up.
 const CHECKSUMS_URL = `${REPO_URL}/releases/download/v${version}/SHA256SUMS.txt`;
+// Chromium's third-party notices. They used to sit inside the installed app as a 19 MB file nobody
+// opened; electron/build/after-pack.cjs now publishes them here instead. This link is not a nicety —
+// it is how the BSD/MIT attributions keep travelling with the distribution, so it must not be
+// dropped without putting the file back in the installer.
+const NOTICES_URL = `${REPO_URL}/releases/download/v${version}/LICENSES.chromium.html`;
 
 // Mono badge + copy per benefit, in the mockup's order.
 //
@@ -209,7 +214,15 @@ const platforms = [
             >
               SHA256SUMS.txt
             </a>{' '}
-            with <span class='text-muted-2'>Get-FileHash</span>.
+            with <span class='text-muted-2'>Get-FileHash</span>. Built on Electron —{' '}
+            <a
+              href={NOTICES_URL}
+              target='_blank'
+              rel='noopener noreferrer'
+              class='cursor-pointer text-muted-2 underline underline-offset-2'
+            >
+              third-party notices
+            </a>.
           </p>
         </div>
       </main>
